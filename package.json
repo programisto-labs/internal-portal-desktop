@@ -4,16 +4,25 @@
   "description": "Desktop app for Internal portal (pointing tomy.programisto.fr)",
   "main": "src/main.js",
   "private": true,
+  "author": "Programisto <tech@programisto.fr>",
   "scripts": {
     "start": "electron .",
-    "dev": "electron .",
+    "dev": "NODE_ENV=development electron .",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
+    "build:mac:signed": "CSC_IDENTITY_AUTO_DISCOVERY=true electron-builder --mac",
+    "build:mac:signed:keychain": "CSC_IDENTITY_AUTO_DISCOVERY=true CSC_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db electron-builder --mac",
+    "build:mac:p12": "CSC_LINK=\"$(pwd)/Certificates.p12\" electron-builder --mac",
+    "test:quarantine": "bash scripts/test-quarantine.sh",
+    "debug:signing": "bash scripts/debug-signing.sh",
+    "fix:quarantine": "bash scripts/fix-quarantine.sh",
+    "install:mac": "bash scripts/install-from-dmg.sh",
+    "build:mac:internal": "bash scripts/build-and-package.sh",
     "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux"
   },
-  "dependencies": {},
   "devDependencies": {
+    "@electron/osx-sign": "^2.3.0",
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0"
   },

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connection error – Internal Portal</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #0a0a0a;
+      color: #e5e5e5;
+    }
+    .title-bar {
+      height: 56px;
+      display: flex;
+      align-items: center;
+      padding: 0 8px 0 12px;
+      -webkit-app-region: drag;
+      flex-shrink: 0;
+    }
+    .window-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      -webkit-app-region: no-drag;
+    }
+    .window-controls.mac { gap: 6px; }
+    .window-controls.mac button {
+      width: 12px;
+      height: 12px;
+      border: none;
+      border-radius: 50%;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .window-controls.mac button:hover { opacity: 0.9; }
+    .window-controls.mac button svg {
+      width: 10px;
+      height: 10px;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .window-controls.mac button:hover svg { opacity: 1; }
+    .window-controls.mac .btn-close { background: #ff5f57; color: #4d0000; }
+    .window-controls.mac .btn-minimize { background: #febc2e; color: #995700; }
+    .window-controls.mac .btn-maximize { background: #28c840; color: #006500; }
+    .window-controls.win button {
+      width: 24px;
+      height: 24px;
+      border: none;
+      border-radius: 4px;
+      padding: 0;
+      background: transparent;
+      color: #e5e5e5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .window-controls.win button:hover { background: rgba(255,255,255,0.1); }
+    .window-controls.win .btn-close:hover { background: rgba(239,68,68,0.3); color: #f87171; }
+    .window-controls.win button svg { width: 14px; height: 14px; }
+    .content {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      max-width: 420px;
+      text-align: center;
+    }
+    .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      opacity: 0.9;
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin: 0 0 12px;
+      color: #fff;
+    }
+    .message {
+      font-size: 0.95rem;
+      line-height: 1.5;
+      color: #a3a3a3;
+      margin: 0 0 24px;
+    }
+    .detail {
+      font-size: 0.8rem;
+      color: #737373;
+      margin-bottom: 24px;
+      word-break: break-all;
+    }
+    .auto-retry {
+      font-size: 0.8rem;
+      color: #525252;
+      margin-top: 16px;
+    }
+    a {
+      display: inline-block;
+      padding: 10px 20px;
+      background: #2563eb;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 500;
+      font-size: 0.9rem;
+      transition: background 0.15s;
+    }
+    a:hover {
+      background: #1d4ed8;
+    }
+  </style>
+</head>
+<body>
+  <div class="title-bar">
+    <div class="window-controls" id="window-controls">
+      <button type="button" class="btn-close" aria-label="Close" id="btn-close">
+        <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 1l8 8M9 1L1 9"/></svg>
+      </button>
+      <button type="button" class="btn-minimize" aria-label="Minimize" id="btn-minimize">
+        <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 5h8"/></svg>
+      </button>
+      <button type="button" class="btn-maximize" aria-label="Maximize" id="btn-maximize">
+        <svg class="icon-maximize" viewBox="0 0 10 10" fill="currentColor"><rect x="0" y="0" width="8" height="8" rx="0.5"/></svg>
+        <svg class="icon-restore" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M2 4V2h2M8 6v2H6M6 2h2v2M2 6H0v2"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="content">
+  <div class="card">
+    <div class="icon" aria-hidden="true">⚠️</div>
+    <h1>Couldn’t load the portal</h1>
+    <p class="message" id="message">The page couldn’t be loaded. Check your internet connection and try again.</p>
+    <p class="detail" id="detail"></p>
+    <a href="retry://reload">Try again</a>
+    <p class="auto-retry">We’ll try again automatically every few seconds.</p>
+  </div>
+  </div>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var code = params.get('code') || '';
+      var description = params.get('description') || '';
+      var url = params.get('url') || '';
+      var elDetail = document.getElementById('detail');
+      var parts = [];
+      if (description) parts.push(description);
+      if (url) parts.push(url);
+      if (code) parts.push('Error code: ' + code);
+      elDetail.textContent = parts.join(' · ');
+      if (!elDetail.textContent) elDetail.style.display = 'none';
+    })();
+
+    (function () {
+      var api = typeof window !== 'undefined' ? window.programistoDesktop : undefined;
+      if (!api) return;
+      var platform = api.platform || 'win32';
+      var isMac = platform === 'darwin';
+      var controls = document.getElementById('window-controls');
+      var btnClose = document.getElementById('btn-close');
+      var btnMinimize = document.getElementById('btn-minimize');
+      var btnMaximize = document.getElementById('btn-maximize');
+      var iconMax = btnMaximize && btnMaximize.querySelector('.icon-maximize');
+      var iconRestore = btnMaximize && btnMaximize.querySelector('.icon-restore');
+
+      controls.classList.add(isMac ? 'mac' : 'win');
+
+      function updateMaximizeIcon() {
+        if (!api.isMaximized || !iconMax || !iconRestore) return;
+        api.isMaximized().then(function (maximized) {
+          iconMax.style.display = maximized ? 'none' : 'block';
+          iconRestore.style.display = maximized ? 'block' : 'none';
+        });
+      }
+
+      if (btnClose) btnClose.addEventListener('click', function () { api.close(); });
+      if (btnMinimize) btnMinimize.addEventListener('click', function () { api.minimize(); });
+      if (btnMaximize) {
+        btnMaximize.addEventListener('click', function () {
+          api.maximize();
+          setTimeout(updateMaximizeIcon, 100);
+        });
+      }
+      updateMaximizeIcon();
+      window.addEventListener('resize', updateMaximizeIcon);
+    })();
+  </script>
+</body>
+</html>
