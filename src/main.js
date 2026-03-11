@@ -3,7 +3,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 
-// Use product name in macOS menu bar (instead of "Electron")
+// Set app name as early as possible so macOS menu bar shows "Internal Portal" instead of "Electron" in dev
 app.setName('Internal Portal');
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -187,6 +187,8 @@ function registerWindowIPC() {
 }
 
 app.whenReady().then(() => {
+  // Use product name in macOS menu bar (instead of "Electron") — must be set when ready in dev
+  app.setName('Internal Portal');
   registerWindowIPC();
   nativeTheme.on('updated', updateAllIcons);
   createWindow();
