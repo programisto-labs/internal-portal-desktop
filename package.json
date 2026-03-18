@@ -1,51 +1,65 @@
 {
-  "name": "internal-portal-desktop",
+  "name": "lasco-desktop",
   "version": "1.0.0",
-  "description": "Desktop app for Internal portal (pointing tomy.programisto.fr)",
+  "description": "Lasco — desktop app for the Lasco web platform (my.programisto.fr)",
   "main": "src/main.js",
   "private": true,
-  "author": "Programisto <tech@programisto.fr>",
+  "author": "Lasco / Programisto <tech@programisto.fr>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/programisto-labs/internal-portal-desktop.git"
+  },
   "scripts": {
+    "icons:pad": "node scripts/pad-dock-icon.js",
+    "prebuild": "node scripts/pad-dock-icon.js",
     "start": "electron .",
     "dev": "NODE_ENV=development electron .",
     "build": "electron-builder",
-    "build:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac",
-    "build:mac:signed": "CSC_IDENTITY_AUTO_DISCOVERY=true electron-builder --mac",
-    "build:mac:signed:keychain": "CSC_IDENTITY_AUTO_DISCOVERY=true CSC_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db electron-builder --mac",
-    "build:mac:p12": "CSC_LINK=\"$(pwd)/Certificates.p12\" electron-builder --mac",
+    "build:mac": "node scripts/pad-dock-icon.js && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac",
+    "build:mac:signed": "node scripts/pad-dock-icon.js && CSC_IDENTITY_AUTO_DISCOVERY=true electron-builder --mac",
+    "build:mac:signed:keychain": "node scripts/pad-dock-icon.js && CSC_IDENTITY_AUTO_DISCOVERY=true CSC_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db electron-builder --mac",
+    "build:mac:dmg": "node scripts/pad-dock-icon.js && CSC_IDENTITY_AUTO_DISCOVERY=true CSC_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db CSC_NAME='Programisto (48UZ7QZ7W5)' electron-builder --mac dmg",
+    "build:mac:p12": "node scripts/pad-dock-icon.js && CSC_LINK=\"$(pwd)/Certificates.p12\" electron-builder --mac",
     "test:quarantine": "bash scripts/test-quarantine.sh",
     "debug:signing": "bash scripts/debug-signing.sh",
     "fix:quarantine": "bash scripts/fix-quarantine.sh",
-    "install:mac": "bash scripts/install-from-dmg.sh",
+    "install:mac": "bash scripts/install-lasco-macos.sh",
     "build:mac:internal": "bash scripts/build-and-package.sh",
-    "build:win": "electron-builder --win",
-    "build:linux": "electron-builder --linux"
+    "build:win": "node scripts/pad-dock-icon.js && electron-builder --win",
+    "build:linux": "node scripts/pad-dock-icon.js && electron-builder --linux",
+    "publish:mac": "node scripts/pad-dock-icon.js && electron-builder --mac --publish always",
+    "publish:win": "node scripts/pad-dock-icon.js && electron-builder --win --publish always",
+    "publish:all": "node scripts/pad-dock-icon.js && electron-builder --mac --win --publish always"
   },
   "devDependencies": {
     "@electron/osx-sign": "^2.3.0",
     "electron": "^33.0.0",
-    "electron-builder": "^25.0.0"
+    "electron-builder": "^25.0.0",
+    "sharp": "^0.34.5"
   },
   "build": {
-    "appId": "fr.programisto.internal-portal",
-    "productName": "Internal Portal",
+    "appId": "fr.lasco.desktop",
+    "productName": "Lasco",
     "directories": {
       "output": "dist"
     },
     "files": [
       "src/**/*",
-      "build/icon-white-nobg.png",
-      "build/icon-black.png"
+      "build/icon.png",
+      "build/lasco-icon-transparent.png"
     ],
     "mac": {
-      "icon": "build/icon-white-nobg.png",
+      "icon": "build/icon.png",
       "category": "public.app-category.business",
       "target": [
         "dmg",
         "zip"
       ],
       "hardenedRuntime": true,
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
     },
     "dmg": {
       "contents": [
@@ -66,7 +80,7 @@
         "nsis",
         "portable"
       ],
-      "icon": "build/icon-white-nobg.png"
+      "icon": "build/icon.png"
     },
     "nsis": {
       "oneClick": false,
@@ -77,8 +91,18 @@
         "AppImage",
         "deb"
       ],
-      "icon": "build/icon-white-nobg.png",
+      "icon": "build/icon.png",
       "category": "Office"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "programisto-labs",
+        "repo": "internal-portal-desktop"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
   }
 }

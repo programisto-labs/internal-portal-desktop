@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the macOS app (unsigned) and print instructions for internal deployment.
-# Share the DMG with your team; after they install, they run fix-quarantine.sh.
+# Share the DMG with your team; after they install Lasco, they run fix-quarantine.sh.
 
 set -e
 
@@ -28,10 +28,10 @@ else
   echo "   (DMG is in $DMG_DIR)"
 fi
 echo ""
-echo "2. Put the DMG and scripts/install-from-dmg.sh in the same folder and share with users."
+echo "2. Put the DMG and scripts/install-lasco-macos.sh in the same folder and share with users."
 echo ""
 echo "3. Users run once (no need to open the DMG manually):"
-echo "   bash install-from-dmg.sh"
+echo "   bash install-lasco-macos.sh"
 echo "   (or from this repo: npm run install:mac)"
-echo "   This installs the app to Applications and removes the quarantine message."
+echo "   This installs Lasco to Applications and removes the quarantine message."
 echo ""

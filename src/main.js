@@ -1,15 +1,151 @@
-const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeTheme, dialog } = require('electron');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { autoUpdater } = require('electron-updater');
 
-// Set app name as early as possible so macOS menu bar shows "Internal Portal" instead of "Electron" in dev
-app.setName('Internal Portal');
+// Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
+app.setName('Lasco');
 
 const isDev = process.env.NODE_ENV === 'development';
 const PORTAL_URL = isDev ? 'http://localhost:3001' : 'https://my.programisto.fr';
 
 const AUTO_RETRY_INTERVAL_MS = 5000;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+const updateState = {
+  status: 'idle',
+  currentVersion: app.getVersion(),
+  availableVersion: null,
+  downloadedVersion: null,
+  progressPercent: 0,
+  error: null
+};
+
+let updateCheckIntervalId = null;
+
+function buildUpdateSnapshot() {
+  return {
+    ...updateState
+  };
+}
+
+function setUpdateState(partialState) {
+  Object.assign(updateState, partialState);
+  const snapshot = buildUpdateSnapshot();
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) {
+      window.webContents.send('update-status-changed', snapshot);
+    }
+  }
+}
+
+async function promptRestartForUpdate(info) {
+  const versionLabel = info?.version || info?.releaseName || 'a new version';
+  const response = await dialog.showMessageBox({
+    type: 'info',
+    buttons: ['Restart now', 'Later'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Lasco Update',
+    message: `Version ${versionLabel} has been downloaded.`,
+    detail: 'Restart the app now to install the update.'
+  });
+
+  if (response.response === 0) {
+    autoUpdater.quitAndInstall(false, true);
+  }
+}
+
+function isUpdaterEnabled() {
+  return app.isPackaged;
+}
+
+async function checkForUpdates() {
+  if (!isUpdaterEnabled()) return;
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (error) {
+    setUpdateState({
+      status: 'error',
+      error: error?.message || 'Update check failed.'
+    });
+  }
+}
+
+function setupAutoUpdater() {
+  if (!isUpdaterEnabled()) {
+    setUpdateState({
+      status: 'disabled'
+    });
+    return;
+  }
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => {
+    setUpdateState({
+      status: 'checking',
+      error: null
+    });
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    setUpdateState({
+      status: 'downloading',
+      availableVersion: info?.version || null,
+      error: null
+    });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    setUpdateState({
+      status: 'downloading',
+      progressPercent: Number(progress?.percent || 0)
+    });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    setUpdateState({
+      status: 'idle',
+      availableVersion: null,
+      downloadedVersion: null,
+      progressPercent: 0,
+      error: null
+    });
+  });
+
+  autoUpdater.on('update-downloaded', async (info) => {
+    setUpdateState({
+      status: 'downloaded',
+      downloadedVersion: info?.version || null,
+      progressPercent: 100,
+      error: null
+    });
+
+    try {
+      await promptRestartForUpdate(info);
+    } catch (error) {
+      setUpdateState({
+        status: 'error',
+        error: error?.message || 'Could not display update prompt.'
+      });
+    }
+  });
+
+  autoUpdater.on('error', (error) => {
+    setUpdateState({
+      status: 'error',
+      error: error?.message || 'Auto-update failed.'
+    });
+  });
+
+  void checkForUpdates();
+  updateCheckIntervalId = setInterval(() => {
+    void checkForUpdates();
+  }, UPDATE_CHECK_INTERVAL_MS);
+}
 
 function checkPortalReachable() {
   return new Promise((resolve) => {
@@ -26,11 +162,11 @@ function checkPortalReachable() {
   });
 }
 
-const ICON_DARK = path.join(__dirname, '..', 'build', 'icon-white-blackbg.png');
-const ICON_LIGHT = path.join(__dirname, '..', 'build', 'icon-black.png');
+/** Lasco app icon (same assets as web: lasco-favicon.png). */
+const APP_ICON = path.join(__dirname, '..', 'build', 'icon.png');
 
 function getIconPath() {
-  return nativeTheme.shouldUseDarkColors ? ICON_DARK : ICON_LIGHT;
+  return APP_ICON;
 }
 
 function setIconSafe(winOrDock, iconPath) {
@@ -54,10 +190,15 @@ function createWindow() {
     height: 800,
     minWidth: 1280,
     minHeight: 720,
-    title: 'Programisto Portal',
+    title: 'Lasco',
     frame: false,
     show: true,
     backgroundColor: '#000000',
+    /* Native close / minimize / zoom — visible even if the web preload bridge is late or missing */
+    ...(process.platform === 'darwin' && {
+      titleBarStyle: 'hidden',
+      trafficLightPosition: { x: 16, y: 18 },
+    }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -103,7 +244,12 @@ function createWindow() {
         stopAutoRetry();
         if (!win.isDestroyed()) {
           win.loadURL(PORTAL_URL, {
-            userAgent: win.webContents.getUserAgent() + ' ProgramistoDesktop/1.0'
+            userAgent:
+              win.webContents.getUserAgent() +
+              ' LascoDesktop/' +
+              app.getVersion() +
+              ' lasco-desktop/' +
+              app.getVersion()
           });
         }
       }
@@ -132,14 +278,24 @@ function createWindow() {
       stopAutoRetry();
       if (!win.isDestroyed()) {
         win.loadURL(PORTAL_URL, {
-          userAgent: win.webContents.getUserAgent() + ' ProgramistoDesktop/1.0'
+          userAgent:
+              win.webContents.getUserAgent() +
+              ' LascoDesktop/' +
+              app.getVersion() +
+              ' lasco-desktop/' +
+              app.getVersion()
         });
       }
     }
   });
 
   win.loadURL(PORTAL_URL, {
-    userAgent: win.webContents.getUserAgent() + ' ProgramistoDesktop/1.0'
+    userAgent:
+              win.webContents.getUserAgent() +
+              ' LascoDesktop/' +
+              app.getVersion() +
+              ' lasco-desktop/' +
+              app.getVersion()
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -184,12 +340,23 @@ function registerWindowIPC() {
     const win = BrowserWindow.fromWebContents(event.sender);
     return win && !win.isDestroyed() && win.isMaximized();
   });
+  ipcMain.handle('update-get-status', () => buildUpdateSnapshot());
+  ipcMain.handle('update-check-now', async () => {
+    await checkForUpdates();
+    return buildUpdateSnapshot();
+  });
+  ipcMain.handle('update-install-now', () => {
+    if (updateState.status !== 'downloaded') return false;
+    autoUpdater.quitAndInstall(false, true);
+    return true;
+  });
 }
 
 app.whenReady().then(() => {
   // Use product name in macOS menu bar (instead of "Electron") — must be set when ready in dev
-  app.setName('Internal Portal');
+  app.setName('Lasco');
   registerWindowIPC();
+  setupAutoUpdater();
   nativeTheme.on('updated', updateAllIcons);
   createWindow();
 
@@ -203,5 +370,12 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+app.on('before-quit', () => {
+  if (updateCheckIntervalId) {
+    clearInterval(updateCheckIntervalId);
+    updateCheckIntervalId = null;
   }
 });

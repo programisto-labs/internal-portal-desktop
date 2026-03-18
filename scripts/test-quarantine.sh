@@ -6,8 +6,8 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-DIST_APP="$PROJECT_DIR/dist/mac-arm64/Internal Portal.app"
-TEST_APP="/tmp/Internal-Portal-Quarantine-Test.app"
+DIST_APP="$PROJECT_DIR/dist/mac-arm64/Lasco.app"
+TEST_APP="/tmp/Lasco-Quarantine-Test.app"
 
 if [[ ! -d "$DIST_APP" ]]; then
   echo "Built app not found at: $DIST_APP"

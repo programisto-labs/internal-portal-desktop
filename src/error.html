@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Connection error – Internal Portal</title>
+  <title>Connection error – Lasco</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -22,6 +22,9 @@
       padding: 0 8px 0 12px;
       -webkit-app-region: drag;
       flex-shrink: 0;
+    }
+    .title-bar.native-macos-chrome {
+      padding-left: 100px;
     }
     .window-controls {
       display: flex;
@@ -166,7 +169,14 @@
     })();
 
     (function () {
-      var api = typeof window !== 'undefined' ? window.programistoDesktop : undefined;
+      var api = typeof window !== 'undefined' ? (window.lascoDesktop || window.programistoDesktop) : undefined;
+      if (api && api.windowControlsMode === 'native') {
+        var bar = document.querySelector('.title-bar');
+        var ctr = document.getElementById('window-controls');
+        if (ctr) ctr.style.display = 'none';
+        if (bar) bar.classList.add('native-macos-chrome');
+        return;
+      }
       if (!api) return;
       var platform = api.platform || 'win32';
       var isMac = platform === 'darwin';

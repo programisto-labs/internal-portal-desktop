@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
-# Install Internal Portal from a .dmg: download from GitHub release, mount, copy to Applications, remove quarantine.
+# Install Lasco from a .dmg: download from GitHub release, mount, copy to Applications, remove quarantine.
 #
 # Usage:
-#   bash install-from-dmg.sh
-#     Downloads the latest DMG from GitHub releases and installs.
-#   bash install-from-dmg.sh /path/to/file.dmg
-#     Uses the given local DMG file.
-#   bash install-from-dmg.sh https://...
-#     Downloads from the given URL, then installs.
+#   bash scripts/install-lasco-macos.sh
+#   bash scripts/install-lasco-macos.sh /path/to/file.dmg
+#   bash scripts/install-lasco-macos.sh https://...
 
 set -e
 
-# GitHub release DMG URL. Override with INTERNAL_PORTAL_DMG_URL env var if needed.
-DEFAULT_DMG_URL="${INTERNAL_PORTAL_DMG_URL:-https://github.com/programisto-labs/internal-portal-desktop/releases/download/v1.0.0/Internal.Portal-1.0.0-arm64.dmg}"
+# GitHub release DMG URL. Override with LASCO_DESKTOP_DMG_URL if needed.
+DEFAULT_DMG_URL="${LASCO_DESKTOP_DMG_URL:-https://github.com/programisto-labs/internal-portal-desktop/releases/download/v1.0.0/Lasco-1.0.0-arm64.dmg}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_NAME="Internal Portal.app"
+APP_NAME="Lasco.app"
 APPLICATIONS="/Applications"
 TEMP_DMG=""
 MOUNT_POINT=""
@@ -30,12 +27,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Resolve DMG: explicit arg (URL or path), else find .dmg in script dir, then current dir, else default URL
 DMG_PATH=""
 if [[ -n "$1" ]]; then
   if [[ "$1" == http://* || "$1" == https://* ]]; then
     echo "Downloading from $1 ..."
-    TEMP_DMG=$(mktemp -t InternalPortal.XXXXXX.dmg)
+    TEMP_DMG=$(mktemp -t lasco.XXXXXX.dmg)
     if ! curl -sSLf -o "$TEMP_DMG" "$1"; then
       echo "Download failed."
       exit 1
@@ -48,9 +44,8 @@ if [[ -n "$1" ]]; then
     exit 1
   fi
 else
-  # No argument: download from default GitHub release URL
   echo "Downloading from $DEFAULT_DMG_URL ..."
-  TEMP_DMG=$(mktemp -t InternalPortal.XXXXXX.dmg)
+  TEMP_DMG=$(mktemp -t lasco.XXXXXX.dmg)
   if ! curl -sSLf -o "$TEMP_DMG" "$DEFAULT_DMG_URL"; then
     echo "Download failed. You can try: $0 <URL> or $0 /path/to/file.dmg"
     exit 1
@@ -62,7 +57,6 @@ echo "Using DMG: $DMG_PATH"
 echo "Mounting..."
 MOUNT_OUTPUT=$(hdiutil attach "$DMG_PATH" -nobrowse -readonly 2>&1) || true
 
-# Find the mount point: look for a /Volumes/... path in hdiutil output, or find app under /Volumes
 MOUNT_POINT=""
 if echo "$MOUNT_OUTPUT" | grep -q "/Volumes/"; then
   MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep -o "/Volumes/[^[:space:]]*" | head -1)
@@ -81,7 +75,6 @@ if [[ -z "$MOUNT_POINT" || ! -d "$MOUNT_POINT" ]]; then
   exit 1
 fi
 
-# Find the app on the volume (root or one level)
 SOURCE_APP=""
 if [[ -d "$MOUNT_POINT/$APP_NAME" ]]; then
   SOURCE_APP="$MOUNT_POINT/$APP_NAME"
@@ -106,4 +99,4 @@ MOUNT_POINT=""
 echo "Removing quarantine attribute..."
 xattr -cr "$APPLICATIONS/$APP_NAME"
 
-echo "Done. Internal Portal is installed and ready to open (no quarantine message)."
+echo "Done. Lasco is installed and ready to open (no quarantine message)."
