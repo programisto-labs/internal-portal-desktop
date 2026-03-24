@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeTheme, dialog, shell } = require('electron');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -23,6 +23,11 @@ const updateState = {
 };
 
 let updateCheckIntervalId = null;
+
+/** Deep link: lasco://open?target=%2Fslug%2Fworkspace%2Fadmin%2Fplan%3Fcheckout%3Dsuccess */
+const LASCO_PROTOCOL = 'lasco';
+let pendingInitialPortalFullUrl = null;
+let mainWindowRef = null;
 
 function buildUpdateSnapshot() {
   return {
@@ -177,6 +182,101 @@ function setIconSafe(winOrDock, iconPath) {
   }
 }
 
+/** URLs that should load inside the app (same logic as window open allowlist). */
+function isPortalNavigationUrl(urlString) {
+  try {
+    const u = new URL(urlString);
+    if (isDev && u.protocol === 'http:' && u.hostname === 'localhost') {
+      return true;
+    }
+    if (u.protocol === 'https:') {
+      const host = u.hostname;
+      return (
+        host === 'my.programisto.fr' ||
+        host === 'programisto.fr' ||
+        host.endsWith('.programisto.fr')
+      );
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function openUrlInDefaultBrowser(urlString) {
+  try {
+    const u = new URL(urlString);
+    if (u.protocol === 'javascript:' || u.protocol === 'data:' || u.protocol === 'blob:') {
+      return;
+    }
+    void shell.openExternal(urlString);
+  } catch (_) {
+    // ignore invalid URLs
+  }
+}
+
+function buildLascoDesktopUserAgent(baseUserAgent) {
+  return (
+    baseUserAgent +
+    ' LascoDesktop/' +
+    app.getVersion() +
+    ' lasco-desktop/' +
+    app.getVersion()
+  );
+}
+
+function loadMainPortalUrl(win, urlString) {
+  if (win.isDestroyed()) return;
+  win.loadURL(urlString, {
+    userAgent: buildLascoDesktopUserAgent(win.webContents.getUserAgent())
+  });
+}
+
+function parseLascoOpenTarget(urlString) {
+  try {
+    const u = new URL(urlString);
+    if (u.protocol !== `${LASCO_PROTOCOL}:`) return null;
+    const target = u.searchParams.get('target');
+    if (!target || !target.startsWith('/')) return null;
+    return target;
+  } catch (_) {
+    return null;
+  }
+}
+
+function handleLascoDeepLink(urlString) {
+  const target = parseLascoOpenTarget(urlString);
+  if (!target) return;
+  const full = PORTAL_URL.replace(/\/$/, '') + target;
+  const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
+  const win = wins[0];
+  if (win) {
+    loadMainPortalUrl(win, full);
+    win.focus();
+    if (process.platform === 'darwin') {
+      win.moveTop();
+    }
+  } else {
+    pendingInitialPortalFullUrl = full;
+  }
+}
+
+function registerLascoProtocolClient() {
+  try {
+    if (process.defaultApp) {
+      if (process.argv.length >= 2) {
+        app.setAsDefaultProtocolClient(LASCO_PROTOCOL, process.execPath, [
+          path.resolve(process.argv[1])
+        ]);
+      }
+    } else {
+      app.setAsDefaultProtocolClient(LASCO_PROTOCOL);
+    }
+  } catch (_) {
+    // ignore registration errors (e.g. dev)
+  }
+}
+
 function createWindow() {
   let iconPath;
   try {
@@ -243,20 +343,19 @@ function createWindow() {
       if (ok) {
         stopAutoRetry();
         if (!win.isDestroyed()) {
-          win.loadURL(PORTAL_URL, {
-            userAgent:
-              win.webContents.getUserAgent() +
-              ' LascoDesktop/' +
-              app.getVersion() +
-              ' lasco-desktop/' +
-              app.getVersion()
-          });
+          loadMainPortalUrl(win, PORTAL_URL);
         }
       }
     }, AUTO_RETRY_INTERVAL_MS);
   }
 
-  win.on('closed', stopAutoRetry);
+  mainWindowRef = win;
+  win.on('closed', () => {
+    stopAutoRetry();
+    if (mainWindowRef === win) {
+      mainWindowRef = null;
+    }
+  });
 
   win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame || win.isDestroyed()) return;
@@ -277,34 +376,35 @@ function createWindow() {
       event.preventDefault();
       stopAutoRetry();
       if (!win.isDestroyed()) {
-        win.loadURL(PORTAL_URL, {
-          userAgent:
-              win.webContents.getUserAgent() +
-              ' LascoDesktop/' +
-              app.getVersion() +
-              ' lasco-desktop/' +
-              app.getVersion()
-        });
+        loadMainPortalUrl(win, PORTAL_URL);
       }
+      return;
+    }
+    // Same-window links to external sites: open in the system browser instead of leaving the app
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (_) {
+      return;
+    }
+    if (parsed.protocol === 'file:' || parsed.protocol === 'about:') {
+      return;
+    }
+    if (!isPortalNavigationUrl(url)) {
+      event.preventDefault();
+      openUrlInDefaultBrowser(url);
     }
   });
 
-  win.loadURL(PORTAL_URL, {
-    userAgent:
-              win.webContents.getUserAgent() +
-              ' LascoDesktop/' +
-              app.getVersion() +
-              ' lasco-desktop/' +
-              app.getVersion()
-  });
+  const initialUrl = pendingInitialPortalFullUrl || PORTAL_URL;
+  pendingInitialPortalFullUrl = null;
+  loadMainPortalUrl(win, initialUrl);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://my.programisto.fr') || url.startsWith('https://programisto.fr')) {
+    if (isPortalNavigationUrl(url)) {
       return { action: 'allow' };
     }
-    if (isDev && (url.startsWith('http://localhost:3001') || url.startsWith('http://localhost:'))) {
-      return { action: 'allow' };
-    }
+    openUrlInDefaultBrowser(url);
     return { action: 'deny' };
   });
 }
@@ -352,30 +452,55 @@ function registerWindowIPC() {
   });
 }
 
-app.whenReady().then(() => {
-  // Use product name in macOS menu bar (instead of "Electron") — must be set when ready in dev
-  app.setName('Lasco');
-  registerWindowIPC();
-  setupAutoUpdater();
-  nativeTheme.on('updated', updateAllIcons);
-  createWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    const url = argv.find((s) => typeof s === 'string' && s.startsWith(`${LASCO_PROTOCOL}:`));
+    if (url) handleLascoDeepLink(url);
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
     }
   });
-});
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    handleLascoDeepLink(url);
+  });
 
-app.on('before-quit', () => {
-  if (updateCheckIntervalId) {
-    clearInterval(updateCheckIntervalId);
-    updateCheckIntervalId = null;
-  }
-});
+  app.whenReady().then(() => {
+    app.setName('Lasco');
+    registerLascoProtocolClient();
+
+    const coldDeepLink = process.argv.find(
+      (a) => typeof a === 'string' && a.startsWith(`${LASCO_PROTOCOL}:`)
+    );
+    if (coldDeepLink) handleLascoDeepLink(coldDeepLink);
+
+    registerWindowIPC();
+    setupAutoUpdater();
+    nativeTheme.on('updated', updateAllIcons);
+    createWindow();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+      }
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+
+  app.on('before-quit', () => {
+    if (updateCheckIntervalId) {
+      clearInterval(updateCheckIntervalId);
+      updateCheckIntervalId = null;
+    }
+  });
+}
