@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Lasco</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #0a0a0a;
+      color: #e5e5e5;
+      padding: 24px;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .card { max-width: 420px; text-align: center; }
+    .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.9; }
+    h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 12px; color: #fff; }
+    .message { font-size: 0.95rem; line-height: 1.5; color: #a3a3a3; margin: 0 0 24px; }
+    a {
+      display: inline-block;
+      padding: 10px 20px;
+      background: #2563eb;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <!--
+    Fallback page. In normal operation Capacitor loads the remote portal
+    (server.url in capacitor.config.json) and this page is never shown.
+  -->
+  <div class="card">
+    <div class="icon" aria-hidden="true">⚠️</div>
+    <h1>Couldn’t load the portal</h1>
+    <p class="message">The Lasco portal couldn’t be loaded. Check your internet connection and try again.</p>
+    <a href="https://my.programisto.fr">Try again</a>
+  </div>
+</body>
+</html>
