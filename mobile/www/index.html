@@ -39,6 +39,8 @@
   <!--
     Fallback page. In normal operation Capacitor loads the remote portal
     (server.url in capacitor.config.json) and this page is never shown.
+    When that load fails (offline, portal unreachable), Capacitor displays
+    this page via server.errorPath in capacitor.config.json.
   -->
   <div class="card">
     <div class="icon" aria-hidden="true">⚠️</div>

@@ -6,6 +6,7 @@
   "appendUserAgent": "LascoMobile/1.0.0 lasco-mobile/1.0.0",
   "server": {
     "url": "https://my.programisto.fr",
+    "errorPath": "index.html",
     "allowNavigation": [
       "my.programisto.fr",
       "programisto.fr",
