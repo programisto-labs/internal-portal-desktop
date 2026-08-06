@@ -1,6 +1,6 @@
 {
   "name": "lasco-desktop",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Lasco — desktop app for the Lasco web platform (my.programisto.fr)",
   "main": "src/main.js",
   "private": true,
@@ -12,8 +12,8 @@
   "scripts": {
     "icons:pad": "node scripts/pad-dock-icon.js",
     "prebuild": "node scripts/pad-dock-icon.js",
-    "start": "electron .",
-    "dev": "NODE_ENV=development electron .",
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "dev": "env -u ELECTRON_RUN_AS_NODE NODE_ENV=development electron .",
     "build": "electron-builder",
     "build:mac": "node scripts/pad-dock-icon.js && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac",
     "build:mac:signed": "node scripts/pad-dock-icon.js && CSC_IDENTITY_AUTO_DISCOVERY=true electron-builder --mac",

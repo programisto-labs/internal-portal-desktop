@@ -8,10 +8,11 @@ const { autoUpdater } = require('electron-updater');
 app.setName('Lasco');
 
 const isDev = process.env.NODE_ENV === 'development';
-const PORTAL_URL = isDev ? 'http://localhost:3001' : 'https://my.programisto.fr';
+const PORTAL_URL = isDev ? 'http://localhost:3001/' : 'https://app.lascoapp.com';
 
 const AUTO_RETRY_INTERVAL_MS = 5000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const APP_VERSION_ARG_PREFIX = '--lasco-app-version=';
 
 const updateState = {
   status: 'idle',
@@ -288,8 +289,9 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
-    minWidth: 1280,
-    minHeight: 720,
+    /* Compact floor ~ Spotify desktop; sidebar auto-collapses in the web shell below ~1100px. */
+    minWidth: 800,
+    minHeight: 500,
     title: 'Lasco',
     frame: false,
     show: true,
@@ -305,7 +307,8 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
-      partition: 'persist:portal'
+      partition: 'persist:portal',
+      additionalArguments: [`${APP_VERSION_ARG_PREFIX}${app.getVersion()}`]
     },
     ...(iconPath && { icon: iconPath })
   });

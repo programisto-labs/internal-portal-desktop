@@ -1,15 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const fs = require('fs');
-const path = require('path');
 
-let appVersion = '1.0.0';
-try {
-  appVersion = JSON.parse(
-    fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')
-  ).version;
-} catch (_) {
-  /* keep default */
-}
+const APP_VERSION_ARG_PREFIX = '--lasco-app-version=';
+const versionArg = process.argv.find((arg) => arg.startsWith(APP_VERSION_ARG_PREFIX));
+const appVersion = versionArg
+  ? versionArg.slice(APP_VERSION_ARG_PREFIX.length)
+  : process.env.npm_package_version || '1.0.0';
 
 function onUpdateStatusChanged(callback) {
   if (typeof callback !== 'function') {
