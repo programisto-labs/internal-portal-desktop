@@ -3,6 +3,8 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { autoUpdater } = require('electron-updater');
+const { createBrowserTabManager } = require('./browser-tabs/manager');
+const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
@@ -29,6 +31,17 @@ let updateCheckIntervalId = null;
 const LASCO_PROTOCOL = 'lasco';
 let pendingInitialPortalFullUrl = null;
 let mainWindowRef = null;
+/** @type {ReturnType<typeof createBrowserTabManager> | null} */
+let browserTabManager = null;
+
+function openExternalAsBrowserTab(urlString) {
+  const safe = sanitizeBrowserUrl(urlString);
+  if (!safe) return false;
+  const win = mainWindowRef;
+  if (!win || win.isDestroyed() || !browserTabManager) return false;
+  win.webContents.send('browser-tab-open-request', { url: safe });
+  return true;
+}
 
 function buildUpdateSnapshot() {
   return {
@@ -187,7 +200,10 @@ function setIconSafe(winOrDock, iconPath) {
 function isPortalNavigationUrl(urlString) {
   try {
     const u = new URL(urlString);
-    if (isDev && u.protocol === 'http:' && u.hostname === 'localhost') {
+    if (u.origin === new URL(PORTAL_URL).origin) {
+      return true;
+    }
+    if (isDev && u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1')) {
       return true;
     }
     if (u.protocol === 'https:') {
@@ -195,13 +211,58 @@ function isPortalNavigationUrl(urlString) {
       return (
         host === 'my.programisto.fr' ||
         host === 'programisto.fr' ||
-        host.endsWith('.programisto.fr')
+        host.endsWith('.programisto.fr') ||
+        host === 'app.lascoapp.com' ||
+        host.endsWith('.lascoapp.com')
       );
     }
     return false;
   } catch (_) {
     return false;
   }
+}
+
+/** Microsoft / Google OAuth must stay in-app so redirect_uri + cookies match Electron. */
+function isOAuthProviderNavigationUrl(urlString) {
+  try {
+    const u = new URL(urlString);
+    if (u.protocol !== 'https:') return false;
+    const host = u.hostname.toLowerCase();
+    return (
+      host === 'login.microsoftonline.com' ||
+      host.endsWith('.microsoftonline.com') ||
+      host === 'login.live.com' ||
+      host === 'account.live.com' ||
+      host === 'accounts.google.com' ||
+      host === 'oauth2.googleapis.com'
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+/** OAuth authorize redirects live on the API host (not the portal origin). */
+function isApiHostNavigationUrl(urlString) {
+  try {
+    const u = new URL(urlString);
+    const host = u.hostname.toLowerCase();
+    if (host === 'api.lascoapp.com' || host === 'api.programisto.fr') return true;
+    if (host.startsWith('api.') && (host.endsWith('.lascoapp.com') || host.endsWith('.programisto.fr'))) {
+      return true;
+    }
+    if (isDev && (host === 'localhost' || host === '127.0.0.1')) return true;
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function shouldNavigateInApp(urlString) {
+  return (
+    isPortalNavigationUrl(urlString) ||
+    isOAuthProviderNavigationUrl(urlString) ||
+    isApiHostNavigationUrl(urlString)
+  );
 }
 
 function openUrlInDefaultBrowser(urlString) {
@@ -224,6 +285,15 @@ function buildLascoDesktopUserAgent(baseUserAgent) {
     ' lasco-desktop/' +
     app.getVersion()
   );
+}
+
+function ensureBrowserTabManager() {
+  if (!browserTabManager) {
+    browserTabManager = createBrowserTabManager({
+      getMainWindow: () => mainWindowRef,
+    });
+  }
+  return browserTabManager;
 }
 
 function loadMainPortalUrl(win, urlString) {
@@ -252,7 +322,7 @@ function handleLascoDeepLink(urlString) {
   const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
   const win = wins[0];
   if (win) {
-    loadMainPortalUrl(win, full);
+    win.webContents.send('open-portal-tab', target);
     win.focus();
     if (process.platform === 'darwin') {
       win.moveTop();
@@ -295,7 +365,7 @@ function createWindow() {
     title: 'Lasco',
     frame: false,
     show: true,
-    backgroundColor: '#000000',
+    backgroundColor: '#222222',
     /* Native close / minimize / zoom — visible even if the web preload bridge is late or missing */
     ...(process.platform === 'darwin' && {
       titleBarStyle: 'hidden',
@@ -355,6 +425,9 @@ function createWindow() {
   mainWindowRef = win;
   win.on('closed', () => {
     stopAutoRetry();
+    if (browserTabManager) {
+      browserTabManager.destroyAll();
+    }
     if (mainWindowRef === win) {
       mainWindowRef = null;
     }
@@ -393,9 +466,13 @@ function createWindow() {
     if (parsed.protocol === 'file:' || parsed.protocol === 'about:') {
       return;
     }
-    if (!isPortalNavigationUrl(url)) {
+    // Keep portal + OAuth IdP + API authorize inside Electron (otherwise Microsoft
+    // login opens in Chrome, callback never returns here, and /exchange hangs/401s).
+    if (!shouldNavigateInApp(url)) {
       event.preventDefault();
-      openUrlInDefaultBrowser(url);
+      if (!openExternalAsBrowserTab(url)) {
+        openUrlInDefaultBrowser(url);
+      }
     }
   });
 
@@ -405,9 +482,27 @@ function createWindow() {
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isPortalNavigationUrl(url)) {
-      return { action: 'allow' };
+      try {
+        const target = new URL(url);
+        win.webContents.send(
+          'open-portal-tab',
+          `${target.pathname}${target.search}${target.hash}`
+        );
+      } catch (_) {
+        // Invalid portal URLs are denied below.
+      }
+      return { action: 'deny' };
     }
-    openUrlInDefaultBrowser(url);
+    // OAuth / API authorize: navigate the main window instead of spawning a popup.
+    if (isOAuthProviderNavigationUrl(url) || isApiHostNavigationUrl(url)) {
+      if (!win.isDestroyed()) {
+        loadMainPortalUrl(win, url);
+      }
+      return { action: 'deny' };
+    }
+    if (!openExternalAsBrowserTab(url)) {
+      openUrlInDefaultBrowser(url);
+    }
     return { action: 'deny' };
   });
 }
@@ -425,6 +520,8 @@ function updateAllIcons() {
 }
 
 function registerWindowIPC() {
+  ensureBrowserTabManager();
+
   ipcMain.handle('window-close', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win && !win.isDestroyed()) win.close();
@@ -453,6 +550,76 @@ function registerWindowIPC() {
     autoUpdater.quitAndInstall(false, true);
     return true;
   });
+
+  const assertFromMainWindow = (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return Boolean(win && !win.isDestroyed() && win === mainWindowRef);
+  };
+
+  ipcMain.handle('browser-tab-create', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().create(payload || {});
+  });
+  ipcMain.handle('browser-tab-navigate', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().navigate(payload || {});
+  });
+  ipcMain.handle('browser-tab-select', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().select(payload || {});
+  });
+  ipcMain.handle('browser-tab-hide', (event) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().hide();
+  });
+  ipcMain.handle('browser-tab-close', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().close(payload || {});
+  });
+  ipcMain.handle('browser-tab-go-back', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().goBack(payload || {});
+  });
+  ipcMain.handle('browser-tab-go-forward', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().goForward(payload || {});
+  });
+  ipcMain.handle('browser-tab-reload', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().reload(payload || {});
+  });
+  ipcMain.handle('browser-tab-stop', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().stop(payload || {});
+  });
+  ipcMain.handle('browser-tab-set-bounds', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return ensureBrowserTabManager().setBounds(payload || {});
+  });
+  ipcMain.handle('browser-tab-get-state', (event, payload) => {
+    if (!assertFromMainWindow(event)) return null;
+    return ensureBrowserTabManager().getState(payload || {});
+  });
+
+  const browserTabActions = {
+    'browser-tab-zoom': 'zoom',
+    'browser-tab-find': 'findInPage',
+    'browser-tab-stop-find': 'stopFindInPage',
+    'browser-tab-print': 'print',
+    'browser-tab-capture': 'capture',
+    'browser-tab-copy-screenshot': 'copyScreenshot',
+    'browser-tab-open-external': 'openExternal',
+    'browser-tab-open-devtools': 'openDevTools',
+    'browser-tab-clear-data': 'clearBrowsingData',
+    'browser-tab-set-overlay': 'setOverlay',
+    'browser-tab-agent-action': 'agentAction',
+  };
+  for (const [channel, method] of Object.entries(browserTabActions)) {
+    ipcMain.handle(channel, (event, payload) => {
+      if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+      return ensureBrowserTabManager()[method](payload || {});
+    });
+  }
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -501,6 +668,9 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    if (browserTabManager) {
+      browserTabManager.destroyAll();
+    }
     if (updateCheckIntervalId) {
       clearInterval(updateCheckIntervalId);
       updateCheckIntervalId = null;

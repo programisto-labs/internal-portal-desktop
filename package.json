@@ -21,6 +21,7 @@
     "build:mac:dmg": "node scripts/pad-dock-icon.js && CSC_IDENTITY_AUTO_DISCOVERY=true CSC_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db CSC_NAME='Programisto (48UZ7QZ7W5)' electron-builder --mac dmg",
     "build:mac:p12": "node scripts/pad-dock-icon.js && CSC_LINK=\"$(pwd)/Certificates.p12\" electron-builder --mac",
     "test:quarantine": "bash scripts/test-quarantine.sh",
+    "test:unit": "node --test scripts/test-browser-url.js scripts/test-browser-manager.js",
     "debug:signing": "bash scripts/debug-signing.sh",
     "fix:quarantine": "bash scripts/fix-quarantine.sh",
     "install:mac": "bash scripts/install-lasco-macos.sh",
@@ -33,7 +34,7 @@
   },
   "devDependencies": {
     "@electron/osx-sign": "^2.3.0",
-    "electron": "^33.0.0",
+    "electron": "^44.5.1",
     "electron-builder": "^25.0.0",
     "sharp": "^0.34.5"
   },
