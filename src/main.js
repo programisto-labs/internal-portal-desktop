@@ -356,6 +356,11 @@ function createWindow() {
     iconPath = null;
   }
 
+  const isMac = process.platform === 'darwin';
+  const isWin = process.platform === 'win32';
+  /* Transparent window so macOS vibrancy / Windows mica can show through chrome. */
+  const usesSystemMaterial = isMac || isWin;
+
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -365,11 +370,17 @@ function createWindow() {
     title: 'Lasco',
     frame: false,
     show: true,
-    backgroundColor: '#222222',
+    backgroundColor: usesSystemMaterial ? '#00000000' : '#222222',
     /* Native close / minimize / zoom — visible even if the web preload bridge is late or missing */
-    ...(process.platform === 'darwin' && {
+    ...(isMac && {
       titleBarStyle: 'hidden',
-      trafficLightPosition: { x: 16, y: 18 },
+      trafficLightPosition: { x: 16, y: 16 },
+      /* Cursor-like frosted sidebar / title chrome (wallpaper tint + blur). */
+      vibrancy: 'sidebar',
+      visualEffectState: 'active',
+    }),
+    ...(isWin && {
+      backgroundMaterial: 'mica',
     }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
