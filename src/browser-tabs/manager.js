@@ -340,6 +340,9 @@ function createBrowserTabManager({ getMainWindow }) {
       const mod = process.platform === 'darwin' ? input.meta : input.control;
       if (!mod) return;
       const key = String(input.key || '').toLowerCase();
+      // Menu owns ⌘W (Close Tab). Don't preventDefault here or the menu item
+      // never runs when focus is inside a native browser view.
+      if (key === 'w' && !input.shift) return;
       const forward = (action) => emitToRenderer(SHORTCUT_CHANNEL, { tabId, action });
       const handlers = {
         f: () => forward('find'),

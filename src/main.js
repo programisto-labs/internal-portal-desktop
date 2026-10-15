@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeTheme, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -8,6 +8,73 @@ const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
+
+function getTargetMainWindow(browserWindow) {
+  const win = browserWindow || BrowserWindow.getFocusedWindow() || mainWindowRef;
+  if (!win || win.isDestroyed()) return null;
+  return win;
+}
+
+/** ⌘W / Ctrl+W → close active portal tab (not the Electron window). */
+function sendCloseActiveTab(browserWindow) {
+  const win = getTargetMainWindow(browserWindow);
+  if (!win) return;
+  win.webContents.send('browser-tab-shortcut', { tabId: '', action: 'close-tab' });
+}
+
+/**
+ * Replace Electron's default menu so ⌘W is not bound to Close Window.
+ * Without this, the macOS default accelerator closes the app before our tab handler runs.
+ */
+function installApplicationMenu() {
+  const isMac = process.platform === 'darwin';
+  const template = [
+    ...(isMac
+      ? [
+          {
+            role: 'appMenu',
+          },
+        ]
+      : []),
+    {
+      label: 'Fichier',
+      submenu: [
+        {
+          label: "Fermer l'onglet",
+          accelerator: 'CmdOrCtrl+W',
+          click: (_item, browserWindow) => sendCloseActiveTab(browserWindow),
+        },
+        {
+          label: 'Fermer la fenêtre',
+          accelerator: 'CmdOrCtrl+Shift+W',
+          click: (_item, browserWindow) => {
+            const win = getTargetMainWindow(browserWindow);
+            if (win) win.close();
+          },
+        },
+        ...(isMac
+          ? []
+          : [
+              { type: 'separator' },
+              { role: 'quit', label: 'Quitter' },
+            ]),
+      ],
+    },
+    { role: 'editMenu', label: 'Édition' },
+    { role: 'viewMenu', label: 'Présentation' },
+    {
+      label: 'Fenêtre',
+      submenu: [
+        { role: 'minimize', label: 'Réduire' },
+        { role: 'zoom', label: 'Zoom' },
+        ...(isMac
+          ? [{ type: 'separator' }, { role: 'front', label: 'Tout ramener au premier plan' }]
+          : []),
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
 
 const isDev = process.env.NODE_ENV === 'development';
 const PORTAL_URL = isDev ? 'http://localhost:3001/' : 'https://app.lascoapp.com';
@@ -654,6 +721,7 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     app.setName('Lasco');
     registerLascoProtocolClient();
+    installApplicationMenu();
 
     const coldDeepLink = process.argv.find(
       (a) => typeof a === 'string' && a.startsWith(`${LASCO_PROTOCOL}:`)
