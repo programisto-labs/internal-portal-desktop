@@ -105,6 +105,11 @@ const desktopBridge = {
     installNow: () => ipcRenderer.invoke('update-install-now'),
     onStatusChanged: onUpdateStatusChanged
   },
+  settings: {
+    get: () => ipcRenderer.invoke('settings-get'),
+    setOpenLinksInApp: (enabled) => ipcRenderer.invoke('settings-set-open-links-in-app', enabled),
+    onChanged: (callback) => subscribe('settings-changed', callback)
+  },
   tabs: {
     onOpenTarget: onOpenPortalTab
   },

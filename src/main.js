@@ -5,6 +5,7 @@ const https = require('https');
 const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager } = require('./browser-tabs/manager');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
+const { createSettingsStore, extractPortalTarget } = require('./link-handling');
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
@@ -100,6 +101,29 @@ let pendingInitialPortalFullUrl = null;
 let mainWindowRef = null;
 /** @type {ReturnType<typeof createBrowserTabManager> | null} */
 let browserTabManager = null;
+/** @type {ReturnType<typeof createSettingsStore> | null} */
+let settingsStore = null;
+
+function getSettingsStore() {
+  if (!settingsStore) {
+    settingsStore = createSettingsStore(path.join(app.getPath('userData'), 'settings.json'));
+  }
+  return settingsStore;
+}
+
+function getSettings() {
+  return getSettingsStore().get();
+}
+
+/** Route a Lasco link (lasco:// or portal URL) to a portal tab when "open links in app" is on. */
+function routePortalLinkInApp(urlString) {
+  if (!getSettings().openLinksInApp) return false;
+  const target = extractPortalTarget(urlString, isPortalNavigationUrl);
+  const win = mainWindowRef;
+  if (!target || !win || win.isDestroyed()) return false;
+  win.webContents.send('open-portal-tab', target);
+  return true;
+}
 
 function openExternalAsBrowserTab(urlString) {
   const safe = sanitizeBrowserUrl(urlString);
@@ -358,6 +382,7 @@ function ensureBrowserTabManager() {
   if (!browserTabManager) {
     browserTabManager = createBrowserTabManager({
       getMainWindow: () => mainWindowRef,
+      interceptLink: routePortalLinkInApp,
     });
   }
   return browserTabManager;
@@ -371,20 +396,17 @@ function loadMainPortalUrl(win, urlString) {
 }
 
 function parseLascoOpenTarget(urlString) {
-  try {
-    const u = new URL(urlString);
-    if (u.protocol !== `${LASCO_PROTOCOL}:`) return null;
-    const target = u.searchParams.get('target');
-    if (!target || !target.startsWith('/')) return null;
-    return target;
-  } catch (_) {
-    return null;
-  }
+  return extractPortalTarget(urlString, isPortalNavigationUrl);
 }
 
 function handleLascoDeepLink(urlString) {
   const target = parseLascoOpenTarget(urlString);
   if (!target) return;
+  if (!getSettings().openLinksInApp) {
+    // Option disabled: portal https links go to the system browser instead.
+    if (/^https?:/i.test(urlString)) openUrlInDefaultBrowser(urlString);
+    return;
+  }
   const full = PORTAL_URL.replace(/\/$/, '') + target;
   const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
   const win = wins[0];
@@ -401,6 +423,10 @@ function handleLascoDeepLink(urlString) {
 
 function registerLascoProtocolClient() {
   try {
+    if (!getSettings().openLinksInApp) {
+      app.removeAsDefaultProtocolClient(LASCO_PROTOCOL);
+      return;
+    }
     if (process.defaultApp) {
       if (process.argv.length >= 2) {
         app.setAsDefaultProtocolClient(LASCO_PROTOCOL, process.execPath, [
@@ -617,6 +643,17 @@ function registerWindowIPC() {
   ipcMain.handle('window-is-maximized', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     return win && !win.isDestroyed() && win.isMaximized();
+  });
+  ipcMain.handle('settings-get', () => getSettings());
+  ipcMain.handle('settings-set-open-links-in-app', (event, enabled) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win !== mainWindowRef || typeof enabled !== 'boolean') return getSettings();
+    const next = getSettingsStore().set({ openLinksInApp: enabled });
+    registerLascoProtocolClient();
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('settings-changed', next);
+    }
+    return next;
   });
   ipcMain.handle('update-get-status', () => buildUpdateSnapshot());
   ipcMain.handle('update-check-now', async () => {

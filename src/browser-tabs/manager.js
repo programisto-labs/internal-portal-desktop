@@ -140,7 +140,7 @@ function waitForLoadStop(wc, maxMs) {
  * Views are attached to the main BrowserWindow contentView and sized by the
  * renderer via setBounds IPC.
  */
-function createBrowserTabManager({ getMainWindow }) {
+function createBrowserTabManager({ getMainWindow, interceptLink }) {
   const userAgent = buildChromiumUserAgent();
   let sessionConfigured = false;
 
@@ -276,6 +276,9 @@ function createBrowserTabManager({ getMainWindow }) {
 
     wc.setWindowOpenHandler(({ url }) => {
       const safe = sanitizeBrowserUrl(url);
+      if (safe && typeof interceptLink === 'function' && interceptLink(safe)) {
+        return { action: 'deny' };
+      }
       if (safe) {
         emitToRenderer(OPEN_REQUEST_CHANNEL, { url: safe, openerTabId: tabId });
       }
