@@ -3,6 +3,8 @@
 const { app, WebContentsView, session, clipboard, ClipboardItem, shell, dialog, Menu } = require('electron');
 const { sanitizeBrowserUrl } = require('./url');
 const { buildPageAgentScript } = require('./agent-dom');
+const { createHistoryStore } = require('./history');
+const path = require('path');
 
 const BROWSER_PARTITION = 'persist:browser-tabs';
 const STATE_CHANNEL = 'browser-tab-state';
@@ -140,7 +142,9 @@ function waitForLoadStop(wc, maxMs) {
  * Views are attached to the main BrowserWindow contentView and sized by the
  * renderer via setBounds IPC.
  */
-function createBrowserTabManager({ getMainWindow, interceptLink }) {
+function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
+  const historyStore =
+    history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
   const userAgent = buildChromiumUserAgent();
   let sessionConfigured = false;
 
@@ -269,6 +273,7 @@ function createBrowserTabManager({ getMainWindow, interceptLink }) {
     }
     activeTabId = null;
     viewsVisible = false;
+    historyStore.flush();
   }
 
   function wireWebContents(tabId, view) {
@@ -299,7 +304,10 @@ function createBrowserTabManager({ getMainWindow, interceptLink }) {
       }
     });
 
-    wc.on('page-title-updated', () => pushState(tabId));
+    wc.on('page-title-updated', (_event, title) => {
+      historyStore.updateTitle(wc.getURL(), title);
+      pushState(tabId);
+    });
     wc.on('page-favicon-updated', (_event, favicons) => {
       const entry = tabs.get(tabId);
       if (!entry) return;
@@ -308,8 +316,14 @@ function createBrowserTabManager({ getMainWindow, interceptLink }) {
     });
     wc.on('did-start-loading', () => pushState(tabId));
     wc.on('did-stop-loading', () => pushState(tabId));
-    wc.on('did-navigate', () => pushState(tabId));
-    wc.on('did-navigate-in-page', () => pushState(tabId));
+    wc.on('did-navigate', (_event, url) => {
+      historyStore.recordVisit(url, wc.getTitle());
+      pushState(tabId);
+    });
+    wc.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+      if (isMainFrame) historyStore.recordVisit(url, wc.getTitle());
+      pushState(tabId);
+    });
     wc.on('did-fail-load', (_event, errorCode, _errorDescription, _validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return;
       pushState(tabId);
@@ -784,6 +798,24 @@ function createBrowserTabManager({ getMainWindow, interceptLink }) {
     const browserSession = getBrowserSession();
     await browserSession.clearStorageData();
     await browserSession.clearCache();
+    historyStore.clear();
+    return { ok: true };
+  }
+
+  function historySuggest({ query, limit } = {}) {
+    return { ok: true, items: historyStore.suggest(query, limit) };
+  }
+
+  function historyList(payload = {}) {
+    return { ok: true, ...historyStore.list(payload) };
+  }
+
+  function historyRemove({ url } = {}) {
+    return { ok: true, removed: historyStore.remove(url) };
+  }
+
+  function historyClear() {
+    historyStore.clear();
     return { ok: true };
   }
 
@@ -965,6 +997,10 @@ function createBrowserTabManager({ getMainWindow, interceptLink }) {
     openExternal,
     openDevTools,
     clearBrowsingData,
+    historySuggest,
+    historyList,
+    historyRemove,
+    historyClear,
     setOverlay,
     agentAction,
     destroyAll,
