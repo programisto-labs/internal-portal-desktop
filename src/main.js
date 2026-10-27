@@ -689,6 +689,10 @@ function registerWindowIPC() {
     'browser-tab-open-external': 'openExternal',
     'browser-tab-open-devtools': 'openDevTools',
     'browser-tab-clear-data': 'clearBrowsingData',
+    'browser-history-suggest': 'historySuggest',
+    'browser-history-list': 'historyList',
+    'browser-history-remove': 'historyRemove',
+    'browser-history-clear': 'historyClear',
     'browser-tab-set-overlay': 'setOverlay',
     'browser-tab-agent-action': 'agentAction',
   };
