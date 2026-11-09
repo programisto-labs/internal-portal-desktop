@@ -3,7 +3,13 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { badgeLabel, normalizeBadgeCount, renderBadgePng } = require('../src/badge-overlay');
-const { applyBadgeCount, showAgentNotification } = require('../src/agent-notifications');
+const {
+  applyBadgeCount,
+  showAgentNotification,
+  closeDesktopNotification,
+  notificationSettingsTarget,
+  readNotificationPermission,
+} = require('../src/agent-notifications');
 
 const AGENT = '507f1f77bcf86cd799439011';
 const CONV = '507f1f77bcf86cd799439012';
@@ -102,5 +108,98 @@ describe('notification Lasco', () => {
       payload: { title: 'x', body: 'y', agentId: '../admin', conversationId: CONV },
     });
     assert.equal(result.ok, false);
+  });
+
+  it('remplace la notification du même tag et coupe le son sur la mise à jour', () => {
+    const open = new Map();
+    const shown = [];
+    function Notification(options) {
+      this.options = options;
+      this.closed = false;
+      this.on = () => {};
+      this.close = () => {
+        this.closed = true;
+      };
+      this.show = () => {
+        shown.push(options);
+      };
+    }
+    const first = showAgentNotification({
+      Notification,
+      getWindow: () => ({ webContents: { send() {} }, isDestroyed: () => false }),
+      openNotifications: open,
+      payload: { title: 'Lasco Designer', body: '1', agentId: AGENT, conversationId: CONV, tag: 'agent:designer' },
+    });
+    const second = showAgentNotification({
+      Notification,
+      getWindow: () => ({ webContents: { send() {} }, isDestroyed: () => false }),
+      openNotifications: open,
+      payload: {
+        title: 'Lasco Designer',
+        body: '5 nouveaux messages',
+        agentId: AGENT,
+        conversationId: CONV,
+        tag: 'agent:designer',
+        silent: true,
+      },
+    });
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(shown.length, 2);
+    assert.equal(shown[0].silent, false);
+    assert.equal(shown[1].silent, true);
+    assert.equal(shown[0].sound, undefined);
+    assert.equal(open.size, 1);
+    const closed = closeDesktopNotification({ openNotifications: open, tag: 'agent:designer' });
+    assert.equal(closed.ok, true);
+    assert.equal(open.size, 0);
+  });
+
+  it('ouvre un chemin du portail et refuse une URL externe', () => {
+    const sent = [];
+    let click = null;
+    function Notification() {
+      this.on = (event, handler) => {
+        if (event === 'click') click = handler;
+      };
+      this.show = () => {};
+    }
+    const ok = showAgentNotification({
+      Notification,
+      getWindow: () => ({
+        isDestroyed: () => false,
+        show() {},
+        focus() {},
+        webContents: { send: (channel, payload) => sent.push({ channel, payload }) },
+      }),
+      payload: { title: 'Congé', body: 'Nouvelle mise à jour', actionUrl: '/clad/programisto/leaves/123', tag: 'leaves:1' },
+    });
+    assert.equal(ok.ok, true);
+    click();
+    assert.deepEqual(sent, [{
+      channel: 'lasco-notification-open',
+      payload: { actionUrl: '/clad/programisto/leaves/123', tag: 'leaves:1' },
+    }]);
+    const external = showAgentNotification({
+      Notification,
+      getWindow: () => ({}),
+      payload: { title: 'Congé', body: 'x', actionUrl: 'https://evil.example/steal' },
+    });
+    assert.equal(external.ok, false);
+    const protocolRelative = showAgentNotification({
+      Notification,
+      getWindow: () => ({}),
+      payload: { title: 'Congé', body: 'x', actionUrl: '//evil.example/steal' },
+    });
+    assert.equal(protocolRelative.ok, false);
+  });
+
+  it('pointe les réglages macOS et Windows, et signale un refus OS', () => {
+    assert.match(notificationSettingsTarget('darwin'), /Notifications/);
+    assert.equal(notificationSettingsTarget('win32'), 'ms-settings:notifications');
+    assert.equal(notificationSettingsTarget('linux'), null);
+    assert.equal(readNotificationPermission({ Notification: { isSupported: () => true }, failed: false }), 'prompt');
+    assert.equal(readNotificationPermission({ Notification: { isSupported: () => true }, failed: true }), 'denied');
+    assert.equal(readNotificationPermission({ Notification: { isSupported: () => false }, failed: false }), 'unsupported');
   });
 });
