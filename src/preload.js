@@ -120,6 +120,9 @@ const desktopBridge = {
   browserTabs: browserTabsBridge,
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
+  closeNotification: (tag) => ipcRenderer.invoke('lasco-close-notification', tag),
+  getNotificationPermission: () => ipcRenderer.invoke('lasco-notification-permission'),
+  openNotificationSettings: () => ipcRenderer.invoke('lasco-open-notification-settings'),
   onNotificationClick: (callback) => subscribe('lasco-notification-open', callback),
 };
 

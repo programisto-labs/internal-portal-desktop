@@ -6,7 +6,13 @@ const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager } = require('./browser-tabs/manager');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget } = require('./link-handling');
-const { applyBadgeCount, showAgentNotification } = require('./agent-notifications');
+const {
+  applyBadgeCount,
+  showAgentNotification,
+  closeDesktopNotification,
+  readNotificationPermission,
+  notificationSettingsTarget,
+} = require('./agent-notifications');
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
@@ -682,13 +688,37 @@ function registerWindowIPC() {
       count,
     });
   });
+  const openPushNotifications = new Map();
+  let pushNotificationFailed = false;
   ipcMain.handle('lasco-notify', (event, payload) => {
     if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
     return showAgentNotification({
       Notification,
       getWindow: () => BrowserWindow.fromWebContents(event.sender),
       payload,
+      openNotifications: openPushNotifications,
+      onFailed: () => {
+        pushNotificationFailed = true;
+      },
     });
+  });
+  ipcMain.handle('lasco-close-notification', (event, tag) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return closeDesktopNotification({ openNotifications: openPushNotifications, tag });
+  });
+  ipcMain.handle('lasco-notification-permission', (event) => {
+    if (!assertFromMainWindow(event)) return { ok: false, state: 'denied' };
+    return {
+      ok: true,
+      state: readNotificationPermission({ Notification, failed: pushNotificationFailed }),
+    };
+  });
+  ipcMain.handle('lasco-open-notification-settings', async (event) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    const target = notificationSettingsTarget(process.platform);
+    if (!target) return { ok: false, error: 'unsupported' };
+    await shell.openExternal(target);
+    return { ok: true };
   });
 
   ipcMain.handle('browser-tab-create', (event, payload) => {
