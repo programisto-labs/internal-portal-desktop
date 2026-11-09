@@ -118,6 +118,9 @@ const desktopBridge = {
     onOpenTarget: onOpenPortalTab
   },
   browserTabs: browserTabsBridge,
+  setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
+  notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
+  onNotificationClick: (callback) => subscribe('lasco-notification-open', callback),
 };
 
 contextBridge.exposeInMainWorld('lascoDesktop', desktopBridge);
