@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification } = require('electron');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -6,6 +6,7 @@ const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager } = require('./browser-tabs/manager');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget } = require('./link-handling');
+const { applyBadgeCount, showAgentNotification } = require('./agent-notifications');
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
@@ -670,6 +671,25 @@ function registerWindowIPC() {
     const win = BrowserWindow.fromWebContents(event.sender);
     return Boolean(win && !win.isDestroyed() && win === mainWindowRef);
   };
+
+  ipcMain.handle('lasco-set-badge-count', (event, count) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return applyBadgeCount({
+      app,
+      platform: process.platform,
+      getWindow: () => mainWindowRef,
+      nativeImage,
+      count,
+    });
+  });
+  ipcMain.handle('lasco-notify', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    return showAgentNotification({
+      Notification,
+      getWindow: () => BrowserWindow.fromWebContents(event.sender),
+      payload,
+    });
+  });
 
   ipcMain.handle('browser-tab-create', (event, payload) => {
     if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
