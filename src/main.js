@@ -5,7 +5,8 @@ const https = require('https');
 const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager } = require('./browser-tabs/manager');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
-const { createSettingsStore, extractPortalTarget } = require('./link-handling');
+const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest } = require('./link-handling');
+const { buildTabMenuTemplate } = require('./browser-tabs/tab-menu');
 const {
   applyBadgeCount,
   showAgentNotification,
@@ -137,7 +138,7 @@ function openExternalAsBrowserTab(urlString) {
   if (!safe) return false;
   const win = mainWindowRef;
   if (!win || win.isDestroyed() || !browserTabManager) return false;
-  win.webContents.send('browser-tab-open-request', { url: safe });
+  win.webContents.send('browser-tab-open-request', buildBrowserOpenRequest(safe));
   return true;
 }
 
@@ -764,6 +765,33 @@ function registerWindowIPC() {
   ipcMain.handle('browser-tab-get-state', (event, payload) => {
     if (!assertFromMainWindow(event)) return null;
     return ensureBrowserTabManager().getState(payload || {});
+  });
+
+  ipcMain.handle('browser-tab-show-context-menu', (event, payload) => {
+    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
+    const win = getTargetMainWindow();
+    const p = payload && typeof payload === 'object' ? payload : {};
+    if (!win) return { ok: false, error: 'no-window' };
+    const template = buildTabMenuTemplate({
+      tabId: p.tabId,
+      actions: p.actions,
+      labels: p.labels,
+      tabCount: p.tabCount,
+      tabIndex: p.tabIndex,
+      onAction: (action) => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('browser-tab-context-menu-action', { tabId: p.tabId, action });
+        }
+      },
+    });
+    if (!template.length) return { ok: false, error: 'invalid-tab' };
+    const opts = { window: win };
+    if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
+      opts.x = Math.round(p.x);
+      opts.y = Math.round(p.y);
+    }
+    Menu.buildFromTemplate(template).popup(opts);
+    return { ok: true };
   });
 
   const browserTabActions = {
