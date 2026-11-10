@@ -70,7 +70,18 @@ function extractPortalTarget(urlString, isPortalUrl) {
   return null;
 }
 
+/**
+ * Payload for the renderer when a link must open in the internal browser.
+ * `reveal` tells the web UI to re-open the right-hand column if it is collapsed
+ * so the opened page is immediately visible.
+ */
+function buildBrowserOpenRequest(safeUrl) {
+  if (typeof safeUrl !== 'string' || !safeUrl) return null;
+  return { url: safeUrl, reveal: true };
+}
+
 module.exports = {
+  buildBrowserOpenRequest,
   LASCO_PROTOCOL,
   DEFAULT_SETTINGS,
   normalizeSettings,

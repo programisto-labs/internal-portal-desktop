@@ -87,6 +87,8 @@ const browserTabsBridge = {
   historyRemove: (payload) => invokeBrowserTab('browser-history-remove', payload),
   historyClear: () => invokeBrowserTab('browser-history-clear'),
   setOverlay: (payload) => invokeBrowserTab('browser-tab-set-overlay', payload),
+  showTabContextMenu: (payload) => invokeBrowserTab('browser-tab-show-context-menu', payload),
+  onTabContextMenuAction: (callback) => subscribe('browser-tab-context-menu-action', callback),
   agentAction: (payload) => invokeBrowserTab('browser-tab-agent-action', payload),
   onState: onBrowserTabState,
   onOpenRequest: onBrowserTabOpenRequest,
