@@ -7,7 +7,36 @@ const OP_LABELS = {
   'folder.create': 'Créer un dossier',
 };
 
+function buildShellConfirmDialog(req) {
+  const lines = [
+    `Agent : ${req.agentName}`,
+    `Dossier : ${req.cwd}`,
+    '',
+    'Commande :',
+    req.command,
+    '',
+    `Effet : la commande s’exécute sur CET ORDINATEUR (pas la machine virtuelle), avec vos droits, pendant ${Math.round(
+      (req.timeoutMs || 120000) / 1000
+    )} s au plus. Elle peut modifier ou supprimer des fichiers et utiliser le réseau.`,
+  ];
+  const buttons = ['Refuser', 'Exécuter une fois'];
+  const decisions = ['deny', 'once'];
+  const prefix = (req.scope && req.scope.commandPrefix) || [];
+  if (req.allowPersistent && prefix.length) {
+    buttons.push(`Toujours autoriser « ${prefix.join(' ')} » dans ce dossier`);
+    decisions.push('always');
+    lines.push(
+      '',
+      `« Toujours autoriser » couvre les commandes commençant par « ${prefix.join(' ')} », dans ${req.cwd} et ses sous-dossiers, pour cet agent et cet appareil. Jamais les commandes composées ni sensibles. Révocable dans Fichier > Opérations sur l’hôte.`
+    );
+  } else if (req.notRememberableReason) {
+    lines.push('', req.notRememberableReason);
+  }
+  return { title: 'Un agent demande à exécuter une commande', message: lines.join('\n'), buttons, decisions };
+}
+
 function buildConfirmDialog(req) {
+  if (req.operation === 'shell.run') return buildShellConfirmDialog(req);
   const lines = [`Agent : ${req.agentName}`, `Opération : ${OP_LABELS[req.operation] || req.operation}`, ''];
   if (req.source) lines.push(`Source : ${req.source}`);
   lines.push(`Destination : ${req.destination}`, '');

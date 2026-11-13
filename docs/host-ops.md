@@ -51,3 +51,25 @@ Dialog: Refuser / Autoriser une fois / Toujours autoriser ce type d'opération. 
 ## Manual test (Desktop)
 
 1. Menu Fichier > Opérations sur l'hôte → enable. 2. In the Lasco AI chat, ask « déplace ~/Downloads/test.txt dans ~/Documents » (or call `hostOps.execute` from the portal devtools console). 3. Check the dialog, Refuser (nothing moves), Autoriser une fois (file moves, result `verification` true). 4. « Toujours autoriser », restart, repeat inside the folder (no dialog); outside (dialog). 5. Revoke → dialog again. Not yet run on a real Electron build.
+
+## Shell commands (`shell.run`)
+
+Same bridge, same consent model as ChatGPT / Claude Code. Separate switch (« Autoriser les commandes shell »), off by default, only effective when host operations are enabled.
+
+Request: `{ requestId, agentId, userId, agentName?, operation: 'shell.run', command, cwd?, timeoutMs? }`. `cwd` defaults to the home folder; absolute, no `.`/`..`, resolved with `realpath`, must be a directory; re-resolved after the dialog (`changed_during_confirmation`). `timeoutMs`: default 120 s, clamped to 1 s–300 s.
+
+Result: `{ ok: true, status: 'completed', result: { command, cwd, exitCode, signal, stdout, stderr, truncated, durationMs }, verification: { ok: true, exitCode, signal } }`. A non-zero exit code is still `completed`: the agent reads it. Timeout and cancel return `status: 'timeout' | 'cancelled'` with the partial `result`.
+
+Execution: `$SHELL -l -c <command>` (login shell, for the user's PATH; `/bin/sh` fallback), PowerShell `-NoProfile -NonInteractive -Command` on Windows. User rights, never elevated; stdin closed; `TERM=dumb`, `NO_COLOR=1`, `LASCO_AGENT=1`, `ELECTRON_*` removed. Process group killed on timeout/cancel (SIGTERM, SIGKILL after 3 s; `taskkill /T` on Windows). stdout/stderr bounded to 12 000 chars each (head + tail) and secret-masked.
+
+Dialog: Refuser / Exécuter une fois / Toujours autoriser « <prefix> » dans ce dossier. It shows the agent, the folder and the exact command.
+
+Rules: a command prefix (program, plus its subcommand when the second word looks like one: `git status`, `npm test`; otherwise the program alone) in the folder and its subfolders, for this agent, user and device. Never offered or applied for:
+- compound commands: `;`, `&`, `|`, `<`, `>`, `$…`, backticks, parentheses/braces, newline, unterminated quote, leading `VAR=value`;
+- sensitive programs: deletion, privileges, permissions, disks, process/system control, keychain, shells and interpreters, `xargs`/`env`/`eval`, network transfer (`curl`, `wget`, `ssh`, `rsync`…), `open` (see `SENSITIVE_PROGRAMS` in `src/host-ops/shell.js`);
+- any command on Windows;
+- a folder that is the filesystem root.
+
+A shell rule never covers a file operation and vice versa. Journal: folder, masked command, decision and exit code; never the output.
+
+Limits: a prefix rule trusts the program in that folder (e.g. `npm test` runs the project's scripts). Arguments after the prefix are not inspected (e.g. `git status` allows any `git status …`); rules are the user's choice and are revocable. Not run on a real Electron build or on Windows yet.
