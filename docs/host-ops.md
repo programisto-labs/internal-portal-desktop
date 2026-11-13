@@ -4,12 +4,16 @@ Native Electron implementation of the optional `lascoDesktop.hostOps` bridge. **
 
 ## Contract (preload → IPC)
 
-> The `internal-portal` repository was not readable from the build environment, so this contract
-> was defined here and **must be reconciled with `apps/frontend/lib/desktop-host/` and `lasco-desktop.d.ts` (internal-portal#2392)** before wiring.
+This contract is the one consumed by `internal-portal` (`apps/frontend/lib/desktop-host/`, `types/lasco-desktop.d.ts`).
+The web app does **no** consent or rule handling of its own: this native layer is the only authority.
 
-`window.lascoDesktop.hostOps` (also on `programistoDesktop`) exists only when the page origin is the portal origin.
+`window.lascoDesktop.hostOps` (also on `programistoDesktop`) exists only when the page origin is the portal origin
+(passed by main to the preload as `--lasco-portal-origin=`), and never when Desktop runs with `--no-agents` /
+`LASCO_DESKTOP_NO_AGENTS=1` (internal-portal#2373: a Desktop inside a VM must not reach the physical computer).
+In that mode the user agent also carries `LascoNoAgents/1`, the bridge exposes `noAgents: true`, the menu entry is
+hidden and the IPC handlers refuse.
 
-- `getCapabilities(): Promise<{ available, enabled, deviceId, operations: ['file.move','file.copy','file.rename','folder.create'], scope: 'host' }>`
+- `getCapabilities(): Promise<{ available, enabled, deviceId, operations: ['file.move','file.copy','file.rename','folder.create'], scope: 'host', platform, homeDir }>`
 - `execute(request): Promise<Result>`
 - `cancel(requestId): Promise<{ ok }>`
 
@@ -41,9 +45,9 @@ Dialog: Refuser / Autoriser une fois / Toujours autoriser ce type d'opération. 
 - `userId`/`agentId` are asserted by the web app (native cannot verify them); rules are keyed on them, user confirmation shows the agent name.
 - Residual race: a parent directory swapped between the final re-check and the syscall (no `openat`/`renameat` in Node).
 - Dialog abort relies on Electron's `signal` option for `showMessageBox`; timeout/cancel on a still-open dialog is not unit-testable.
-- Not done here (internal-portal): feature detection + request routing from chat (API/MCP), UI feedback, `.d.ts` alignment.
+- Chat routing lives in internal-portal: agent tools `host_*`, `requestId` = the model's tool call id, `userId` / `agentId` stamped by the API.
 - Windows/macOS behaviour (case-insensitivity, `link` on exFAT/network volumes falls back to copy) not exercised; automated tests ran on Linux only.
 
 ## Manual test (Desktop)
 
-1. Menu Fichier > Opérations sur l'hôte → enable. 2. Trigger a `file.move` through `hostOps.execute` from the portal devtools console. 3. Check the dialog, Refuser (nothing moves), Autoriser une fois (file moves, result `verification` true). 4. « Toujours autoriser », restart, repeat inside the folder (no dialog); outside (dialog). 5. Revoke → dialog again. Not yet run on a real Electron build.
+1. Menu Fichier > Opérations sur l'hôte → enable. 2. In the Lasco AI chat, ask « déplace ~/Downloads/test.txt dans ~/Documents » (or call `hostOps.execute` from the portal devtools console). 3. Check the dialog, Refuser (nothing moves), Autoriser une fois (file moves, result `verification` true). 4. « Toujours autoriser », restart, repeat inside the folder (no dialog); outside (dialog). 5. Revoke → dialog again. Not yet run on a real Electron build.

@@ -177,6 +177,9 @@ function createHostOpsService({
         deviceId: store.getDeviceId(),
         operations: [...OPERATIONS],
         scope: 'host',
+        // Lets the agent turn "~/Downloads/x.pdf" into an absolute path; never sent to the model unless asked.
+        platform,
+        homeDir,
       };
     },
 

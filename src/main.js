@@ -65,8 +65,12 @@ function installApplicationMenu() {
             if (win) win.close();
           },
         },
-        { type: 'separator' },
-        { label: 'Opérations sur l’hôte (agents)…', click: () => openHostOpsSettings() },
+        ...(NO_AGENTS
+          ? []
+          : [
+              { type: 'separator' },
+              { label: 'Opérations sur l’hôte (agents)…', click: () => openHostOpsSettings() },
+            ]),
         ...(isMac
           ? []
           : [
@@ -93,6 +97,14 @@ function installApplicationMenu() {
 
 const isDev = process.env.NODE_ENV === 'development';
 const PORTAL_URL = isDev ? 'http://localhost:3001/' : 'https://app.lascoapp.com';
+const PORTAL_ORIGIN = new URL(PORTAL_URL).origin;
+/**
+ * internal-portal#2373: Desktop launched without AI agents (e.g. inside a VM).
+ * Host operations are then never exposed: the VM must not become a path to the physical computer.
+ */
+const NO_AGENTS = process.argv.includes('--no-agents') || process.env.LASCO_DESKTOP_NO_AGENTS === '1';
+const PORTAL_ORIGIN_ARG_PREFIX = '--lasco-portal-origin=';
+const NO_AGENTS_ARG = '--lasco-no-agents';
 
 const AUTO_RETRY_INTERVAL_MS = 5000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -433,7 +445,8 @@ function buildLascoDesktopUserAgent(baseUserAgent) {
     ' LascoDesktop/' +
     app.getVersion() +
     ' lasco-desktop/' +
-    app.getVersion()
+    app.getVersion() +
+    (NO_AGENTS ? ' LascoNoAgents/1' : '')
   );
 }
 
@@ -541,7 +554,11 @@ function createWindow() {
       sandbox: true,
       webSecurity: true,
       partition: 'persist:portal',
-      additionalArguments: [`${APP_VERSION_ARG_PREFIX}${app.getVersion()}`]
+      additionalArguments: [
+        `${APP_VERSION_ARG_PREFIX}${app.getVersion()}`,
+        `${PORTAL_ORIGIN_ARG_PREFIX}${PORTAL_ORIGIN}`,
+        ...(NO_AGENTS ? [NO_AGENTS_ARG] : []),
+      ]
     },
     ...(iconPath && { icon: iconPath })
   });
@@ -732,12 +749,13 @@ function registerWindowIPC() {
 
   // --- Host operations: bridge for the web app (strictly validated natively) ---
   const trustedHostOpsSender = (event) => {
+    if (NO_AGENTS) return false;
     const frame = event.senderFrame;
     return isTrustedHostOpsSender({
       isMainWindow: assertFromMainWindow(event),
       isMainFrame: Boolean(frame && frame === event.sender.mainFrame),
       frameUrl: frame ? frame.url : null,
-      allowedOrigins: [new URL(PORTAL_URL).origin],
+      allowedOrigins: [PORTAL_ORIGIN],
     });
   };
   const forbidden = { ok: false, status: 'error', error: { code: 'forbidden', message: 'Origine non autorisée.' } };
