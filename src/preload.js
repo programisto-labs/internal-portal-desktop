@@ -96,6 +96,17 @@ const browserTabsBridge = {
   onShortcut: (callback) => subscribe('browser-tab-shortcut', callback),
 };
 
+/**
+ * Host operations bridge (structured file ops on the user's computer, not the VM).
+ * Exposed only when the page origin is the Lasco portal; main re-validates the sender natively.
+ */
+const PORTAL_ORIGINS = ['https://app.lascoapp.com', 'http://localhost:3001'];
+const hostOpsBridge = {
+  getCapabilities: () => ipcRenderer.invoke('host-ops-capabilities'),
+  execute: (request) => ipcRenderer.invoke('host-ops-execute', request),
+  cancel: (requestId) => ipcRenderer.invoke('host-ops-cancel', requestId),
+};
+
 const desktopBridge = {
   platform: process.platform,
   version: appVersion,
@@ -120,6 +131,7 @@ const desktopBridge = {
     onOpenTarget: onOpenPortalTab
   },
   browserTabs: browserTabsBridge,
+  ...(PORTAL_ORIGINS.includes(globalThis.location && globalThis.location.origin) && { hostOps: hostOpsBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
   closeNotification: (tag) => ipcRenderer.invoke('lasco-close-notification', tag),
