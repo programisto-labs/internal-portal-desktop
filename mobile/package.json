@@ -1,0 +1,34 @@
+{
+  "name": "lasco-mobile",
+  "version": "1.0.0",
+  "description": "Lasco — mobile app (iOS & Android) for the Lasco web platform (my.programisto.fr)",
+  "private": true,
+  "author": "Lasco / Programisto <tech@programisto.fr>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/programisto-labs/internal-portal-desktop.git"
+  },
+  "scripts": {
+    "sync": "cap sync",
+    "sync:android": "cap sync android",
+    "sync:ios": "cap sync ios",
+    "open:android": "cap open android",
+    "open:ios": "cap open ios",
+    "run:android": "cap run android",
+    "run:ios": "cap run ios",
+    "assets": "capacitor-assets generate --ios --android --iconBackgroundColor '#000000' --iconBackgroundColorDark '#000000' --splashBackgroundColor '#000000' --splashBackgroundColorDark '#000000'",
+    "build:android": "cap sync android && cd android && ./gradlew assembleDebug",
+    "build:android:release": "cap sync android && cd android && ./gradlew bundleRelease assembleRelease",
+    "build:ios": "cap sync ios && cd ios/App && xcodebuild -project App.xcodeproj -scheme App -configuration Release -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO build"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/ios": "^8.4.1"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.4.1"
+  }
+}
