@@ -14,6 +14,10 @@ const {
   readNotificationPermission,
   notificationSettingsTarget,
 } = require('./agent-notifications');
+const { createHostOpsStore, createJournal } = require('./host-ops/store');
+const { createHostOpsService } = require('./host-ops/service');
+const { createConfirm } = require('./host-ops/confirm');
+const { isTrustedHostOpsSender } = require('./host-ops/trust');
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
@@ -61,6 +65,12 @@ function installApplicationMenu() {
             if (win) win.close();
           },
         },
+        ...(NO_AGENTS
+          ? []
+          : [
+              { type: 'separator' },
+              { label: 'Opérations sur l’hôte (agents)…', click: () => openHostOpsSettings() },
+            ]),
         ...(isMac
           ? []
           : [
@@ -87,6 +97,14 @@ function installApplicationMenu() {
 
 const isDev = process.env.NODE_ENV === 'development';
 const PORTAL_URL = isDev ? 'http://localhost:3001/' : 'https://app.lascoapp.com';
+const PORTAL_ORIGIN = new URL(PORTAL_URL).origin;
+/**
+ * internal-portal#2373: Desktop launched without AI agents (e.g. inside a VM).
+ * Host operations are then never exposed: the VM must not become a path to the physical computer.
+ */
+const NO_AGENTS = process.argv.includes('--no-agents') || process.env.LASCO_DESKTOP_NO_AGENTS === '1';
+const PORTAL_ORIGIN_ARG_PREFIX = '--lasco-portal-origin=';
+const NO_AGENTS_ARG = '--lasco-no-agents';
 
 const AUTO_RETRY_INTERVAL_MS = 5000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -117,6 +135,51 @@ function getSettingsStore() {
     settingsStore = createSettingsStore(path.join(app.getPath('userData'), 'settings.json'));
   }
   return settingsStore;
+}
+
+/** Host operations (agent file ops on this computer). Disabled until enabled in Desktop options. */
+let hostOpsStore = null;
+let hostOpsJournal = null;
+let hostOpsService = null;
+let hostOpsSettingsWin = null;
+
+function ensureHostOps() {
+  if (!hostOpsService) {
+    const dir = app.getPath('userData');
+    hostOpsStore = createHostOpsStore(path.join(dir, 'host-ops.json'));
+    hostOpsJournal = createJournal(path.join(dir, 'host-ops-journal.json'));
+    hostOpsService = createHostOpsService({
+      store: hostOpsStore,
+      journal: hostOpsJournal,
+      confirm: createConfirm(
+        (...args) => dialog.showMessageBox(...args),
+        () => (mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null)
+      ),
+    });
+  }
+  return hostOpsService;
+}
+
+function openHostOpsSettings() {
+  ensureHostOps();
+  if (hostOpsSettingsWin && !hostOpsSettingsWin.isDestroyed()) {
+    hostOpsSettingsWin.focus();
+    return;
+  }
+  hostOpsSettingsWin = new BrowserWindow({
+    width: 760,
+    height: 620,
+    title: 'Opérations sur l’hôte',
+    webPreferences: {
+      preload: path.join(__dirname, 'host-ops', 'settings-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  hostOpsSettingsWin.webContents.on('will-navigate', (e) => e.preventDefault());
+  hostOpsSettingsWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  hostOpsSettingsWin.loadFile(path.join(__dirname, 'host-ops', 'settings.html'));
 }
 
 function getSettings() {
@@ -382,7 +445,8 @@ function buildLascoDesktopUserAgent(baseUserAgent) {
     ' LascoDesktop/' +
     app.getVersion() +
     ' lasco-desktop/' +
-    app.getVersion()
+    app.getVersion() +
+    (NO_AGENTS ? ' LascoNoAgents/1' : '')
   );
 }
 
@@ -490,7 +554,11 @@ function createWindow() {
       sandbox: true,
       webSecurity: true,
       partition: 'persist:portal',
-      additionalArguments: [`${APP_VERSION_ARG_PREFIX}${app.getVersion()}`]
+      additionalArguments: [
+        `${APP_VERSION_ARG_PREFIX}${app.getVersion()}`,
+        `${PORTAL_ORIGIN_ARG_PREFIX}${PORTAL_ORIGIN}`,
+        ...(NO_AGENTS ? [NO_AGENTS_ARG] : []),
+      ]
     },
     ...(iconPath && { icon: iconPath })
   });
@@ -678,6 +746,55 @@ function registerWindowIPC() {
     const win = BrowserWindow.fromWebContents(event.sender);
     return Boolean(win && !win.isDestroyed() && win === mainWindowRef);
   };
+
+  // --- Host operations: bridge for the web app (strictly validated natively) ---
+  const trustedHostOpsSender = (event) => {
+    if (NO_AGENTS) return false;
+    const frame = event.senderFrame;
+    return isTrustedHostOpsSender({
+      isMainWindow: assertFromMainWindow(event),
+      isMainFrame: Boolean(frame && frame === event.sender.mainFrame),
+      frameUrl: frame ? frame.url : null,
+      allowedOrigins: [PORTAL_ORIGIN],
+    });
+  };
+  const forbidden = { ok: false, status: 'error', error: { code: 'forbidden', message: 'Origine non autorisée.' } };
+  ipcMain.handle('host-ops-capabilities', (event) => {
+    if (!trustedHostOpsSender(event)) return { available: false, enabled: false, operations: [] };
+    return ensureHostOps().getCapabilities();
+  });
+  ipcMain.handle('host-ops-execute', (event, request) => {
+    if (!trustedHostOpsSender(event)) return forbidden;
+    return ensureHostOps().execute(request);
+  });
+  ipcMain.handle('host-ops-cancel', (event, requestId) => {
+    if (!trustedHostOpsSender(event)) return forbidden;
+    return ensureHostOps().cancel(requestId);
+  });
+  // --- Host operations: local options window only (never reachable from web pages) ---
+  const fromHostOpsSettings = (event) =>
+    Boolean(
+      hostOpsSettingsWin &&
+        !hostOpsSettingsWin.isDestroyed() &&
+        event.sender === hostOpsSettingsWin.webContents &&
+        event.senderFrame === event.sender.mainFrame &&
+        String(event.senderFrame.url).startsWith('file:')
+    );
+  ipcMain.handle('host-ops-admin-state', (event) => {
+    if (!fromHostOpsSettings(event)) return { enabled: false, grants: [], journal: [] };
+    ensureHostOps();
+    return { enabled: hostOpsStore.isEnabled(), grants: hostOpsStore.listGrants(), journal: hostOpsJournal.list() };
+  });
+  ipcMain.handle('host-ops-admin-set-enabled', (event, value) => {
+    if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
+    ensureHostOps();
+    return hostOpsStore.setEnabled(value);
+  });
+  ipcMain.handle('host-ops-admin-revoke', (event, id) => {
+    if (!fromHostOpsSettings(event) || typeof id !== 'string') return false;
+    ensureHostOps();
+    return hostOpsStore.revokeGrant(id);
+  });
 
   ipcMain.handle('lasco-set-badge-count', (event, count) => {
     if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
