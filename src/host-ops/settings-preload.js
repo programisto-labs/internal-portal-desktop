@@ -22,6 +22,13 @@ async function render() {
     await ipcRenderer.invoke('host-ops-admin-set-shell-enabled', shell.checked);
     render();
   };
+  const code = document.getElementById('codeEnabled');
+  code.checked = s.codeEnabled;
+  code.disabled = !s.enabled;
+  code.onchange = async () => {
+    await ipcRenderer.invoke('host-ops-admin-set-code-enabled', code.checked);
+    render();
+  };
   const grants = document.getElementById('grants');
   grants.replaceChildren();
   if (!s.grants.length) grants.append(el('li', 'Aucune autorisation permanente.'));
@@ -29,7 +36,9 @@ async function render() {
     const scope =
       g.operation === 'shell.run'
         ? `commande « ${(g.commandPrefix || []).join(' ')} … » — dossier : ${(g.cwdRoots || []).join(', ')}`
-        : `dossiers : ${[...g.sourceRoots, ...g.destinationRoots].join(', ')}`;
+        : g.operation === 'code.write'
+          ? `modifications de fichiers — projet : ${(g.destinationRoots || []).join(', ')}`
+          : `dossiers : ${[...g.sourceRoots, ...g.destinationRoots].join(', ')}`;
     const li = el('li', `${g.operation} — agent ${g.agentName || g.agentId} — ${scope} `);
     const b = el('button', 'Révoquer');
     b.onclick = async () => {

@@ -73,3 +73,9 @@ Rules: a command prefix (program, plus its subcommand when the second word looks
 A shell rule never covers a file operation and vice versa. Journal: folder, masked command, decision and exit code; never the output.
 
 Limits: a prefix rule trusts the program in that folder (e.g. `npm test` runs the project's scripts). Arguments after the prefix are not inspected (e.g. `git status` allows any `git status …`); rules are the user's choice and are revocable. Not run on a real Electron build or on Windows yet.
+
+## Lasco Code projects (`code.*`, `git.*`)
+
+Agents read and edit the local git projects the user opened in Lasco Code, through this same bridge. Separate switch
+« Ouvrir mes projets de code aux agents » (off by default). Reads need no dialog; `code.write` / `code.edit` are confirmed
+(or covered by « Toujours autoriser dans ce projet »). Contract, limits and dialog: [code-workspace.md](code-workspace.md).

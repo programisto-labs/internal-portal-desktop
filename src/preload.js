@@ -113,6 +113,19 @@ const hostOpsBridge = {
   cancel: (requestId) => ipcRenderer.invoke('host-ops-cancel', requestId),
 };
 
+/**
+ * Lasco Code workspace (IDE page): local git projects chosen natively, files, git, terminals.
+ * Same exposure rule as hostOps; main re-validates the sender on every call.
+ */
+const codeWorkspaceBridge = {
+  invoke: (method, payload) => ipcRenderer.invoke('code-workspace-invoke', { method, payload }),
+  terminalWrite: (id, data) => ipcRenderer.send('code-terminal-input', { id, data }),
+  terminalResize: (id, cols, rows) => ipcRenderer.send('code-terminal-resize', { id, cols, rows }),
+  onTerminalData: (callback) => subscribe('code-terminal-data', callback),
+  onTerminalExit: (callback) => subscribe('code-terminal-exit', callback),
+  onFsChanged: (callback) => subscribe('code-fs-changed', callback),
+};
+
 const desktopBridge = {
   platform: process.platform,
   version: appVersion,
@@ -138,7 +151,7 @@ const desktopBridge = {
   },
   browserTabs: browserTabsBridge,
   ...(noAgents && { noAgents: true }),
-  ...(exposeHostOps && { hostOps: hostOpsBridge }),
+  ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
   closeNotification: (tag) => ipcRenderer.invoke('lasco-close-notification', tag),

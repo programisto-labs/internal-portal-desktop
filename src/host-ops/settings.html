@@ -9,6 +9,8 @@
 <label><input type="checkbox" id="enabled"> Activer les opérations sur l’hôte</label>
 <p style="margin-top:16px">Commandes shell : l’agent peut exécuter des commandes dans votre shell, avec vos droits. Chaque commande est affichée et confirmée, sauf celles couvertes par une autorisation « Toujours autoriser » (préfixe de commande dans un dossier). Les commandes composées ou sensibles (suppression, sudo, réseau, interpréteurs…) sont confirmées à chaque fois.</p>
 <label><input type="checkbox" id="shellEnabled"> Autoriser les commandes shell</label>
+<p style="margin-top:16px">Projets de code (Lasco Code) : l’agent peut lire les projets git que vous avez ouverts dans Lasco Code (sauf fichiers sensibles : .env, clés) et y proposer des créations ou modifications de fichiers. Chaque modification est affichée et confirmée, sauf « Toujours autoriser dans ce projet ».</p>
+<label><input type="checkbox" id="codeEnabled"> Ouvrir mes projets de code aux agents</label>
 <h2>Autorisations permanentes</h2><ul id="grants"></ul>
 <h2>Journal (200 dernières entrées)</h2><ul id="journal"></ul>
 </body></html>

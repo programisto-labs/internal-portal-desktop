@@ -2,6 +2,8 @@
 
 Electron wrapper for the [Lasco web app](https://my.programisto.fr) — macOS, Windows, Linux.
 
+**Lasco Code** (IDE tab of the portal: local git projects, editor, terminals, agents): see [docs/code-workspace.md](docs/code-workspace.md).
+
 Looking for the **mobile app** (iOS & Android)? See [`mobile/`](mobile/README.md).
 
 **npm package:** `lasco-desktop` · **macOS app:** `Lasco.app` · **preload API (web):** `window.lascoDesktop`
