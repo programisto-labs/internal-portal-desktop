@@ -96,6 +96,23 @@ const browserTabsBridge = {
   onShortcut: (callback) => subscribe('browser-tab-shortcut', callback),
 };
 
+/**
+ * Host operations bridge (structured file ops on the user's computer, not the VM).
+ * Exposed only when the page origin is the Lasco portal; main re-validates the sender natively.
+ */
+const PORTAL_ORIGIN_ARG_PREFIX = '--lasco-portal-origin=';
+const portalOriginArg = process.argv.find((arg) => arg.startsWith(PORTAL_ORIGIN_ARG_PREFIX));
+const portalOrigin = portalOriginArg ? portalOriginArg.slice(PORTAL_ORIGIN_ARG_PREFIX.length) : null;
+/** internal-portal#2373: no agents (VM) ⇒ never a host bridge. */
+const noAgents = process.argv.includes('--lasco-no-agents');
+const exposeHostOps =
+  !noAgents && Boolean(portalOrigin) && Boolean(globalThis.location) && globalThis.location.origin === portalOrigin;
+const hostOpsBridge = {
+  getCapabilities: () => ipcRenderer.invoke('host-ops-capabilities'),
+  execute: (request) => ipcRenderer.invoke('host-ops-execute', request),
+  cancel: (requestId) => ipcRenderer.invoke('host-ops-cancel', requestId),
+};
+
 const desktopBridge = {
   platform: process.platform,
   version: appVersion,
@@ -120,6 +137,8 @@ const desktopBridge = {
     onOpenTarget: onOpenPortalTab
   },
   browserTabs: browserTabsBridge,
+  ...(noAgents && { noAgents: true }),
+  ...(exposeHostOps && { hostOps: hostOpsBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
   closeNotification: (tag) => ipcRenderer.invoke('lasco-close-notification', tag),
