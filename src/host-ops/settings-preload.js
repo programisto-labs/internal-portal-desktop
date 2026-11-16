@@ -15,11 +15,22 @@ async function render() {
     await ipcRenderer.invoke('host-ops-admin-set-enabled', box.checked);
     render();
   };
+  const shell = document.getElementById('shellEnabled');
+  shell.checked = s.shellEnabled;
+  shell.disabled = !s.enabled;
+  shell.onchange = async () => {
+    await ipcRenderer.invoke('host-ops-admin-set-shell-enabled', shell.checked);
+    render();
+  };
   const grants = document.getElementById('grants');
   grants.replaceChildren();
   if (!s.grants.length) grants.append(el('li', 'Aucune autorisation permanente.'));
   for (const g of s.grants) {
-    const li = el('li', `${g.operation} — agent ${g.agentName || g.agentId} — dossiers : ${[...g.sourceRoots, ...g.destinationRoots].join(', ')} `);
+    const scope =
+      g.operation === 'shell.run'
+        ? `commande « ${(g.commandPrefix || []).join(' ')} … » — dossier : ${(g.cwdRoots || []).join(', ')}`
+        : `dossiers : ${[...g.sourceRoots, ...g.destinationRoots].join(', ')}`;
+    const li = el('li', `${g.operation} — agent ${g.agentName || g.agentId} — ${scope} `);
     const b = el('button', 'Révoquer');
     b.onclick = async () => {
       await ipcRenderer.invoke('host-ops-admin-revoke', g.id);

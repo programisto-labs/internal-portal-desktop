@@ -5,6 +5,10 @@ const path = require('path');
 const { HostOpsError, isWithin } = require('./paths');
 const { OPERATIONS, buildPlan, planChanged, executePlan } = require('./executor');
 const { ID_RE } = require('./store');
+const { buildShellPlan, maskSecrets, runShell, shellGrantCovers } = require('./shell');
+
+const SHELL_OPERATION = 'shell.run';
+const ALL_OPERATIONS = [...OPERATIONS, SHELL_OPERATION];
 
 const MAX_QUEUE = 10;
 const MAX_SEEN = 1000;
@@ -39,6 +43,8 @@ function createHostOpsService({
   homeDir = require('os').homedir(),
   confirmTimeoutMs = 120000,
   execTimeoutMs = 60000,
+  env = process.env,
+  spawnImpl,
 }) {
   const inflight = new Map(); // requestId -> AbortController
   const seen = new Set();
@@ -61,7 +67,7 @@ function createHostOpsService({
   function findGrant(ctx, plan) {
     return store.listGrants().find((g) => {
       if (g.userId !== ctx.userId || g.deviceId !== store.getDeviceId() || g.agentId !== ctx.agentId) return false;
-      if (g.operation !== plan.operation) return false;
+      if (g.operation !== plan.operation || g.operation === SHELL_OPERATION) return false;
       const inRoots = (roots, dir) => roots.some((r) => isWithin(r, dir, platform));
       if (plan.operation !== 'folder.create' && !inRoots(g.sourceRoots, plan.source.dir)) return false;
       if (plan.operation !== 'file.rename' && !inRoots(g.destinationRoots, plan.target.dir)) return false;
@@ -169,13 +175,148 @@ function createHostOpsService({
     }
   }
 
+  function findShellGrant(ctx, plan) {
+    return store.listGrants().find(
+      (g) =>
+        g.userId === ctx.userId &&
+        g.deviceId === store.getDeviceId() &&
+        g.agentId === ctx.agentId &&
+        shellGrantCovers(g, plan, platform)
+    );
+  }
+
+  function logShell(ctx, plan, decision, outcome, errorCode, exitCode) {
+    journal.add({
+      requestId: ctx.requestId,
+      agentId: ctx.agentId,
+      agentName: ctx.agentName,
+      operation: SHELL_OPERATION,
+      // Journal: folder and masked command only, never the output.
+      source: plan ? plan.cwd : ctx.rawCwd,
+      destination: maskSecrets(plan ? plan.command : ctx.rawCommand || ''),
+      decision,
+      outcome: exitCode === undefined || exitCode === null ? outcome : `${outcome} (code ${exitCode})`,
+      errorCode,
+    });
+  }
+
+  async function runShellRequest(ctx, controller) {
+    const { signal } = controller;
+    const base = { requestId: ctx.requestId, operation: SHELL_OPERATION };
+    let plan = null;
+    let decision = 'none';
+    try {
+      if (signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      plan = await buildShellPlan(fsp, ctx.request, { platform, homeDir });
+      const grant = findShellGrant(ctx, plan);
+      if (grant) {
+        decision = 'grant';
+      } else {
+        const allowPersistent = !plan.notRememberableReason && plan.prefix.length > 0 && path.parse(plan.cwd).root !== plan.cwd;
+        const timer = setTimeout(() => controller.abort('timeout'), confirmTimeoutMs);
+        let answer;
+        try {
+          answer = await confirm({
+            agentId: ctx.agentId,
+            agentName: ctx.agentName,
+            operation: SHELL_OPERATION,
+            command: plan.command,
+            cwd: plan.cwd,
+            timeoutMs: plan.timeoutMs,
+            allowPersistent,
+            notRememberableReason: plan.notRememberableReason,
+            scope: { commandPrefix: plan.prefix, cwdRoots: [plan.cwd] },
+            signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+        if (signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        if (answer !== 'once' && answer !== 'always') {
+          decision = 'denied';
+          logShell(ctx, plan, decision, 'denied');
+          return { ...base, ok: false, status: 'denied', decision, error: { code: 'denied', message: 'Refusé par l’utilisateur.' } };
+        }
+        decision = answer;
+        if (answer === 'always' && allowPersistent) {
+          const created = store.addGrant({
+            userId: ctx.userId,
+            deviceId: store.getDeviceId(),
+            agentId: ctx.agentId,
+            agentName: ctx.agentName,
+            operation: SHELL_OPERATION,
+            commandPrefix: plan.prefix,
+            cwdRoots: [plan.cwd],
+          });
+          base.persistentGrantCreated = Boolean(created);
+        }
+      }
+
+      if (!store.isShellEnabled()) throw new HostOpsError('shell_disabled', 'Commandes shell désactivées.');
+      if (decision === 'grant' && !findShellGrant(ctx, plan)) {
+        throw new HostOpsError('grant_revoked', 'Autorisation révoquée.');
+      }
+      // The folder may have been replaced (symlink swap) while the dialog was open.
+      const fresh = await buildShellPlan(fsp, ctx.request, { platform, homeDir });
+      if (fresh.cwd !== plan.cwd || fresh.command !== plan.command) {
+        throw new HostOpsError('changed_during_confirmation', 'Le dossier de travail a changé après le contrôle, commande annulée.');
+      }
+
+      const execTimer = setTimeout(() => controller.abort('timeout'), fresh.timeoutMs);
+      let out;
+      try {
+        out = await runShell({ command: fresh.command, cwd: fresh.cwd, signal, platform, env, ...(spawnImpl ? { spawnImpl } : {}) });
+      } finally {
+        clearTimeout(execTimer);
+      }
+      const result = {
+        command: fresh.command,
+        cwd: fresh.cwd,
+        exitCode: out.exitCode,
+        signal: out.signal,
+        stdout: out.stdout,
+        stderr: out.stderr,
+        truncated: out.truncated,
+        durationMs: out.durationMs,
+      };
+      if (out.aborted) {
+        const code = signal.reason === 'timeout' ? 'timeout' : 'cancelled';
+        logShell(ctx, fresh, decision, code, code, out.exitCode);
+        return {
+          ...base,
+          ...failure(code, code === 'timeout' ? 'Délai dépassé, la commande a été arrêtée.' : 'Commande arrêtée.'),
+          decision,
+          result,
+        };
+      }
+      logShell(ctx, fresh, decision, 'completed', undefined, out.exitCode);
+      // The proof is the real exit status reported by the OS; a non-zero code is a real result too.
+      return {
+        ...base,
+        ok: true,
+        status: 'completed',
+        decision,
+        result,
+        verification: { ok: true, exitCode: out.exitCode, signal: out.signal },
+      };
+    } catch (err) {
+      const mapped =
+        err && err.code === 'ENOENT' && !(err instanceof HostOpsError)
+          ? { code: 'shell_unavailable', message: 'Shell introuvable sur cet ordinateur.' }
+          : mapError(err, signal);
+      logShell(ctx, plan, decision, mapped.code === 'cancelled' || mapped.code === 'timeout' ? mapped.code : 'error', mapped.code);
+      return { ...base, ...failure(mapped.code, mapped.message), decision };
+    }
+  }
+
   return {
     getCapabilities() {
       return {
         available: true,
         enabled: store.isEnabled(),
+        shellEnabled: store.isShellEnabled(),
         deviceId: store.getDeviceId(),
-        operations: [...OPERATIONS],
+        operations: store.isShellEnabled() ? [...ALL_OPERATIONS] : [...OPERATIONS],
         scope: 'host',
         // Lets the agent turn "~/Downloads/x.pdf" into an absolute path; never sent to the model unless asked.
         platform,
@@ -196,9 +337,16 @@ function createHostOpsService({
       if (![requestId, agentId, userId].every((v) => typeof v === 'string' && ID_RE.test(v))) {
         return failure('invalid_request', 'Identité de requête invalide.');
       }
-      if (!OPERATIONS.includes(operation)) return failure('unsupported_operation', 'Opération non supportée.', { requestId });
+      if (!ALL_OPERATIONS.includes(operation)) return failure('unsupported_operation', 'Opération non supportée.', { requestId });
       if (!store.isEnabled()) {
         return failure('disabled', "Les opérations sur l'hôte ne sont pas activées dans les options de Lasco Desktop.", { requestId });
+      }
+      if (operation === SHELL_OPERATION && !store.isShellEnabled()) {
+        return failure(
+          'shell_disabled',
+          "Les commandes shell ne sont pas activées dans Lasco Desktop (Fichier > Opérations sur l'hôte).",
+          { requestId }
+        );
       }
       if (request.deviceId !== undefined && request.deviceId !== store.getDeviceId()) {
         return failure('wrong_device', 'Appareil non concerné par cette requête.', { requestId });
@@ -220,16 +368,21 @@ function createHostOpsService({
         agentName: cleanLabel(request.agentName, 80) || agentId,
         rawSource: typeof request.source === 'string' ? request.source : null,
         rawDestination: typeof request.destination === 'string' ? request.destination : null,
-        request: {
-          operation,
-          source: request.source,
-          destination: request.destination,
-          newName: request.newName,
-          overwrite: request.overwrite === true,
-        },
+        rawCommand: typeof request.command === 'string' ? request.command.slice(0, 300) : null,
+        rawCwd: typeof request.cwd === 'string' ? request.cwd : null,
+        request:
+          operation === SHELL_OPERATION
+            ? { command: request.command, cwd: request.cwd, timeoutMs: request.timeoutMs }
+            : {
+                operation,
+                source: request.source,
+                destination: request.destination,
+                newName: request.newName,
+                overwrite: request.overwrite === true,
+              },
       };
       pending += 1;
-      const job = queue.then(() => run(ctx, controller));
+      const job = queue.then(() => (operation === SHELL_OPERATION ? runShellRequest(ctx, controller) : run(ctx, controller)));
       queue = job.catch(() => {});
       try {
         return await job;

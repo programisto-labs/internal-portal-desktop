@@ -5,8 +5,10 @@
 <style>body{font:14px system-ui;margin:20px;color:#222}h2{font-size:15px;margin-top:24px}li{margin:6px 0}code{font-size:12px}button{margin-left:8px}</style>
 </head><body>
 <h1 style="font-size:18px">Opérations sur l’hôte (agents IA)</h1>
-<p>Permet aux agents de déplacer, copier, renommer des fichiers et créer des dossiers sur cet ordinateur, après votre confirmation. Désactivé par défaut. Sans lien avec la machine virtuelle.</p>
+<p>Permet aux agents de déplacer, copier, renommer des fichiers, créer des dossiers et, si vous l’activez, exécuter des commandes sur cet ordinateur, après votre confirmation. Désactivé par défaut. Sans lien avec la machine virtuelle.</p>
 <label><input type="checkbox" id="enabled"> Activer les opérations sur l’hôte</label>
+<p style="margin-top:16px">Commandes shell : l’agent peut exécuter des commandes dans votre shell, avec vos droits. Chaque commande est affichée et confirmée, sauf celles couvertes par une autorisation « Toujours autoriser » (préfixe de commande dans un dossier). Les commandes composées ou sensibles (suppression, sudo, réseau, interpréteurs…) sont confirmées à chaque fois.</p>
+<label><input type="checkbox" id="shellEnabled"> Autoriser les commandes shell</label>
 <h2>Autorisations permanentes</h2><ul id="grants"></ul>
 <h2>Journal (200 dernières entrées)</h2><ul id="journal"></ul>
 </body></html>

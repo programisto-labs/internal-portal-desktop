@@ -781,9 +781,19 @@ function registerWindowIPC() {
         String(event.senderFrame.url).startsWith('file:')
     );
   ipcMain.handle('host-ops-admin-state', (event) => {
-    if (!fromHostOpsSettings(event)) return { enabled: false, grants: [], journal: [] };
+    if (!fromHostOpsSettings(event)) return { enabled: false, shellEnabled: false, grants: [], journal: [] };
     ensureHostOps();
-    return { enabled: hostOpsStore.isEnabled(), grants: hostOpsStore.listGrants(), journal: hostOpsJournal.list() };
+    return {
+      enabled: hostOpsStore.isEnabled(),
+      shellEnabled: hostOpsStore.isShellEnabled(),
+      grants: hostOpsStore.listGrants(),
+      journal: hostOpsJournal.list(),
+    };
+  });
+  ipcMain.handle('host-ops-admin-set-shell-enabled', (event, value) => {
+    if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
+    ensureHostOps();
+    return hostOpsStore.setShellEnabled(value);
   });
   ipcMain.handle('host-ops-admin-set-enabled', (event, value) => {
     if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;

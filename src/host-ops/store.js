@@ -18,8 +18,31 @@ function normalizeGrant(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const strOk = (v) => typeof v === 'string' && ID_RE.test(v);
   if (!strOk(raw.id) || !strOk(raw.userId) || !strOk(raw.deviceId) || !strOk(raw.agentId)) return null;
-  if (!['file.move', 'file.copy', 'file.rename', 'folder.create'].includes(raw.operation)) return null;
   const roots = (v) => (Array.isArray(v) ? v.filter((r) => typeof r === 'string' && path.isAbsolute(r)).slice(0, 4) : []);
+  if (raw.operation === 'shell.run') {
+    // Command prefix (1-3 tokens) in a folder: never a global shell permission.
+    const prefix = Array.isArray(raw.commandPrefix) ? raw.commandPrefix : [];
+    const prefixOk =
+      prefix.length >= 1 &&
+      prefix.length <= 3 &&
+      prefix.every((t) => typeof t === 'string' && t.length > 0 && t.length <= 200 && !/[\0\s]/.test(t));
+    const cwdRoots = roots(raw.cwdRoots);
+    if (!prefixOk || !cwdRoots.length) return null;
+    return {
+      id: raw.id,
+      userId: raw.userId,
+      deviceId: raw.deviceId,
+      agentId: raw.agentId,
+      agentName: clip(raw.agentName),
+      operation: 'shell.run',
+      commandPrefix: prefix.slice(),
+      cwdRoots,
+      sourceRoots: [],
+      destinationRoots: [],
+      createdAt: Number(raw.createdAt) || 0,
+    };
+  }
+  if (!['file.move', 'file.copy', 'file.rename', 'folder.create'].includes(raw.operation)) return null;
   const sourceRoots = roots(raw.sourceRoots);
   const destinationRoots = roots(raw.destinationRoots);
   const needsSource = raw.operation !== 'folder.create';
@@ -53,6 +76,8 @@ function createHostOpsStore(filePath, fsImpl = fs) {
     const deviceId = raw && typeof raw.deviceId === 'string' && ID_RE.test(raw.deviceId) ? raw.deviceId : crypto.randomUUID();
     state = {
       enabled: Boolean(raw && raw.enabled === true),
+      // Shell commands are a separate switch, off by default even when file operations are on.
+      shellEnabled: Boolean(raw && raw.shellEnabled === true),
       deviceId,
       grants: raw && Array.isArray(raw.grants) ? raw.grants.map(normalizeGrant).filter(Boolean).slice(0, MAX_GRANTS) : [],
     };
@@ -80,6 +105,12 @@ function createHostOpsStore(filePath, fsImpl = fs) {
       load().enabled = value === true;
       save();
       return load().enabled;
+    },
+    isShellEnabled: () => load().enabled && load().shellEnabled,
+    setShellEnabled(value) {
+      load().shellEnabled = value === true;
+      save();
+      return load().shellEnabled;
     },
     getDeviceId: () => load().deviceId,
     listGrants: () => load().grants.map((g) => ({ ...g })),
