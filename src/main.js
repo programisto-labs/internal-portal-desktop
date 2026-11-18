@@ -20,6 +20,8 @@ const { createConfirm } = require('./host-ops/confirm');
 const { isTrustedHostOpsSender } = require('./host-ops/trust');
 const { createHostOpsWebSettings, buildEnableDialog } = require('./host-ops/web-settings');
 const { createInlineConfirm } = require('./host-ops/inline-confirm');
+const { createHarnessRunner } = require('./code-harness/runner');
+const { HARNESSES } = require('./code-harness/harnesses');
 const { getLoginEnv } = require('./code-workspace/login-env');
 const { createGitRunner } = require('./code-workspace/git');
 const { createProjectStore } = require('./code-workspace/projects');
@@ -176,6 +178,71 @@ let hostOpsService = null;
 let hostOpsSettingsWin = null;
 let hostOpsWebSettings = null;
 let hostOpsInlineConfirm = null;
+let harnessRunner = null;
+
+/** Événements d'une exécution de harnais vers le portail (cadre principal, origine du portail seulement). */
+function sendHarnessEvent(event) {
+  const win = mainPortalWindow();
+  if (!win || win.webContents.isDestroyed()) return;
+  try {
+    if (new URL(win.webContents.getURL()).origin !== PORTAL_ORIGIN) return;
+  } catch (_) {
+    return;
+  }
+  win.webContents.send('code-harness-event', event);
+}
+
+function ensureHarnessRunner() {
+  if (!harnessRunner) {
+    // ensureHostOps crée le store et la confirmation en carte (avec la boîte native en repli).
+    ensureHostOps();
+    const core = ensureCodeCore();
+    harnessRunner = createHarnessRunner({
+      isEnabled: () => hostOpsStore.isHarnessEnabled(),
+      getProject: (userId, projectId) => core.projects.get(userId, projectId),
+      getEnv: () => getLoginEnv(),
+      emit: sendHarnessEvent,
+      confirm: async (req) => {
+        const grant = hostOpsStore
+          .listGrants()
+          .find(
+            (g) =>
+              g.operation === 'code.delegate' &&
+              g.userId === req.userId &&
+              g.agentId === req.agentId &&
+              g.deviceId === hostOpsStore.getDeviceId() &&
+              g.harness === req.harness &&
+              (g.destinationRoots || []).includes(req.projectRoot)
+          );
+        if (grant) return 'grant';
+        const answer = await hostOpsInlineConfirm.confirm({ ...req, allowPersistent: true });
+        if (answer === 'always') {
+          hostOpsStore.addGrant({
+            userId: req.userId,
+            deviceId: hostOpsStore.getDeviceId(),
+            agentId: req.agentId,
+            agentName: req.agentName,
+            operation: 'code.delegate',
+            harness: req.harness,
+            destinationRoots: [req.projectRoot],
+          });
+        }
+        return answer;
+      },
+    });
+  }
+  return harnessRunner;
+}
+
+/** Ouvre un Terminal sur la commande de connexion du harnais (macOS) ; ailleurs, la page affiche la commande. */
+function openHarnessLogin(harnessId) {
+  const def = HARNESSES[harnessId];
+  if (!def) return { ok: false };
+  if (process.platform !== 'darwin') return { ok: true, opened: false, command: def.loginCommand };
+  const script = `tell application "Terminal" to do script ${JSON.stringify(def.loginCommand)}\ntell application "Terminal" to activate`;
+  require('child_process').execFile('osascript', ['-e', script], () => undefined);
+  return { ok: true, opened: true, command: def.loginCommand };
+}
 /** Native confirmation cards: webContents id -> { id, onDecide, onSize }. */
 const confirmCards = new Map();
 
@@ -1067,6 +1134,39 @@ function registerWindowIPC() {
     if (!card) return;
     card.onSize(Number(height));
   });
+  // --- Harnais de code (Claude Code, Codex, Cursor, Vibe) : même expéditeur de confiance ---
+  ipcMain.handle('code-harness-status', async (event) => {
+    if (!trustedHostOpsSender(event)) return { enabled: false, harnesses: [] };
+    return ensureHarnessRunner().status();
+  });
+  ipcMain.handle('code-harness-start', (event, request) => {
+    if (!trustedHostOpsSender(event)) return unavailable;
+    return ensureHarnessRunner().start(request);
+  });
+  ipcMain.handle('code-harness-stop', (event, runId) => {
+    if (!trustedHostOpsSender(event) || typeof runId !== 'string') return unavailable;
+    return ensureHarnessRunner().stop(runId);
+  });
+  ipcMain.handle('code-harness-stop-request', (event, requestId) => {
+    if (!trustedHostOpsSender(event) || typeof requestId !== 'string') return unavailable;
+    return ensureHarnessRunner().stopByRequest(requestId);
+  });
+  ipcMain.handle('code-harness-runs', (event) => {
+    if (!trustedHostOpsSender(event)) return [];
+    return ensureHarnessRunner().list();
+  });
+  ipcMain.handle('code-harness-login', (event, harnessId) => {
+    if (!trustedHostOpsSender(event) || typeof harnessId !== 'string') return unavailable;
+    return ensureHarnessRunner().login(harnessId);
+  });
+  ipcMain.handle('code-harness-retry', (event, runId) => {
+    if (!trustedHostOpsSender(event) || typeof runId !== 'string') return unavailable;
+    return ensureHarnessRunner().retry(runId);
+  });
+  ipcMain.handle('code-harness-open-login', (event, harnessId) => {
+    if (!trustedHostOpsSender(event) || typeof harnessId !== 'string') return unavailable;
+    return openHarnessLogin(harnessId);
+  });
   // --- Lasco Code workspace: same trusted sender as host operations (portal main frame) ---
   ipcMain.handle('code-workspace-invoke', (event, message) => {
     if (!trustedHostOpsSender(event)) return forbidden;
@@ -1098,6 +1198,7 @@ function registerWindowIPC() {
       enabled: hostOpsStore.isEnabled(),
       shellEnabled: hostOpsStore.isShellEnabled(),
       codeEnabled: hostOpsStore.isCodeEnabled(),
+      harnessEnabled: hostOpsStore.isHarnessEnabled(),
       grants: hostOpsStore.listGrants(),
       journal: hostOpsJournal.list(),
     };
@@ -1111,6 +1212,11 @@ function registerWindowIPC() {
     if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
     ensureHostOps();
     return hostOpsStore.setCodeEnabled(value);
+  });
+  ipcMain.handle('host-ops-admin-set-harness-enabled', (event, value) => {
+    if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
+    ensureHostOps();
+    return hostOpsStore.setHarnessEnabled(value);
   });
   ipcMain.handle('host-ops-admin-set-enabled', (event, value) => {
     if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;

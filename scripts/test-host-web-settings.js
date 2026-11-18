@@ -53,7 +53,8 @@ describe('host-ops web settings (profil > Cet ordinateur)', () => {
       enabled: true,
       shellEnabled: true,
       codeEnabled: false,
-      grants: { files: 0, shell: 1, code: 1, total: 2 },
+      harnessEnabled: false,
+      grants: { files: 0, shell: 1, code: 1, harness: 0, total: 2 },
     });
     assert.ok(!JSON.stringify(s).includes(tmp));
     assert.ok(!JSON.stringify(s).includes('git'));

@@ -43,6 +43,16 @@ Every confirmation (file operations, `shell.run`, Lasco Code writes) goes throug
 5. No valid spot within 1.5 s (chat closed, older portal, error page, minimized window), or the spot lost for 1.5 s: the regular native dialog takes over the same request. The card's height is measured by the card itself (`size` event).
 6. `{ type: 'resolved', id }` when the request ends (decision, timeout, cancel, fallback). `hostOps.pendingConfirms()` lists waiting requests after a page reload.
 
+## Code harnesses (Claude Code, Codex, Cursor, Vibe)
+
+`window.lascoDesktop.codeHarness` (same exposure and trusted-sender rule as `hostOps`), `src/code-harness/`:
+
+- `status()` → `{ enabled, harnesses: [{ id, label, installed, version, loginCommand }] }` (runs `--version` only).
+- `start({ requestId, userId, agentId, agentName, harness, projectId, prompt, sessionId? })` → resolves when the run ends: `{ ok, status: 'completed'|'denied'|'error'|'stopped'|'timeout'|'login_required', result: { runId, harness, project, summary, files, sessionId?, durationMs, loginCommand? }, error? }`.
+- `stop(runId)`, `stopRequest(requestId)`, `runs()`, `openLogin(harness)` (macOS: Terminal on the login command), `onEvent(cb)` with `started` / `step` / `text` / `done`.
+
+Rules: switch « Harnais de code » (`harnessEnabled`, needs host operations and code projects; off by default; turning code projects or host operations off turns it off). Project must be open in Lasco Code (root from the project store, never a path from the page). One confirmation per run (card in the chat, `operation: 'code.delegate'`), « Toujours autoriser » bound to user × device × agent × harness × project root. One run per project, 30 min max, process group killed on stop. Lasco never handles harness credentials; « not logged in » is detected in the output.
+
 ## Native checks (independent of the frontend)
 
 - Sender must be the main frame of the main window at the exact portal origin.

@@ -137,6 +137,27 @@ const hostOpsBridge = {
  * Lasco Code workspace (IDE page): local git projects chosen natively, files, git, terminals.
  * Same exposure rule as hostOps; main re-validates the sender on every call.
  */
+/**
+ * Harnais de code : un agent lance Claude Code, Codex, Cursor ou Vibe sur un projet de Lasco Code.
+ * Lancement confirmé par Desktop ; la page ne reçoit que les étapes et le résultat.
+ */
+const codeHarnessBridge = {
+  status: () => ipcRenderer.invoke('code-harness-status'),
+  start: (request) => ipcRenderer.invoke('code-harness-start', request),
+  stop: (runId) => ipcRenderer.invoke('code-harness-stop', runId),
+  stopRequest: (requestId) => ipcRenderer.invoke('code-harness-stop-request', requestId),
+  runs: () => ipcRenderer.invoke('code-harness-runs'),
+  openLogin: (harness) => ipcRenderer.invoke('code-harness-open-login', harness),
+  login: (harness) => ipcRenderer.invoke('code-harness-login', harness),
+  retry: (runId) => ipcRenderer.invoke('code-harness-retry', runId),
+  onEvent: (callback) => {
+    if (typeof callback !== 'function') return () => undefined;
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('code-harness-event', listener);
+    return () => ipcRenderer.removeListener('code-harness-event', listener);
+  },
+};
+
 const codeWorkspaceBridge = {
   invoke: (method, payload) => ipcRenderer.invoke('code-workspace-invoke', { method, payload }),
   terminalWrite: (id, data) => ipcRenderer.send('code-terminal-input', { id, data }),
@@ -171,7 +192,7 @@ const desktopBridge = {
   },
   browserTabs: browserTabsBridge,
   ...(noAgents && { noAgents: true }),
-  ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge }),
+  ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
   closeNotification: (tag) => ipcRenderer.invoke('lasco-close-notification', tag),

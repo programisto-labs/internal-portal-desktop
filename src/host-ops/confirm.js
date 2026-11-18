@@ -62,7 +62,31 @@ function buildCodeConfirmDialog(req) {
   return { title, message: lines.join('\n'), buttons, decisions };
 }
 
+/** Harnais de code : un agent demande à lancer Claude Code, Codex, Cursor ou Vibe sur un projet. */
+function buildDelegateConfirmDialog(req) {
+  const prompt = String(req.prompt || '');
+  const lines = [
+    `Agent : ${req.agentName}`,
+    `Harnais : ${req.harnessLabel}`,
+    `Projet : ${req.project} (${req.projectRoot})`,
+    '',
+    'Consigne :',
+    prompt.length > 600 ? `${prompt.slice(0, 599)}…` : prompt,
+    '',
+    `Effet : ${req.harnessLabel} ${req.effect} Il travaille sur CET ORDINATEUR, dans ce projet ; les changements restent visibles (et annulables) dans Git.`,
+  ];
+  const buttons = ['Refuser', 'Lancer'];
+  const decisions = ['deny', 'once'];
+  if (req.allowPersistent) {
+    buttons.push(`Toujours autoriser ${req.harnessLabel} dans ce projet`);
+    decisions.push('always');
+    lines.push('', `« Toujours autoriser » vaut pour cet agent, ${req.harnessLabel} et ${req.projectRoot}, sur cet appareil. Révocable dans Réglages > Cet ordinateur.`);
+  }
+  return { title: `Un agent demande à lancer ${req.harnessLabel}`, message: lines.join('\n'), buttons, decisions };
+}
+
 function buildConfirmDialog(req) {
+  if (req.operation === 'code.delegate') return buildDelegateConfirmDialog(req);
   if (req.operation === 'shell.run') return buildShellConfirmDialog(req);
   if (req.operation === 'code.write' || req.operation === 'code.edit') return buildCodeConfirmDialog(req);
   const lines = [`Agent : ${req.agentName}`, `Opération : ${OP_LABELS[req.operation] || req.operation}`, ''];
