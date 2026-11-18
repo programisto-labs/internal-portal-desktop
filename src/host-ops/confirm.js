@@ -27,7 +27,7 @@ function buildShellConfirmDialog(req) {
     decisions.push('always');
     lines.push(
       '',
-      `« Toujours autoriser » couvre les commandes commençant par « ${prefix.join(' ')} », dans ${req.cwd} et ses sous-dossiers, pour cet agent et cet appareil. Jamais les commandes composées ni sensibles. Révocable dans Fichier > Opérations sur l’hôte.`
+      `« Toujours autoriser » couvre les commandes commençant par « ${prefix.join(' ')} », dans ${req.cwd} et ses sous-dossiers, pour cet agent et cet appareil. Jamais les commandes composées ni sensibles. Révocable dans Réglages > Cet ordinateur.`
     );
   } else if (req.notRememberableReason) {
     lines.push('', req.notRememberableReason);
@@ -53,7 +53,7 @@ function buildCodeConfirmDialog(req) {
     decisions.push('always');
     lines.push(
       '',
-      `« Toujours autoriser » couvre les créations et modifications de fichiers par cet agent dans ${req.projectRoot}, sur cet appareil. Jamais les fichiers sensibles (.env, clés). Révocable dans Fichier > Opérations sur l’hôte.`
+      `« Toujours autoriser » couvre les créations et modifications de fichiers par cet agent dans ${req.projectRoot}, sur cet appareil. Jamais les fichiers sensibles (.env, clés). Révocable dans Réglages > Cet ordinateur.`
     );
   } else if (req.sensitive) {
     lines.push('', 'Fichier sensible (secrets, clés) : cette confirmation ne peut pas être mémorisée.');
@@ -90,7 +90,7 @@ function buildConfirmDialog(req) {
     const roots = [...new Set([...(req.scope.sourceRoots || []), ...(req.scope.destinationRoots || [])])];
     buttons.push('Toujours autoriser ce type d’opération');
     decisions.push('always');
-    lines.push('', `« Toujours autoriser » ne vaut que pour cet agent, cette opération, cet appareil et ces dossiers : ${roots.join(', ')}. Révocable dans Lasco > Opérations sur l’hôte.`);
+    lines.push('', `« Toujours autoriser » ne vaut que pour cet agent, cette opération, cet appareil et ces dossiers : ${roots.join(', ')}. Révocable dans Réglages > Cet ordinateur.`);
   }
   return { title, message: lines.join('\n'), buttons, decisions };
 }

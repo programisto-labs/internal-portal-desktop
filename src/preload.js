@@ -111,6 +111,26 @@ const hostOpsBridge = {
   getCapabilities: () => ipcRenderer.invoke('host-ops-capabilities'),
   execute: (request) => ipcRenderer.invoke('host-ops-execute', request),
   cancel: (requestId) => ipcRenderer.invoke('host-ops-cancel', requestId),
+  /**
+   * Confirmations in the Lasco AI chat: Desktop announces a request (`request` / `size` / `resolved`),
+   * the page reserves a placeholder and reports where it is. Desktop draws the card and its buttons.
+   */
+  onConfirm: (callback) => {
+    if (typeof callback !== 'function') return () => undefined;
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('host-ops-confirm', listener);
+    return () => ipcRenderer.removeListener('host-ops-confirm', listener);
+  },
+  placeConfirm: (id, placement) => ipcRenderer.send('host-ops-confirm-place', { id, placement }),
+  pendingConfirms: () => ipcRenderer.invoke('host-ops-confirm-pending'),
+  /** Profil > « Cet ordinateur ». Activer ouvre une confirmation native ; la page ne décide jamais seule. */
+  settings: {
+    status: () => ipcRenderer.invoke('host-ops-web-status'),
+    disable: (feature) => ipcRenderer.invoke('host-ops-web-disable', feature),
+    requestEnable: (feature) => ipcRenderer.invoke('host-ops-web-request-enable', feature),
+    revokeAll: () => ipcRenderer.invoke('host-ops-web-revoke-all'),
+    openSettings: () => ipcRenderer.invoke('host-ops-web-open-settings'),
+  },
 };
 
 /**

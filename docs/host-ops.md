@@ -16,6 +16,11 @@ hidden and the IPC handlers refuse.
 - `getCapabilities(): Promise<{ available, enabled, deviceId, operations: ['file.move','file.copy','file.rename','folder.create'], scope: 'host', platform, homeDir }>`
 - `execute(request): Promise<Result>`
 - `cancel(requestId): Promise<{ ok }>`
+- `settings` — portal profile settings, section « Cet ordinateur » (`host-ops-web-*`, same trusted sender):
+  - `status(): Promise<{ available, enabled, shellEnabled, codeEnabled, grants: { files, shell, code, total } }>` — switches and counts only (no paths, commands, agent ids, journal);
+  - `disable(feature)` / `revokeAll()` — applied directly (they only remove rights); `feature` is `host`, `shell` or `code`;
+  - `requestEnable(feature)` — a native dialog decides (« Annuler » default and cancel). Shell / code also turn on host operations, in the same dialog. One dialog at a time (`busy`), 30 s `cooldown` after a refusal. Result `{ ok, decision: 'enabled'|'denied'|'already', status }`;
+  - `openSettings()` — opens the native settings window (grants and journal stay there).
 
 Request: `{ requestId, agentId, userId, agentName?, deviceId?, operation, source?, destination?, newName?, overwrite? }`
 (`file.rename` uses `source` + `newName`; `folder.create` uses `destination` only, parent must exist; ids match `[A-Za-z0-9_.:-]{1,128}`; paths absolute.)
@@ -26,6 +31,17 @@ Success is only returned after the filesystem state was re-read and verified.
 Error codes: `disabled, invalid_request, unsupported_operation, wrong_device, duplicate_request, busy, forbidden, invalid_path, path_not_absolute, path_traversal, invalid_name, symlink_rejected, source_missing, not_a_file, destination_exists, destination_is_directory, same_path, parent_missing, changed_during_confirmation, source_changed, grant_revoked, permission_denied, no_space, verification_failed, timeout, cancelled, denied, io_error`.
 
 IPC channels: `host-ops-capabilities`, `host-ops-execute`, `host-ops-cancel` (web); `host-ops-admin-*` answer only to the local options window (`file:`).
+
+## Confirmations in the chat (card drawn by Desktop)
+
+Every confirmation (file operations, `shell.run`, Lasco Code writes) goes through `host-ops/inline-confirm.js`:
+
+1. Desktop sends `host-ops-confirm` `{ type: 'request', id, title, agentName, height }` to the portal (`hostOps.onConfirm`). `id` is the request id, i.e. the agent's tool call id.
+2. The portal reserves a placeholder of that height at the end of the Lasco AI thread and reports where it is (`hostOps.placeConfirm(id, { visible, x, y, width, height })`, CSS pixels, scaled by the zoom factor in main).
+3. Desktop draws its own `WebContentsView` (`confirm-card.html`, sandboxed `file:` page, text through `textContent` only) on that spot: title, agent, command or file preview, buttons. The page never gets the confirmation text nor the buttons, and cannot click into that view.
+4. Buttons are armed only after the card stayed still for 600 ms; any move disarms them. A spot is used only if it is at least 280 px wide, tall enough, fully inside the window and reported visible.
+5. No valid spot within 1.5 s (chat closed, older portal, error page, minimized window), or the spot lost for 1.5 s: the regular native dialog takes over the same request. The card's height is measured by the card itself (`size` event).
+6. `{ type: 'resolved', id }` when the request ends (decision, timeout, cancel, fallback). `hostOps.pendingConfirms()` lists waiting requests after a page reload.
 
 ## Native checks (independent of the frontend)
 
@@ -38,7 +54,7 @@ IPC channels: `host-ops-capabilities`, `host-ops-execute`, `host-ops-cancel` (we
 
 ## Permissions
 
-Dialog: Refuser / Autoriser une fois / Toujours autoriser ce type d'opération. A persistent rule is bound to user, device, agent, operation, and the real source/destination folders shown. Not offered when a folder is a filesystem root or contains the home directory. Manage (enable, review, revoke, journal) in **Fichier > Opérations sur l'hôte (agents)…**. State: `userData/host-ops.json`, journal (200 entries, paths/ids only) `userData/host-ops-journal.json`, both mode 0600.
+Dialog: Refuser / Autoriser une fois / Toujours autoriser ce type d'opération. A persistent rule is bound to user, device, agent, operation, and the real source/destination folders shown. Not offered when a folder is a filesystem root or contains the home directory. Manage (enable, review, revoke, journal) in **Lasco > Réglages… (⌘,)** on macOS, **Fichier > Réglages… (Ctrl+,)** elsewhere; the portal profile (« Cet ordinateur ») shows the switches, disables and revokes, and asks to enable through the native dialog. State: `userData/host-ops.json`, journal (200 entries, paths/ids only) `userData/host-ops-journal.json`, both mode 0600.
 
 ## Limits / remaining work
 
@@ -50,7 +66,7 @@ Dialog: Refuser / Autoriser une fois / Toujours autoriser ce type d'opération. 
 
 ## Manual test (Desktop)
 
-1. Menu Fichier > Opérations sur l'hôte → enable. 2. In the Lasco AI chat, ask « déplace ~/Downloads/test.txt dans ~/Documents » (or call `hostOps.execute` from the portal devtools console). 3. Check the dialog, Refuser (nothing moves), Autoriser une fois (file moves, result `verification` true). 4. « Toujours autoriser », restart, repeat inside the folder (no dialog); outside (dialog). 5. Revoke → dialog again. Not yet run on a real Electron build.
+1. Lasco > Réglages… (or portal profile > Cet ordinateur) → enable. 2. In the Lasco AI chat, ask « déplace ~/Downloads/test.txt dans ~/Documents » (or call `hostOps.execute` from the portal devtools console). 3. Check the dialog, Refuser (nothing moves), Autoriser une fois (file moves, result `verification` true). 4. « Toujours autoriser », restart, repeat inside the folder (no dialog); outside (dialog). 5. Revoke → dialog again. Not yet run on a real Electron build.
 
 ## Shell commands (`shell.run`)
 

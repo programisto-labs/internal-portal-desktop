@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'">
+<title>Confirmation</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: rgba(255, 255, 255, 0.92);
+    --fg: #111;
+    --muted: rgba(0, 0, 0, 0.6);
+    --edge: rgba(0, 0, 0, 0.1);
+    --code: rgba(0, 0, 0, 0.05);
+    --btn: rgba(0, 0, 0, 0.06);
+    --btn-hover: rgba(0, 0, 0, 0.11);
+    --primary: #111;
+    --primary-fg: #fff;
+  }
+  :root[data-theme='dark'] {
+    --bg: rgba(30, 30, 30, 0.94);
+    --fg: #f2f2f2;
+    --muted: rgba(255, 255, 255, 0.62);
+    --edge: rgba(255, 255, 255, 0.12);
+    --code: rgba(255, 255, 255, 0.07);
+    --btn: rgba(255, 255, 255, 0.08);
+    --btn-hover: rgba(255, 255, 255, 0.14);
+    --primary: #f2f2f2;
+    --primary-fg: #111;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; }
+  body {
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    color: var(--fg);
+    -webkit-user-select: none;
+    user-select: none;
+    overflow: hidden;
+  }
+  .card {
+    border: 1px solid var(--edge);
+    border-radius: 18px;
+    background: var(--bg);
+    padding: 12px 14px;
+    -webkit-backdrop-filter: blur(24px);
+    backdrop-filter: blur(24px);
+  }
+  .head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .badge {
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    border: 1px solid var(--edge); border-radius: 999px; padding: 1px 8px; white-space: nowrap;
+  }
+  h1 { font-size: 13px; font-weight: 600; margin: 0; flex: 1; min-width: 0; }
+  .body {
+    max-height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    color: var(--muted); font-size: 12px;
+  }
+  .body .code {
+    display: block; margin: 4px 0; padding: 6px 8px; border-radius: 10px; background: var(--code);
+    color: var(--fg); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+  }
+  .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+  button {
+    font: inherit; font-size: 12px; font-weight: 500; color: var(--fg);
+    border: 0; border-radius: 999px; padding: 6px 12px; background: var(--btn); cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--btn-hover); }
+  button.primary { background: var(--primary); color: var(--primary-fg); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--muted); outline-offset: 1px; }
+</style>
+</head>
+<body>
+  <div class="card" id="card" role="alertdialog" aria-labelledby="title" aria-describedby="body">
+    <div class="head">
+      <span class="badge">Lasco Desktop</span>
+      <h1 id="title"></h1>
+    </div>
+    <div class="body" id="body"></div>
+    <div class="actions" id="actions"></div>
+  </div>
+</body>
+</html>

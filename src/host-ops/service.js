@@ -117,6 +117,7 @@ function createHostOpsService({
         let answer;
         try {
           answer = await confirm({
+            requestId: ctx.requestId,
             agentId: ctx.agentId,
             agentName: ctx.agentName,
             operation: plan.operation,
@@ -225,6 +226,7 @@ function createHostOpsService({
         let answer;
         try {
           answer = await confirm({
+            requestId: ctx.requestId,
             agentId: ctx.agentId,
             agentName: ctx.agentName,
             operation: SHELL_OPERATION,
@@ -374,14 +376,14 @@ function createHostOpsService({
       if (operation === SHELL_OPERATION && !store.isShellEnabled()) {
         return failure(
           'shell_disabled',
-          "Les commandes shell ne sont pas activées dans Lasco Desktop (Fichier > Opérations sur l'hôte).",
+          "Les commandes shell ne sont pas activées dans Lasco Desktop (Réglages > Cet ordinateur).",
           { requestId }
         );
       }
       if (isCode && !store.isCodeEnabled()) {
         return failure(
           'code_disabled',
-          "Les projets de code ne sont pas ouverts aux agents dans Lasco Desktop (Fichier > Opérations sur l'hôte).",
+          "Les projets de code ne sont pas ouverts aux agents dans Lasco Desktop (Réglages > Cet ordinateur).",
           { requestId }
         );
       }

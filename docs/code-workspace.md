@@ -88,5 +88,5 @@ Commands (tests, builds, commits) stay `shell.run`, with its own consent and pre
 1. `npm install`, then `npm run dev` with the portal on `localhost:3001`. 2. Sidebar « Code » (or new tab › Lasco Code) →
 « Ouvrir un dossier » → pick a git repository. 3. Explorer, open / edit / save a file (⌘S, autosave), ⌘P, ⌘⇧F, terminal (⌘J):
 `git status`, `npm test`. 4. Git panel: stage, commit (⌘↵), push / pull, branch picker, « Créer une PR » opens in a browser tab.
-5. Fichier › Opérations sur l'hôte: enable host operations and « Ouvrir mes projets de code aux agents »; in Lasco AI with the
+5. Lasco › Réglages… (or portal profile › Cet ordinateur): enable host operations and « Ouvrir mes projets de code aux agents »; in Lasco AI with the
 Code tab active: « ajoute un test pour X » → reads without dialog, each edit confirmed, `npm test` confirmed as a shell command.

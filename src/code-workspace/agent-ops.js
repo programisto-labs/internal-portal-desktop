@@ -341,6 +341,7 @@ function createCodeAgentOps({ projects, files, git, fsp = fs.promises, platform 
         let answer;
         try {
           answer = await confirm({
+            requestId: ctx.requestId,
             agentId: ctx.agentId,
             agentName: ctx.agentName,
             operation,
