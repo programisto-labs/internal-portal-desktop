@@ -21,6 +21,7 @@ const { isTrustedHostOpsSender } = require('./host-ops/trust');
 const { createHostOpsWebSettings, buildEnableDialog } = require('./host-ops/web-settings');
 const { createInlineConfirm } = require('./host-ops/inline-confirm');
 const { createHarnessRunner } = require('./code-harness/runner');
+const { createRunHistory } = require('./code-harness/history');
 const { HARNESSES } = require('./code-harness/harnesses');
 const { getLoginEnv } = require('./code-workspace/login-env');
 const { createGitRunner } = require('./code-workspace/git');
@@ -202,6 +203,8 @@ function ensureHarnessRunner() {
       getProject: (userId, projectId) => core.projects.get(userId, projectId),
       getEnv: () => getLoginEnv(),
       emit: sendHarnessEvent,
+      // Cartes « sous-agent » gardées après un redémarrage de l'app.
+      history: createRunHistory(path.join(app.getPath('userData'), 'code-harness-runs.json')),
       confirm: async (req) => {
         const grant = hostOpsStore
           .listGrants()
@@ -1162,6 +1165,10 @@ function registerWindowIPC() {
   ipcMain.handle('code-harness-retry', (event, runId) => {
     if (!trustedHostOpsSender(event) || typeof runId !== 'string') return unavailable;
     return ensureHarnessRunner().retry(runId);
+  });
+  ipcMain.handle('code-harness-follow-up', (event, runId, prompt) => {
+    if (!trustedHostOpsSender(event) || typeof runId !== 'string' || typeof prompt !== 'string') return unavailable;
+    return ensureHarnessRunner().followUp(runId, prompt);
   });
   ipcMain.handle('code-harness-open-login', (event, harnessId) => {
     if (!trustedHostOpsSender(event) || typeof harnessId !== 'string') return unavailable;

@@ -23,7 +23,7 @@ const { createCodeWorkspaceService } = require('../src/code-workspace/service');
 const { createCodeAgentOps, changedRegion } = require('../src/code-workspace/agent-ops');
 const { createTerminalManager } = require('../src/code-workspace/terminals');
 const { classifyChange, createWatcherManager } = require('../src/code-workspace/watcher');
-const { mergePath } = require('../src/code-workspace/login-env');
+const { mergePath, readLoginPath, nvmBinDirs } = require('../src/code-workspace/login-env');
 const { createHostOpsStore, createJournal } = require('../src/host-ops/store');
 const { createHostOpsService } = require('../src/host-ops/service');
 const { buildConfirmDialog } = require('../src/host-ops/confirm');
@@ -139,6 +139,27 @@ describe('git parsers', () => {
     assert.equal(classifyChange('.git/index').kind, 'git');
     assert.equal(classifyChange('.git/objects/ab/cd').kind, 'ignored');
     assert.equal(mergePath('/opt/homebrew/bin:/usr/bin', '/usr/bin:/bin', ':'), '/opt/homebrew/bin:/usr/bin:/bin');
+  });
+
+  it('reads PATH from an interactive login shell first, then a plain login shell', async () => {
+    const calls = [];
+    const fake = (shell, args, _opts, cb) => {
+      calls.push(args.slice(0, -2).join(' '));
+      if (args[0] === '-i') return cb(new Error('boom'), '');
+      cb(null, 'noise __LASCO_PATH__/a:/b__LASCO_PATH__');
+    };
+    assert.equal(await readLoginPath({ platform: 'darwin', env: { SHELL: '/bin/zsh' }, execFileImpl: fake }), '/a:/b');
+    assert.deepEqual(calls, ['-i -l', '-l']);
+  });
+
+  it('adds every nvm node bin folder, default alias first', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nvm-'));
+    for (const v of ['v18.20.0', 'v22.14.0', 'v26.1.0']) fs.mkdirSync(path.join(root, '.nvm/versions/node', v, 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.nvm/alias'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.nvm/alias/default'), '22\n');
+    const dirs = nvmBinDirs(root).map((d) => path.basename(path.dirname(d)));
+    assert.deepEqual(dirs, ['v22.14.0', 'v26.1.0', 'v18.20.0']);
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it('keeps the most recently shown projects watched and reports debounced changes', async () => {

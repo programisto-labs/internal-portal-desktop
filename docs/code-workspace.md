@@ -36,8 +36,10 @@ Responses: `{ ok: true, ...result }` or `{ ok: false, error: { code, message } }
 ## Git (`src/code-workspace/git.js`)
 
 Always `execFile('git', …)`: no shell, user values after `--` or validated (branch names, clone URLs). `GIT_TERMINAL_PROMPT=0`:
-a command needing credentials fails instead of hanging (credential helpers still work). PATH comes from the user's login shell
-(`login-env.js`), so Homebrew git, `gh` and nvm work when the app is started from the Dock.
+a command needing credentials fails instead of hanging (credential helpers still work). PATH comes from the user's interactive login shell
+(`$SHELL -i -l -c`, then `-l -c`; `login-env.js`), plus existing `~/.local/bin`, `~/bin`… and every nvm node `bin` (default alias
+first), so Homebrew git, `gh`, nvm globals and the code harnesses (`claude`, `cursor-agent`, `codex`, `vibe`) work when the app is
+started from the Dock.
 
 Remote links (repository, branch, compare / new pull request, file, commit) are derived for github.com and gitlab.com; **the raw
 remote URL never leaves the native side** (it may contain a token). The current pull request comes from `gh pr view` when the

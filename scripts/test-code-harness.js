@@ -8,6 +8,7 @@ const os = require('os');
 const path = require('path');
 const { HARNESSES, parseHarnessLine } = require('../src/code-harness/harnesses');
 const { createHarnessRunner } = require('../src/code-harness/runner');
+const { createRunHistory } = require('../src/code-harness/history');
 const { buildConfirmDialog } = require('../src/host-ops/confirm');
 const { createHostOpsStore } = require('../src/host-ops/store');
 const { createHostOpsWebSettings } = require('../src/host-ops/web-settings');
@@ -180,6 +181,66 @@ describe('harnais de code : exécutions', () => {
     assert.match(res.error.message, /cursor-agent login/);
   });
 
+  it('environnement du shell de connexion (promesse) : PATH transmis à la vérification et au lancement', async () => {
+    const seen = [];
+    const runner = mk({
+      getEnv: async () => ({ PATH: '/Users/x/.local/bin:/usr/bin', CLAUDECODE: '1' }),
+      checkAuth: async (_h, env) => (seen.push(env), { state: 'ok' }),
+    });
+    const pending = runner.start(request());
+    await tick();
+    await tick();
+    assert.equal(seen[0].PATH, '/Users/x/.local/bin:/usr/bin');
+    assert.equal(child.spawned.opts.env.PATH, '/Users/x/.local/bin:/usr/bin');
+    assert.equal(child.spawned.opts.env.CLAUDECODE, undefined);
+    child.end(0);
+    await pending;
+  });
+
+  it('suite depuis la carte : même session, origine « card », fil du chat conservé', async () => {
+    const runner = mk();
+    const conversationId = 'a'.repeat(24);
+    const first = runner.start(request({ conversationId }));
+    await tick();
+    child.feed({ type: 'result', result: 'Script créé.', is_error: false, session_id: 's-1' });
+    child.end(0);
+    await first;
+    const done = events.find((e) => e.type === 'done').run;
+    assert.equal(done.origin, 'tool');
+    assert.equal(done.conversationId, conversationId);
+    assert.equal((await runner.followUp(done.runId, '  ')).error.code, 'invalid_request');
+    events = [];
+    const next = runner.followUp(done.runId, 'Ajoute un test');
+    await tick();
+    await tick();
+    assert.deepEqual(child.spawned.args.slice(0, 2), ['-p', 'Ajoute un test']);
+    assert.ok(child.spawned.args.includes('s-1'));
+    assert.equal(events[0].type, 'removed');
+    const started = events.find((e) => e.type === 'started').run;
+    assert.equal(started.origin, 'card');
+    assert.equal(started.conversationId, conversationId);
+    assert.equal(started.requestId, 'call_1-f1');
+    child.end(0);
+    await next;
+  });
+
+  it('suite sans session (Codex) : la demande et le résultat précédents sont rappelés', async () => {
+    const runner = mk();
+    const first = runner.start(request({ harness: 'codex' }));
+    await tick();
+    child.feed({ type: 'item.completed', item: { type: 'agent_message', text: 'Fait.' } });
+    child.end(0);
+    await first;
+    const done = events.find((e) => e.type === 'done').run;
+    const next = runner.followUp(done.runId, 'Et un README');
+    await tick();
+    await tick();
+    const prompt = child.spawned.args.find((a) => a.includes('Nouvelle demande'));
+    assert.match(prompt, /Ajoute un test[\s\S]*Nouvelle demande :\nEt un README/);
+    child.end(0);
+    await next;
+  });
+
   it('arrêt : le processus est tué et l’exécution finit « arrêtée »', async () => {
     const runner = mk();
     const pending = runner.start(request());
@@ -238,5 +299,55 @@ describe('harnais de code : interrupteur dans les réglages', () => {
     assert.equal(store.isHarnessEnabled(), false);
     store.setCodeEnabled(true);
     assert.equal(store.isHarnessEnabled(), false);
+  });
+});
+
+describe('harnais de code : cartes gardées après un redémarrage', () => {
+  it('les exécutions sont relues ; une exécution coupée par la fermeture est « interrompue »', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-history-'));
+    const file = path.join(tmp, 'runs.json');
+    let child;
+    const deps = (history) => ({
+      isEnabled: () => true,
+      getProject: () => ({ id: 'p1', name: 'demo', root: '/tmp/demo' }),
+      confirm: async () => 'once',
+      emit: () => undefined,
+      checkAuth: async () => ({ state: 'ok' }),
+      listFiles: async () => [],
+      spawnImpl: () => (child = fakeChild()),
+      history,
+    });
+    const first = createHarnessRunner(deps(createRunHistory(file)));
+    const req = { requestId: 'call_1', userId: 'u1', agentId: 'a1', projectId: 'p1', harness: 'claude-code', prompt: 'x', conversationId: 'c'.repeat(24) };
+    const done = first.start(req);
+    await new Promise((r) => setImmediate(r));
+    child.feed({ type: 'result', result: 'Fait.', is_error: false, session_id: 's-1' });
+    child.end(0);
+    await done;
+    // Deuxième exécution laissée en cours : on fige le fichier tel qu'à une fermeture brutale de l'app.
+    const pending = first.start({ ...req, requestId: 'call_2' });
+    await new Promise((r) => setTimeout(r, 400));
+    const snapshot = fs.readFileSync(file, 'utf8');
+    first.stop(first.list().find((r) => r.status === 'running').runId);
+    await pending;
+    fs.writeFileSync(file, snapshot);
+    const saved = JSON.parse(snapshot);
+    assert.equal(saved.runs.length, 2);
+    assert.ok(saved.runs.every((r) => !('child' in r)));
+
+    const second = createHarnessRunner(deps(createRunHistory(file)));
+    const runs = second.list();
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0].status, 'done');
+    assert.equal(runs[0].conversationId, 'c'.repeat(24));
+    assert.equal(runs[1].status, 'error');
+    assert.match(runs[1].result.summary, /interrompu/);
+    // Une suite reste possible sur une exécution relue.
+    const next = second.followUp(runs[0].runId, 'Encore');
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    child.end(0);
+    await next;
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 });

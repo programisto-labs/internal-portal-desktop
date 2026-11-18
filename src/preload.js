@@ -150,6 +150,7 @@ const codeHarnessBridge = {
   openLogin: (harness) => ipcRenderer.invoke('code-harness-open-login', harness),
   login: (harness) => ipcRenderer.invoke('code-harness-login', harness),
   retry: (runId) => ipcRenderer.invoke('code-harness-retry', runId),
+  followUp: (runId, prompt) => ipcRenderer.invoke('code-harness-follow-up', runId, prompt),
   onEvent: (callback) => {
     if (typeof callback !== 'function') return () => undefined;
     const listener = (_event, payload) => callback(payload);

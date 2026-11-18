@@ -15,8 +15,10 @@ const crypto = require('crypto');
 const { spawn: spawnDefault, execFile } = require('child_process');
 const { HARNESSES, parseHarnessLine } = require('./harnesses');
 const { checkAuth: checkAuthDefault, startLogin: startLoginDefault } = require('./auth');
+const { pruneRuns } = require('./history');
 
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const CONVERSATION_RE = /^[a-f0-9]{24}$/;
 const MAX_PROMPT = 20000;
 const MAX_STEPS = 200;
 const MAX_TEXT = 20000;
@@ -46,7 +48,8 @@ function createHarnessRunner({
   isEnabled,
   getProject,
   confirm,
-  emit,
+  emit: emitEvent,
+  history = null,
   getEnv = () => process.env,
   spawnImpl = spawnDefault,
   listFiles = changedFiles,
@@ -57,10 +60,54 @@ function createHarnessRunner({
 }) {
   const runs = new Map();
   const logins = new Map(); // harness -> cancel
+  let persistTimer = null;
+
+  /** Champs gardés d'une exécution (jamais le processus) ; relus au redémarrage. */
+  function stored(run) {
+    const { child: _child, ...rest } = run;
+    return { ...rest, steps: run.steps.slice(-40), text: clip(run.text, 4000) };
+  }
+
+  function persistNow() {
+    persistTimer = null;
+    if (!history) return;
+    const kept = pruneRuns([...runs.values()], now());
+    for (const runId of [...runs.keys()]) if (!kept.some((r) => r.runId === runId)) runs.delete(runId);
+    history.save(kept.map(stored));
+  }
+
+  function schedulePersist() {
+    if (!history || persistTimer) return;
+    persistTimer = setTimeout(persistNow, 300);
+    persistTimer.unref?.();
+  }
+
+  function emit(event) {
+    emitEvent(event);
+    if (event.type === 'started' || event.type === 'done' || event.type === 'removed') schedulePersist();
+  }
+
+  // Exécutions des sessions précédentes : une exécution en cours à la fermeture est marquée interrompue.
+  for (const saved of history ? pruneRuns(history.load(), now()) : []) {
+    if (!HARNESSES[saved.harness] || !Array.isArray(saved.steps)) continue;
+    const run = { ...saved, child: null, text: String(saved.text ?? ''), lastText: String(saved.lastText ?? '') };
+    if (run.status === 'running') {
+      run.status = 'error';
+      run.result = {
+        ok: false,
+        summary: `${HARNESSES[run.harness].label} a été interrompu : Lasco Desktop a été fermé pendant l’exécution.`,
+        files: [],
+        ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+        durationMs: Math.max(0, now() - run.startedAt),
+      };
+    }
+    runs.set(run.runId, run);
+  }
 
   /** Environnement du harnais : celui du shell, sans les variables d'une session Claude Code parente. */
-  function harnessEnv() {
-    const env = { ...getEnv() };
+  async function harnessEnv() {
+    // `getEnv` peut renvoyer une promesse (environnement du shell de connexion, résolu une fois).
+    const env = { ...((await getEnv()) || {}) };
     delete env.ELECTRON_RUN_AS_NODE;
     for (const key of Object.keys(env)) if (/^(CLAUDECODE|CLAUDE_CODE_|CLAUDE_AGENT_SDK)/.test(key)) delete env[key];
     return env;
@@ -82,15 +129,20 @@ function createHarnessRunner({
       text: clip(run.text, 4000),
       ...(run.result !== undefined ? { result: run.result } : {}),
       ...(run.authState ? { authState: run.authState } : {}),
+      // Fil du chat qui a lancé l'exécution, et qui l'a lancée : l'outil de l'agent ou la carte (relance, suite).
+      ...(run.conversationId ? { conversationId: run.conversationId } : {}),
+      origin: run.origin || 'tool',
     };
   }
 
   /** Exécution sans processus (connexion requise) : la carte propose « Se connecter » puis « Relancer ». */
-  function blockedRun(req, def, project, agentName, prompt, auth) {
+  function blockedRun(req, def, project, agentName, prompt, auth, origin) {
     const run = {
       runId: `h_${crypto.randomBytes(8).toString('hex')}`,
       requestId: req.requestId,
       request: { ...req, prompt },
+      origin,
+      conversationId: conversationOf(req),
       harness: req.harness,
       projectId: req.projectId,
       projectName: project.name,
@@ -112,7 +164,6 @@ function createHarnessRunner({
     };
     runs.set(run.runId, run);
     emit({ type: 'done', run: view(run) });
-    setTimeout(() => runs.delete(run.runId), 30 * 60 * 1000).unref?.();
     return {
       ok: false,
       status: run.status,
@@ -124,7 +175,7 @@ function createHarnessRunner({
 
   /** Statut des harnais installés (version), sans rien lancer d'autre que `--version`. */
   async function status() {
-    const env = getEnv();
+    const env = await harnessEnv();
     const entries = await Promise.all(
       Object.values(HARNESSES).map(
         (h) =>
@@ -139,7 +190,16 @@ function createHarnessRunner({
     return { enabled: isEnabled(), harnesses: entries };
   }
 
-  async function start(request) {
+  function conversationOf(req) {
+    return typeof req.conversationId === 'string' && CONVERSATION_RE.test(req.conversationId) ? req.conversationId : null;
+  }
+
+  /** Lancement demandé par l'outil de l'agent (`host_code_delegate`). */
+  function start(request) {
+    return launch(request, 'tool');
+  }
+
+  async function launch(request, origin) {
     const req = request && typeof request === 'object' ? request : {};
     const fail = (code, message) => ({ ok: false, status: 'error', error: { code, message } });
     if (!isEnabled()) return fail('disabled', 'Les harnais de code ne sont pas activés dans Lasco Desktop (Réglages > Cet ordinateur).');
@@ -162,10 +222,10 @@ function createHarnessRunner({
     const def = HARNESSES[harness];
     const agentName = clip(typeof req.agentName === 'string' ? req.agentName : 'Agent', 120);
     // Connexion vérifiée avant toute confirmation : inutile de demander l'accord pour un harnais inutilisable.
-    const auth = await checkAuth(harness, harnessEnv()).catch(() => ({ state: 'unknown' }));
+    const auth = await checkAuth(harness, await harnessEnv()).catch(() => ({ state: 'unknown' }));
     if (auth.state === 'not_installed') return fail('not_installed', `${def.label} n’est pas installé sur cet ordinateur.`);
     if (auth.state === 'logged_out' || auth.state === 'no_plan' || auth.state === 'config_error') {
-      return blockedRun(req, def, project, agentName, prompt, auth);
+      return blockedRun(req, def, project, agentName, prompt, auth, origin);
     }
 
     const decision = await confirm({
@@ -201,6 +261,9 @@ function createHarnessRunner({
       text: '',
       lastText: '',
       sessionId: typeof req.sessionId === 'string' && ID_RE.test(req.sessionId) ? req.sessionId : null,
+      request: { ...req, prompt },
+      origin,
+      conversationId: conversationOf(req),
       loginRequired: null,
       child: null,
       result: undefined,
@@ -208,7 +271,7 @@ function createHarnessRunner({
     runs.set(run.runId, run);
     emit({ type: 'started', run: view(run) });
 
-    const env = harnessEnv();
+    const env = await harnessEnv();
     const args = def.args({ prompt, sessionId: run.sessionId, cwd: project.root });
     return new Promise((resolve) => {
       let child;
@@ -221,7 +284,6 @@ function createHarnessRunner({
         run.status = 'error';
         run.result = { ok: false, summary: `${def.label} n’a pas pu être lancé. Est-il installé ?`, files: [] };
         emit({ type: 'done', run: view(run) });
-        runs.delete(run.runId);
         return resolve({ ok: false, status: 'error', error: { code: 'spawn_failed', message: run.result.summary }, run: view(run) });
       }
       run.child = child;
@@ -293,8 +355,6 @@ function createHarnessRunner({
         };
         run.child = null;
         emit({ type: 'done', run: view(run) });
-        // Gardée un moment pour la carte (rechargement de page), puis oubliée.
-        setTimeout(() => runs.delete(run.runId), 10 * 60 * 1000).unref?.();
         resolve({
           ok,
           status: ok ? 'completed' : run.status,
@@ -341,11 +401,12 @@ function createHarnessRunner({
   }
 
   /** Connexion OAuth du harnais en arrière-plan ; événements `login` (pending / done / error, url). */
-  function login(harnessId) {
+  async function login(harnessId) {
     const def = HARNESSES[harnessId];
     if (!def) return { ok: false, error: { code: 'unsupported_harness', message: 'Harnais de code inconnu.' } };
     if (logins.has(harnessId)) return { ok: true, pending: true };
-    const env = harnessEnv();
+    logins.set(harnessId, () => undefined); // réservé pendant la résolution de l'environnement
+    const env = await harnessEnv();
     const cancel = startLogin(harnessId, {
       env,
       recheck: () => checkAuth(harnessId, env),
@@ -358,20 +419,60 @@ function createHarnessRunner({
     return { ok: true, pending: true };
   }
 
+  function nextRequestId(requestId, letter = 'r') {
+    const value = String(requestId);
+    const base = value.replace(/-[rf]\d+$/, '');
+    const attempt = (Number(/-[rf](\d+)$/.exec(value)?.[1]) || 0) + 1;
+    return `${base.slice(0, 120)}-${letter}${attempt}`;
+  }
+
   /** Relance la même demande (nouvelle confirmation), par exemple après la connexion. */
   function retry(runId) {
     const run = runs.get(runId);
     if (!run || !run.request || run.status === 'running') {
       return Promise.resolve({ ok: false, status: 'error', error: { code: 'not_found', message: 'Exécution introuvable.' } });
     }
-    const base = String(run.request.requestId).replace(/-r\d+$/, '');
-    const attempt = (Number(/-r(\d+)$/.exec(String(run.request.requestId))?.[1]) || 0) + 1;
     runs.delete(runId);
     emit({ type: 'removed', runId });
-    return start({ ...run.request, requestId: `${base}-r${attempt}`.slice(0, 128) });
+    return launch({ ...run.request, requestId: nextRequestId(run.request.requestId) }, 'card');
   }
 
-  return { status, start, stop, stopByRequest, list, login, retry };
+  /**
+   * Suite d'une exécution terminée, demandée depuis la carte : même harnais, même projet, même session
+   * quand le harnais la reprend (Claude Code, Cursor) ; sinon la demande précédente et son résultat sont
+   * rappelés dans la consigne. Nouvelle confirmation, comme tout lancement.
+   */
+  function followUp(runId, text) {
+    const run = runs.get(runId);
+    const prompt = typeof text === 'string' ? text.trim().slice(0, MAX_PROMPT) : '';
+    if (!run || !run.request || run.status === 'running') {
+      return Promise.resolve({ ok: false, status: 'error', error: { code: 'not_found', message: 'Exécution introuvable ou en cours.' } });
+    }
+    if (!prompt) return Promise.resolve({ ok: false, status: 'error', error: { code: 'invalid_request', message: 'Consigne vide.' } });
+    const sessionId = run.result?.sessionId || run.sessionId || null;
+    const fullPrompt = sessionId
+      ? prompt
+      : clip(
+          [
+            'Suite d’une demande précédente sur ce projet.',
+            `Demande précédente :\n${clip(run.prompt, 4000)}`,
+            run.result?.summary ? `Ton résultat :\n${clip(run.result.summary, 4000)}` : '',
+            `Nouvelle demande :\n${prompt}`,
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
+          MAX_PROMPT,
+        );
+    runs.delete(runId);
+    emit({ type: 'removed', runId });
+    const { sessionId: _previous, ...request } = run.request;
+    return launch(
+      { ...request, prompt: fullPrompt, ...(sessionId ? { sessionId } : {}), requestId: nextRequestId(run.request.requestId, 'f') },
+      'card',
+    );
+  }
+
+  return { status, start, stop, stopByRequest, list, login, retry, followUp };
 }
 
 module.exports = { createHarnessRunner };
