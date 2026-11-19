@@ -4,13 +4,18 @@ const fs = require('fs');
 const path = require('path');
 
 const LASCO_PROTOCOL = 'lasco';
-const DEFAULT_SETTINGS = Object.freeze({ openLinksInApp: true });
+/** `themeSource`: app appearance (Réglages > Général), applied to `nativeTheme.themeSource`. */
+const THEME_SOURCES = Object.freeze(['system', 'light', 'dark']);
+const DEFAULT_SETTINGS = Object.freeze({ openLinksInApp: true, themeSource: 'system' });
 
 /** Keep only known keys with valid types; unknown / invalid values fall back to defaults. */
 function normalizeSettings(raw) {
   const out = { ...DEFAULT_SETTINGS };
   if (raw && typeof raw === 'object' && typeof raw.openLinksInApp === 'boolean') {
     out.openLinksInApp = raw.openLinksInApp;
+  }
+  if (raw && typeof raw === 'object' && THEME_SOURCES.includes(raw.themeSource)) {
+    out.themeSource = raw.themeSource;
   }
   return out;
 }
@@ -84,6 +89,7 @@ module.exports = {
   buildBrowserOpenRequest,
   LASCO_PROTOCOL,
   DEFAULT_SETTINGS,
+  THEME_SOURCES,
   normalizeSettings,
   createSettingsStore,
   extractPortalTarget,

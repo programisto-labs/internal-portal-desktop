@@ -5,8 +5,9 @@ const https = require('https');
 const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager } = require('./browser-tabs/manager');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
-const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest } = require('./link-handling');
+const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
 const { buildTabMenuTemplate } = require('./browser-tabs/tab-menu');
+const { APP_MENU_COMMANDS, normalizeAppMenuState, buildApplicationMenuTemplate } = require('./app-menu');
 const {
   applyBadgeCount,
   showAgentNotification,
@@ -48,85 +49,35 @@ function sendCloseActiveTab(browserWindow) {
   win.webContents.send('browser-tab-shortcut', { tabId: '', action: 'close-tab' });
 }
 
+/** Page state reported by the portal for the « Fenêtre » menu (labels, checkmarks). */
+let appMenuState = null;
+
+/** Relays a « Fenêtre » menu command to the portal page of the main window. */
+function sendAppMenuCommand(command) {
+  if (!APP_MENU_COMMANDS.includes(command)) return;
+  const win = mainWindowRef;
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.webContents.send('app-menu-command', { command });
+}
+
 /**
  * Replace Electron's default menu so ⌘W is not bound to Close Window.
  * Without this, the macOS default accelerator closes the app before our tab handler runs.
+ * Rebuilt whenever the page reports a new state (see `app-menu-set-state`).
  */
 function installApplicationMenu() {
-  const isMac = process.platform === 'darwin';
-  const template = [
-    ...(isMac
-      ? [
-          {
-            role: 'appMenu',
-            ...(NO_AGENTS
-              ? {}
-              : {
-                  submenu: [
-                    { role: 'about', label: 'À propos de Lasco' },
-                    { type: 'separator' },
-                    {
-                      label: 'Réglages…',
-                      accelerator: 'CmdOrCtrl+,',
-                      click: () => openHostOpsSettings(),
-                    },
-                    { type: 'separator' },
-                    { role: 'services', label: 'Services' },
-                    { type: 'separator' },
-                    { role: 'hide', label: 'Masquer Lasco' },
-                    { role: 'hideOthers', label: 'Masquer les autres' },
-                    { role: 'unhide', label: 'Tout afficher' },
-                    { type: 'separator' },
-                    { role: 'quit', label: 'Quitter Lasco' },
-                  ],
-                }),
-          },
-        ]
-      : []),
-    {
-      label: 'Fichier',
-      submenu: [
-        {
-          label: "Fermer l'onglet",
-          accelerator: 'CmdOrCtrl+W',
-          click: (_item, browserWindow) => sendCloseActiveTab(browserWindow),
-        },
-        {
-          label: 'Fermer la fenêtre',
-          accelerator: 'CmdOrCtrl+Shift+W',
-          click: (_item, browserWindow) => {
-            const win = getTargetMainWindow(browserWindow);
-            if (win) win.close();
-          },
-        },
-        // macOS : Lasco > Réglages… (⌘,). Ailleurs : Fichier > Réglages… (Ctrl+,).
-        ...(NO_AGENTS || isMac
-          ? []
-          : [
-              { type: 'separator' },
-              { label: 'Réglages…', accelerator: 'CmdOrCtrl+,', click: () => openHostOpsSettings() },
-            ]),
-        ...(isMac
-          ? []
-          : [
-              { type: 'separator' },
-              { role: 'quit', label: 'Quitter' },
-            ]),
-      ],
+  const template = buildApplicationMenuTemplate({
+    isMac: process.platform === 'darwin',
+    state: appMenuState,
+    closeTab: (browserWindow) => sendCloseActiveTab(browserWindow),
+    closeWindow: (browserWindow) => {
+      const win = getTargetMainWindow(browserWindow);
+      if (win) win.close();
     },
-    { role: 'editMenu', label: 'Édition' },
-    { role: 'viewMenu', label: 'Présentation' },
-    {
-      label: 'Fenêtre',
-      submenu: [
-        { role: 'minimize', label: 'Réduire' },
-        { role: 'zoom', label: 'Zoom' },
-        ...(isMac
-          ? [{ type: 'separator' }, { role: 'front', label: 'Tout ramener au premier plan' }]
-          : []),
-      ],
-    },
-  ];
+    openSettings: () => openSettings('general'),
+    send: sendAppMenuCommand,
+  });
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
@@ -176,7 +127,6 @@ function getSettingsStore() {
 let hostOpsStore = null;
 let hostOpsJournal = null;
 let hostOpsService = null;
-let hostOpsSettingsWin = null;
 let hostOpsWebSettings = null;
 let hostOpsInlineConfirm = null;
 let harnessRunner = null;
@@ -463,26 +413,114 @@ function ensureHostOps() {
   return hostOpsService;
 }
 
+/** Profil > « Cet ordinateur », cartes de confirmation : réglages ouverts sur cette section. */
 function openHostOpsSettings() {
-  ensureHostOps();
-  if (hostOpsSettingsWin && !hostOpsSettingsWin.isDestroyed()) {
-    hostOpsSettingsWin.focus();
+  openSettings('computer');
+}
+
+/**
+ * Réglages : modale dessinée par Desktop au-dessus de la fenêtre principale (vue `file:` séparée,
+ * jamais accessible au portail ; règles et journal restent hors de la page). Sans fenêtre
+ * principale : petite fenêtre dédiée avec la même page.
+ */
+let settingsSurface = null;
+
+function settingsWebContents() {
+  if (!settingsSurface) return null;
+  const wc = settingsSurface.webContents;
+  return wc && !wc.isDestroyed() ? wc : null;
+}
+
+function closeSettings() {
+  const surface = settingsSurface;
+  if (!surface) return;
+  settingsSurface = null;
+  surface.dispose();
+  const win = mainPortalWindow();
+  if (win && !win.webContents.isDestroyed()) win.webContents.focus();
+}
+
+function openSettings(section = 'general') {
+  const existing = settingsWebContents();
+  if (existing) {
+    existing.send('settings-modal-show', section);
+    if (settingsSurface.window) settingsSurface.window.focus();
+    existing.focus();
     return;
   }
-  hostOpsSettingsWin = new BrowserWindow({
-    width: 760,
-    height: 620,
-    title: 'Réglages — Cet ordinateur',
-    webPreferences: {
-      preload: path.join(__dirname, 'host-ops', 'settings-preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
+  if (!NO_AGENTS) ensureHostOps();
+  const webPreferences = {
+    preload: path.join(__dirname, 'settings', 'settings-preload.js'),
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+    spellcheck: false,
+  };
+  const query = { section, agents: NO_AGENTS ? '0' : '1' };
+  const win = mainPortalWindow();
+  if (win && !win.isMinimized()) {
+    const view = new WebContentsView({ webPreferences });
+    view.setBackgroundColor('#00000000');
+    const fit = () => {
+      if (win.isDestroyed()) return;
+      const [width, height] = win.getContentSize();
+      view.setBounds({ x: 0, y: 0, width, height });
+    };
+    win.contentView.addChildView(view);
+    fit();
+    win.on('resize', fit);
+    const onClosed = () => closeSettings();
+    win.once('closed', onClosed);
+    settingsSurface = {
+      webContents: view.webContents,
+      window: null,
+      dispose() {
+        if (!win.isDestroyed()) {
+          win.removeListener('resize', fit);
+          win.removeListener('closed', onClosed);
+          try {
+            win.contentView.removeChildView(view);
+          } catch (_) {
+            // already detached
+          }
+        }
+        if (!view.webContents.isDestroyed()) view.webContents.close();
+      },
+    };
+  } else {
+    const standalone = new BrowserWindow({
+      width: 880,
+      height: 620,
+      minWidth: 640,
+      minHeight: 420,
+      title: 'Réglages',
+      backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c1c1e' : '#ffffff',
+      webPreferences,
+    });
+    query.standalone = '1';
+    standalone.on('closed', () => {
+      if (settingsSurface && settingsSurface.window === standalone) settingsSurface = null;
+    });
+    settingsSurface = {
+      webContents: standalone.webContents,
+      window: standalone,
+      dispose() {
+        if (!standalone.isDestroyed()) standalone.close();
+      },
+    };
+  }
+  const wc = settingsSurface.webContents;
+  wc.on('will-navigate', (e) => e.preventDefault());
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  wc.once('did-finish-load', () => {
+    if (!wc.isDestroyed()) wc.focus();
   });
-  hostOpsSettingsWin.webContents.on('will-navigate', (e) => e.preventDefault());
-  hostOpsSettingsWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  hostOpsSettingsWin.loadFile(path.join(__dirname, 'host-ops', 'settings.html'));
+  wc.loadFile(path.join(__dirname, 'settings', 'settings.html'), { query });
+}
+
+function refreshSettings() {
+  const wc = settingsWebContents();
+  if (wc) wc.send('settings-modal-refresh');
 }
 
 function getSettings() {
@@ -516,6 +554,7 @@ function buildUpdateSnapshot() {
 
 function setUpdateState(partialState) {
   Object.assign(updateState, partialState);
+  refreshSettings();
   const snapshot = buildUpdateSnapshot();
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) {
@@ -906,6 +945,12 @@ function createWindow() {
   }
 
   mainWindowRef = win;
+  // « Fenêtre » menu: a full page load (login, reload) drops the state until the portal reports it again.
+  win.webContents.on('did-navigate', () => {
+    if (appMenuState === null) return;
+    appMenuState = null;
+    installApplicationMenu();
+  });
   // Lasco Code: a full reload of the portal (not an in-app navigation) ends its terminals and watchers.
   const webContentsRef = win.webContents;
   const releaseCodeWorkspace = () => {
@@ -1067,6 +1112,23 @@ function registerWindowIPC() {
     return Boolean(win && !win.isDestroyed() && win === mainWindowRef);
   };
 
+  // « Fenêtre » menu: the portal shell (main frame of the main window) reports labels and checkmarks.
+  ipcMain.on('app-menu-set-state', (event, state) => {
+    const frame = event.senderFrame;
+    if (!assertFromMainWindow(event) || !frame || frame !== event.sender.mainFrame) return;
+    let origin = null;
+    try {
+      origin = new URL(frame.url).origin;
+    } catch {
+      return;
+    }
+    if (origin !== PORTAL_ORIGIN) return;
+    const next = normalizeAppMenuState(state);
+    if (JSON.stringify(next) === JSON.stringify(appMenuState)) return;
+    appMenuState = next;
+    installApplicationMenu();
+  });
+
   // --- Host operations: bridge for the web app (strictly validated natively) ---
   const trustedHostOpsSender = (event) => {
     if (NO_AGENTS) return false;
@@ -1189,26 +1251,65 @@ function registerWindowIPC() {
     codeCore.terminals.resize(event.sender, message.id, message.cols, message.rows);
   });
 
-  // --- Host operations: local options window only (never reachable from web pages) ---
-  const fromHostOpsSettings = (event) =>
-    Boolean(
-      hostOpsSettingsWin &&
-        !hostOpsSettingsWin.isDestroyed() &&
-        event.sender === hostOpsSettingsWin.webContents &&
+  // --- Réglages (Desktop modal only, never reachable from web pages) ---
+  const fromSettings = (event) => {
+    const wc = settingsWebContents();
+    return Boolean(
+      wc &&
+        event.sender === wc &&
         event.senderFrame === event.sender.mainFrame &&
         String(event.senderFrame.url).startsWith('file:')
     );
-  ipcMain.handle('host-ops-admin-state', (event) => {
-    if (!fromHostOpsSettings(event)) return { enabled: false, shellEnabled: false, codeEnabled: false, grants: [], journal: [] };
-    ensureHostOps();
+  };
+  const fromHostOpsSettings = (event) => !NO_AGENTS && fromSettings(event);
+  ipcMain.on('settings-modal-close', (event) => {
+    if (fromSettings(event)) closeSettings();
+  });
+  ipcMain.handle('settings-modal-state', (event) => {
+    if (!fromSettings(event)) return null;
+    const settings = getSettings();
+    let hostOps = null;
+    if (!NO_AGENTS) {
+      ensureHostOps();
+      hostOps = {
+        enabled: hostOpsStore.isEnabled(),
+        shellEnabled: hostOpsStore.isShellEnabled(),
+        codeEnabled: hostOpsStore.isCodeEnabled(),
+        harnessEnabled: hostOpsStore.isHarnessEnabled(),
+        grants: hostOpsStore.listGrants(),
+        journal: hostOpsJournal.list(),
+      };
+    }
     return {
-      enabled: hostOpsStore.isEnabled(),
-      shellEnabled: hostOpsStore.isShellEnabled(),
-      codeEnabled: hostOpsStore.isCodeEnabled(),
-      harnessEnabled: hostOpsStore.isHarnessEnabled(),
-      grants: hostOpsStore.listGrants(),
-      journal: hostOpsJournal.list(),
+      general: { themeSource: settings.themeSource, openLinksInApp: settings.openLinksInApp },
+      update: buildUpdateSnapshot(),
+      hostOps,
     };
+  });
+  ipcMain.handle('settings-modal-set-theme', (event, value) => {
+    if (!fromSettings(event) || !THEME_SOURCES.includes(value)) return false;
+    getSettingsStore().set({ themeSource: value });
+    nativeTheme.themeSource = value;
+    return true;
+  });
+  ipcMain.handle('settings-modal-set-open-links', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
+    const next = getSettingsStore().set({ openLinksInApp: enabled });
+    registerLascoProtocolClient();
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('settings-changed', next);
+    }
+    return true;
+  });
+  ipcMain.handle('settings-modal-update-check', async (event) => {
+    if (!fromSettings(event)) return null;
+    await checkForUpdates();
+    return buildUpdateSnapshot();
+  });
+  ipcMain.handle('settings-modal-update-install', (event) => {
+    if (!fromSettings(event) || updateState.status !== 'downloaded') return false;
+    autoUpdater.quitAndInstall(false, true);
+    return true;
   });
   ipcMain.handle('host-ops-admin-set-shell-enabled', (event, value) => {
     if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
@@ -1396,6 +1497,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     app.setName('Lasco');
+    nativeTheme.themeSource = getSettings().themeSource;
     registerLascoProtocolClient();
     installApplicationMenu();
 

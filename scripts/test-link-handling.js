@@ -22,9 +22,11 @@ describe('link handling', () => {
   });
 
   it('normalizes settings with defaults', () => {
-    assert.deepEqual(normalizeSettings(null), { openLinksInApp: true });
-    assert.deepEqual(normalizeSettings({ openLinksInApp: 'no', x: 1 }), { openLinksInApp: true });
-    assert.deepEqual(normalizeSettings({ openLinksInApp: false }), { openLinksInApp: false });
+    assert.deepEqual(normalizeSettings(null), { openLinksInApp: true, themeSource: 'system' });
+    assert.deepEqual(normalizeSettings({ openLinksInApp: 'no', x: 1 }), { openLinksInApp: true, themeSource: 'system' });
+    assert.deepEqual(normalizeSettings({ openLinksInApp: false }), { openLinksInApp: false, themeSource: 'system' });
+    assert.deepEqual(normalizeSettings({ themeSource: 'dark' }), { openLinksInApp: true, themeSource: 'dark' });
+    assert.deepEqual(normalizeSettings({ themeSource: 'sepia' }), { openLinksInApp: true, themeSource: 'system' });
   });
 
   it('persists settings through the store', () => {

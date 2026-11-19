@@ -70,7 +70,7 @@ Rules: switch « Harnais de code » (`harnessEnabled`, needs host operations and
 
 ## Permissions
 
-Dialog: Refuser / Autoriser une fois / Toujours autoriser ce type d'opération. A persistent rule is bound to user, device, agent, operation, and the real source/destination folders shown. Not offered when a folder is a filesystem root or contains the home directory. Manage (enable, review, revoke, journal) in **Lasco > Réglages… (⌘,)** on macOS, **Fichier > Réglages… (Ctrl+,)** elsewhere; the portal profile (« Cet ordinateur ») shows the switches, disables and revokes, and asks to enable through the native dialog. State: `userData/host-ops.json`, journal (200 entries, paths/ids only) `userData/host-ops-journal.json`, both mode 0600.
+Dialog: Refuser / Autoriser une fois / Toujours autoriser ce type d'opération. A persistent rule is bound to user, device, agent, operation, and the real source/destination folders shown. Not offered when a folder is a filesystem root or contains the home directory. Manage (enable, review, revoke, journal) in **Lasco > Réglages… (⌘,)** on macOS, **Fichier > Réglages… (Ctrl+,)** elsewhere: a modal Desktop draws over the main window (separate `file:` view, `src/settings/`, sections Général, Cet ordinateur, Autorisations, Journal, Mises à jour; never reachable from the portal); the portal profile (« Cet ordinateur ») shows the switches, disables and revokes, and asks to enable through the native dialog. State: `userData/host-ops.json`, journal (200 entries, paths/ids only) `userData/host-ops-journal.json`, both mode 0600.
 
 ## Limits / remaining work
 

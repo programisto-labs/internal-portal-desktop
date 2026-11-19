@@ -192,6 +192,14 @@ const desktopBridge = {
     onOpenTarget: onOpenPortalTab
   },
   browserTabs: browserTabsBridge,
+  /**
+   * « Fenêtre » menu of the menu bar: same options as the burger menu of the internal browser.
+   * The page reports its state (labels, checkmarks) and runs the commands Desktop relays.
+   */
+  appMenu: {
+    setState: (state) => ipcRenderer.send('app-menu-set-state', state),
+    onCommand: (callback) => subscribe('app-menu-command', callback),
+  },
   ...(noAgents && { noAgents: true }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
