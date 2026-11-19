@@ -85,8 +85,60 @@ function buildDelegateConfirmDialog(req) {
   return { title: `Un agent demande à lancer ${req.harnessLabel}`, message: lines.join('\n'), buttons, decisions };
 }
 
+/** Harnais en cours : Claude Code demande à lancer une commande dans le projet (relais `--permission-prompt-tool`). */
+function buildHarnessCommandConfirmDialog(req) {
+  const lines = [
+    `Agent : ${req.agentName}`,
+    `Harnais : ${req.harnessLabel}`,
+    `Projet : ${req.project} (${req.projectRoot})`,
+    '',
+    'Commande :',
+    req.command,
+  ];
+  if (req.description) lines.push('', `But : ${req.description}`);
+  lines.push(
+    '',
+    `Effet : la commande s’exécute sur CET ORDINATEUR, dans le projet, avec vos droits. Elle peut modifier ou supprimer des fichiers et utiliser le réseau. Si vous refusez, ${req.harnessLabel} continue sans elle.`
+  );
+  const buttons = ['Refuser', 'Exécuter une fois'];
+  const decisions = ['deny', 'once'];
+  const prefix = (req.scope && req.scope.commandPrefix) || [];
+  if (req.allowPersistent && prefix.length) {
+    buttons.push(`Toujours autoriser « ${prefix.join(' ')} » dans ce projet`);
+    decisions.push('always');
+    lines.push(
+      '',
+      `« Toujours autoriser » couvre les commandes commençant par « ${prefix.join(' ')} », dans ${req.projectRoot} et ses sous-dossiers, pour cet agent (et ses harnais) sur cet appareil. Jamais les commandes composées ni sensibles. Révocable dans Réglages > Cet ordinateur.`
+    );
+  } else if (req.notRememberableReason) {
+    lines.push('', req.notRememberableReason);
+  }
+  return { title: `${req.harnessLabel} demande à exécuter une commande`, message: lines.join('\n'), buttons, decisions };
+}
+
+/** Harnais en cours : un outil autre qu'une commande (accès web, serveur MCP…), autorisé une fois. */
+function buildHarnessToolConfirmDialog(req) {
+  const lines = [
+    `Agent : ${req.agentName}`,
+    `Harnais : ${req.harnessLabel}`,
+    `Projet : ${req.project} (${req.projectRoot})`,
+    '',
+    `Outil : ${req.toolName}`,
+  ];
+  if (req.detail) lines.push(req.detail);
+  lines.push('', `Si vous refusez, ${req.harnessLabel} continue sans cet outil.`);
+  return {
+    title: `${req.harnessLabel} demande à utiliser ${req.toolName}`,
+    message: lines.join('\n'),
+    buttons: ['Refuser', 'Autoriser une fois'],
+    decisions: ['deny', 'once'],
+  };
+}
+
 function buildConfirmDialog(req) {
   if (req.operation === 'code.delegate') return buildDelegateConfirmDialog(req);
+  if (req.operation === 'code.harness_command') return buildHarnessCommandConfirmDialog(req);
+  if (req.operation === 'code.harness_tool') return buildHarnessToolConfirmDialog(req);
   if (req.operation === 'shell.run') return buildShellConfirmDialog(req);
   if (req.operation === 'code.write' || req.operation === 'code.edit') return buildCodeConfirmDialog(req);
   const lines = [`Agent : ${req.agentName}`, `Opération : ${OP_LABELS[req.operation] || req.operation}`, ''];

@@ -542,11 +542,13 @@ describe('terminals', { skip: !posix }, () => {
     assert.match(output(), /lasco-42/);
     assert.match(output(), new RegExp(tmp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.match(terminals.attach(wc, term.id).data, /lasco-42/);
+    assert.equal(terminals.attach(wc, term.id).cols, 80);
     assert.deepEqual(terminals.list(wc, 'p_1').map((s) => s.id), [term.id]);
     const other = { id: 2, isDestroyed: () => false, send: () => {} };
     assert.equal(terminals.write(other, term.id, 'echo nope\r'), false);
     assert.throws(() => terminals.attach(other, term.id));
     assert.equal(terminals.resize(wc, term.id, 120, 40), true);
+    assert.equal(terminals.attach(wc, term.id).cols, 120);
     terminals.killForWebContents(wc);
     assert.equal(terminals.size(), 0);
     fs.rmSync(tmp, { recursive: true, force: true });

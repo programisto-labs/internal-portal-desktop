@@ -57,6 +57,8 @@ function createHarnessRunner({
   now = Date.now,
   checkAuth = (harness, env) => checkAuthDefault(harness, { env }),
   startLogin = startLoginDefault,
+  /** Relais des demandes d'autorisation du harnais (`permissions.js`) ; absent = refus d'office (mode -p). */
+  permissions = null,
 }) {
   const runs = new Map();
   const logins = new Map(); // harness -> cancel
@@ -272,7 +274,31 @@ function createHarnessRunner({
     emit({ type: 'started', run: view(run) });
 
     const env = await harnessEnv();
-    const args = def.args({ prompt, sessionId: run.sessionId, cwd: project.root });
+    // Claude Code : ses demandes d'autorisation (commandes) remontent en carte dans le chat.
+    let permission = null;
+    if (def.permissionPrompt && permissions) {
+      permission = await permissions
+        .prepare({
+          requestId: req.requestId,
+          userId: req.userId,
+          agentId: req.agentId,
+          agentName,
+          harness,
+          harnessLabel: def.label,
+          projectName: project.name,
+          root: project.root,
+          onDecision: ({ command, toolName, decision }) => {
+            if (decision !== 'deny') return;
+            const text = `Refusé · ${clip(command || toolName, 140)}`;
+            run.steps.push({ at: now(), text });
+            if (run.steps.length > MAX_STEPS) run.steps.shift();
+            emit({ type: 'step', runId: run.runId, text });
+          },
+        })
+        .catch(() => null);
+      if (permission) Object.assign(env, permission.env || {});
+    }
+    const args = def.args({ prompt, sessionId: run.sessionId, cwd: project.root, permission });
     return new Promise((resolve) => {
       let child;
       try {
@@ -281,6 +307,7 @@ function createHarnessRunner({
         child = null;
       }
       if (!child) {
+        permission?.dispose();
         run.status = 'error';
         run.result = { ok: false, summary: `${def.label} n’a pas pu être lancé. Est-il installé ?`, files: [] };
         emit({ type: 'done', run: view(run) });
@@ -327,6 +354,8 @@ function createHarnessRunner({
       child.on('error', () => undefined);
       child.on('close', async (code) => {
         clearTimeout(timer);
+        // Demandes encore affichées : refusées, jeton retiré.
+        permission?.dispose();
         if (buffer.trim()) for (const event of parseHarnessLine(harness, buffer.trim())) handle(event);
         const files = await listFiles(project.root, env).catch(() => []);
         const stopped = run.status === 'stopped' || run.status === 'timeout';

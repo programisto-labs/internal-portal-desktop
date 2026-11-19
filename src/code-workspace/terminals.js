@@ -166,7 +166,9 @@ function createTerminalManager({ getEnv, platform = process.platform, ptyImpl } 
       if (!session) throw new HostOpsError('not_found', 'Terminal introuvable.');
       if (session.flushTimer) clearTimeout(session.flushTimer);
       flush(session);
-      return { id: session.id, data: session.scrollback };
+      // Current pty size: the IDE replays the scrollback at this width, so zsh's end-of-line mark
+      // (`%` + COLUMNS-1 spaces + `\r \r`) never wraps in a narrower xterm and leaves a stray `%`.
+      return { id: session.id, data: session.scrollback, cols: session.proc.cols, rows: session.proc.rows };
     },
 
     write(webContents, id, data) {

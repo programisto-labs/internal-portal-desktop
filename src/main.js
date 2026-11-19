@@ -22,6 +22,8 @@ const { isTrustedHostOpsSender } = require('./host-ops/trust');
 const { createHostOpsWebSettings, buildEnableDialog } = require('./host-ops/web-settings');
 const { createInlineConfirm } = require('./host-ops/inline-confirm');
 const { createHarnessRunner } = require('./code-harness/runner');
+const { createHarnessPermissions } = require('./code-harness/permissions');
+const { buildShellPlan, shellGrantCovers, maskSecrets } = require('./host-ops/shell');
 const { createRunHistory } = require('./code-harness/history');
 const { HARNESSES } = require('./code-harness/harnesses');
 const { getLoginEnv } = require('./code-workspace/login-env');
@@ -130,6 +132,7 @@ let hostOpsService = null;
 let hostOpsWebSettings = null;
 let hostOpsInlineConfirm = null;
 let harnessRunner = null;
+let harnessPermissions = null;
 
 /** Événements d'une exécution de harnais vers le portail (cadre principal, origine du portail seulement). */
 function sendHarnessEvent(event) {
@@ -148,7 +151,46 @@ function ensureHarnessRunner() {
     // ensureHostOps crée le store et la confirmation en carte (avec la boîte native en repli).
     ensureHostOps();
     const core = ensureCodeCore();
+    harnessPermissions = createHarnessPermissions({
+      confirm: async (req) => {
+        const answer = await hostOpsInlineConfirm.confirm(req);
+        // Journal : projet et commande masquée (ou outil), jamais de sortie.
+        hostOpsJournal.add({
+          requestId: req.requestId,
+          agentId: req.agentId,
+          agentName: req.agentName,
+          operation: req.operation,
+          source: req.projectRoot,
+          destination: req.operation === 'code.harness_command' ? maskSecrets(req.command || '') : req.toolName,
+          decision: answer,
+          outcome: answer === 'once' || answer === 'always' ? 'allowed' : 'denied',
+        });
+        return answer;
+      },
+      buildPlan: (request) => buildShellPlan(require('fs').promises, request, { homeDir: app.getPath('home') }),
+      findShellGrant: (ctx, plan) =>
+        hostOpsStore
+          .listGrants()
+          .find(
+            (g) =>
+              g.userId === ctx.userId &&
+              g.deviceId === hostOpsStore.getDeviceId() &&
+              g.agentId === ctx.agentId &&
+              shellGrantCovers(g, plan)
+          ) || null,
+      addShellGrant: (grant) =>
+        hostOpsStore.addGrant({
+          userId: grant.userId,
+          deviceId: hostOpsStore.getDeviceId(),
+          agentId: grant.agentId,
+          agentName: grant.agentName,
+          operation: 'shell.run',
+          commandPrefix: grant.commandPrefix,
+          cwdRoots: grant.cwdRoots,
+        }),
+    });
     harnessRunner = createHarnessRunner({
+      permissions: harnessPermissions,
       isEnabled: () => hostOpsStore.isHarnessEnabled(),
       getProject: (userId, projectId) => core.projects.get(userId, projectId),
       getEnv: () => getLoginEnv(),
@@ -1525,6 +1567,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    if (harnessPermissions) harnessPermissions.close();
     if (codeCore) {
       codeCore.terminals.killAll();
       codeCore.watchers.stopAll();

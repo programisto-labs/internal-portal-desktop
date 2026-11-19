@@ -53,6 +53,7 @@ user's rights; `TERM=xterm-256color`, `LASCO_TERMINAL=1`, `ELECTRON_*` removed.
 
 - Output batched (~60 fps) and kept in a 256 KB scrollback. `terminal.attach` flushes pending output then returns the scrollback:
   data events received before the reply are in it, later ones are new (no loss, no duplicate on re-attach).
+  The reply also carries the pty's current `cols` / `rows`: the IDE sizes xterm to them before replaying.
 - Sessions belong to the web contents that created them; killed on a full reload, a renderer crash, window close and quit.
 - Packaging: `asarUnpack: node_modules/node-pty/**`, `npmRebuild: false` (prebuilds are N-API, ABI stable); `postinstall`
   restores the exec bit npm drops on `spawn-helper` (`scripts/fix-node-pty.js`).

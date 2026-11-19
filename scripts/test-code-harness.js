@@ -9,6 +9,9 @@ const path = require('path');
 const { HARNESSES, parseHarnessLine } = require('../src/code-harness/harnesses');
 const { createHarnessRunner } = require('../src/code-harness/runner');
 const { createRunHistory } = require('../src/code-harness/history');
+const { createHarnessPermissions, PERMISSION_TOOL } = require('../src/code-harness/permissions');
+const { handleMessage, askDesktop } = require('../src/code-harness/permission-mcp');
+const { buildShellPlan, shellGrantCovers } = require('../src/host-ops/shell');
 const { buildConfirmDialog } = require('../src/host-ops/confirm');
 const { createHostOpsStore } = require('../src/host-ops/store');
 const { createHostOpsWebSettings } = require('../src/host-ops/web-settings');
@@ -83,6 +86,11 @@ describe('harnais de code : lecture des événements', () => {
   it('options non interactives de chaque harnais', () => {
     assert.deepEqual(HARNESSES['claude-code'].args({ prompt: 'x', sessionId: 's' }).slice(0, 2), ['-p', 'x']);
     assert.ok(HARNESSES['claude-code'].args({ prompt: 'x' }).includes('acceptEdits'));
+    // Sans relais : pas de serveur MCP ajouté (les commandes restent refusées par Claude Code).
+    assert.ok(!HARNESSES['claude-code'].args({ prompt: 'x' }).includes('--permission-prompt-tool'));
+    const withRelay = HARNESSES['claude-code'].args({ prompt: 'x', permission: { mcpConfig: '{"mcpServers":{}}', toolName: PERMISSION_TOOL } });
+    assert.equal(withRelay[withRelay.indexOf('--permission-prompt-tool') + 1], 'mcp__lasco_desktop__approve');
+    assert.equal(withRelay[withRelay.indexOf('--mcp-config') + 1], '{"mcpServers":{}}');
     assert.ok(HARNESSES.codex.args({ prompt: 'x', cwd: '/p' }).includes('workspace-write'));
     assert.ok(HARNESSES.cursor.args({ prompt: 'x' }).includes('stream-json'));
     assert.ok(HARNESSES.vibe.args({ prompt: 'x', cwd: '/p' }).includes('/p'));
@@ -241,6 +249,42 @@ describe('harnais de code : exécutions', () => {
     await next;
   });
 
+  it('Claude Code : relais d’autorisation préparé, transmis au CLI et retiré à la fin', async () => {
+    const prepared = [];
+    let disposed = 0;
+    const runner = mk({
+      permissions: {
+        prepare: async (ctx) => {
+          prepared.push(ctx);
+          return { mcpConfig: '{"mcpServers":{}}', toolName: PERMISSION_TOOL, env: { MCP_TOOL_TIMEOUT: '1' }, dispose: () => disposed++ };
+        },
+      },
+    });
+    const pending = runner.start(request());
+    await tick();
+    await tick();
+    assert.ok(child.spawned.args.includes('--permission-prompt-tool'));
+    assert.equal(child.spawned.opts.env.MCP_TOOL_TIMEOUT, '1');
+    assert.equal(prepared[0].root, '/tmp/demo');
+    assert.equal(prepared[0].agentId, 'a1');
+    prepared[0].onDecision({ command: 'npx create-next-app', decision: 'deny' });
+    child.end(0);
+    await pending;
+    assert.equal(disposed, 1);
+    assert.ok(events.some((e) => e.type === 'step' && e.text === 'Refusé · npx create-next-app'));
+  });
+
+  it('autres harnais : pas de relais (ils ont leurs propres règles)', async () => {
+    let calls = 0;
+    const runner = mk({ permissions: { prepare: async () => (calls++, null) } });
+    const pending = runner.start(request({ harness: 'cursor' }));
+    await tick();
+    await tick();
+    child.end(0);
+    await pending;
+    assert.equal(calls, 0);
+  });
+
   it('arrêt : le processus est tué et l’exécution finit « arrêtée »', async () => {
     const runner = mk();
     const pending = runner.start(request());
@@ -349,5 +393,139 @@ describe('harnais de code : cartes gardées après un redémarrage', () => {
     child.end(0);
     await next;
     fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+describe('harnais de code : autorisations remontées dans le chat (Claude Code)', () => {
+  let tmp;
+  let root;
+  let permissions;
+  let asked;
+  let answer;
+  let grants;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lasco-perm-'));
+    root = fs.realpathSync(tmp);
+    asked = [];
+    answer = 'once';
+    grants = [];
+    permissions = createHarnessPermissions({
+      confirm: async (req) => {
+        asked.push(req);
+        return typeof answer === 'function' ? answer(req) : answer;
+      },
+      buildPlan: (request) => buildShellPlan(fs.promises, request, { homeDir: os.homedir() }),
+      findShellGrant: (ctx, plan) =>
+        grants.find((g) => g.userId === ctx.userId && g.agentId === ctx.agentId && shellGrantCovers(g, plan)) || null,
+      addShellGrant: (g) => grants.push({ operation: 'shell.run', userId: g.userId, agentId: g.agentId, commandPrefix: g.commandPrefix, cwdRoots: g.cwdRoots }),
+      confirmTimeoutMs: 5000,
+    });
+  });
+
+  afterEach(() => {
+    permissions.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const runCtx = () => ({
+    requestId: 'call_1',
+    userId: 'u1',
+    agentId: 'a1',
+    agentName: 'Dev',
+    harness: 'claude-code',
+    harnessLabel: 'Claude Code',
+    projectName: 'demo',
+    root,
+  });
+  const relayOf = (prepared) => JSON.parse(prepared.mcpConfig).mcpServers.lasco_desktop.env;
+  const askVia = (prepared, toolName, input) => {
+    const env = relayOf(prepared);
+    return askDesktop({
+      socketPath: env.LASCO_HARNESS_PERMISSION_SOCKET,
+      token: env.LASCO_HARNESS_PERMISSION_TOKEN,
+      request: { toolName, input },
+      timeoutMs: 5000,
+    });
+  };
+
+  it('serveur MCP : initialise, liste l’outil, relaie l’appel et renvoie la décision en texte JSON', async () => {
+    const init = await handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, null);
+    assert.equal(init.result.protocolVersion, '2025-06-18');
+    const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, null);
+    assert.equal(list.result.tools[0].name, 'approve');
+    assert.equal(await handleMessage({ jsonrpc: '2.0', method: 'notifications/initialized' }, null), null);
+    const call = await handleMessage(
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'approve', arguments: { tool_name: 'Bash', input: { command: 'npm i' } } } },
+      async (req) => ({ behavior: 'allow', updatedInput: req.input }),
+    );
+    assert.deepEqual(JSON.parse(call.result.content[0].text), { behavior: 'allow', updatedInput: { command: 'npm i' } });
+  });
+
+  it('commande : carte dans le chat, « Exécuter une fois » autorise avec l’entrée inchangée', async () => {
+    const prepared = await permissions.prepare(runCtx());
+    assert.equal(prepared.toolName, 'mcp__lasco_desktop__approve');
+    const reply = await askVia(prepared, 'Bash', { command: 'npx create-next-app@latest demo --yes', description: 'Crée le projet' });
+    assert.deepEqual(reply, { behavior: 'allow', updatedInput: { command: 'npx create-next-app@latest demo --yes', description: 'Crée le projet' } });
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].operation, 'code.harness_command');
+    assert.equal(asked[0].cwd, undefined);
+    assert.equal(asked[0].projectRoot, root);
+    assert.deepEqual(asked[0].scope.commandPrefix, ['npx']);
+    const dialog = buildConfirmDialog(asked[0]);
+    assert.equal(dialog.title, 'Claude Code demande à exécuter une commande');
+    assert.match(dialog.message, /npx create-next-app@latest demo --yes/);
+    assert.deepEqual(dialog.decisions, ['deny', 'once', 'always']);
+    prepared.dispose();
+  });
+
+  it('« Toujours autoriser » : règle shell.run du projet, la commande suivante passe sans carte', async () => {
+    answer = 'always';
+    const prepared = await permissions.prepare(runCtx());
+    assert.equal((await askVia(prepared, 'Bash', { command: 'npm install' })).behavior, 'allow');
+    assert.deepEqual(grants[0].commandPrefix, ['npm', 'install']);
+    assert.deepEqual(grants[0].cwdRoots, [root]);
+    answer = 'deny';
+    assert.equal((await askVia(prepared, 'Bash', { command: 'npm install next' })).behavior, 'allow');
+    assert.equal(asked.length, 1);
+    // Commande composée : jamais couverte par une règle, toujours demandée.
+    const composed = await askVia(prepared, 'Bash', { command: 'npm install && rm -rf /' });
+    assert.equal(composed.behavior, 'deny');
+    assert.equal(asked.length, 2);
+    assert.equal(asked[1].allowPersistent, false);
+    prepared.dispose();
+  });
+
+  it('refus, autre outil, jeton inconnu, exécution terminée : refusé', async () => {
+    answer = 'deny';
+    const prepared = await permissions.prepare(runCtx());
+    const denied = await askVia(prepared, 'Bash', { command: 'npm run dev' });
+    assert.equal(denied.behavior, 'deny');
+    assert.match(denied.message, /Refusé/);
+    answer = 'once';
+    assert.equal((await askVia(prepared, 'WebFetch', { url: 'https://nextjs.org/docs' })).behavior, 'allow');
+    const toolReq = asked[asked.length - 1];
+    assert.equal(toolReq.operation, 'code.harness_tool');
+    assert.deepEqual(buildConfirmDialog(toolReq).decisions, ['deny', 'once']);
+    const env = relayOf(prepared);
+    const forged = await askDesktop({ socketPath: env.LASCO_HARNESS_PERMISSION_SOCKET, token: 'x', request: { toolName: 'Bash', input: { command: 'ls' } }, timeoutMs: 5000 });
+    assert.equal(forged.behavior, 'deny');
+    prepared.dispose();
+    const after = await askVia(prepared, 'Bash', { command: 'ls' });
+    assert.equal(after.behavior, 'deny');
+  });
+
+  it('fin d’exécution pendant une carte ouverte : la demande est refusée', async () => {
+    let release;
+    answer = (req) =>
+      new Promise((resolve) => {
+        release = resolve;
+        req.signal.addEventListener('abort', () => resolve('deny'));
+      });
+    const prepared = await permissions.prepare(runCtx());
+    const pending = askVia(prepared, 'Bash', { command: 'npm run dev' });
+    while (!release) await new Promise((r) => setTimeout(r, 5));
+    prepared.dispose();
+    assert.equal((await pending).behavior, 'deny');
   });
 });

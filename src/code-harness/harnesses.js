@@ -14,9 +14,12 @@ const HARNESSES = {
     label: 'Claude Code',
     bin: 'claude',
     loginCommand: 'claude /login',
-    // Modifications de fichiers acceptées, commandes refusées (pas de confirmation possible en mode -p).
-    effect: 'modifie les fichiers du projet sans confirmer chaque modification ; il ne lance pas de commandes.',
-    args({ prompt, sessionId }) {
+    // Modifications de fichiers acceptées ; chaque autre outil (commande npm, npx, git…) passe par le relais
+    // d'autorisation de Desktop (`permissions.js`) et s'affiche en carte dans le chat. Sans relais, refusé.
+    effect:
+      'modifie les fichiers du projet sans confirmer chaque modification ; chaque commande qu’il veut lancer (npm, npx, git…) vous est demandée dans le chat.',
+    permissionPrompt: true,
+    args({ prompt, sessionId, permission }) {
       return [
         '-p',
         prompt,
@@ -25,6 +28,7 @@ const HARNESSES = {
         '--verbose',
         '--permission-mode',
         'acceptEdits',
+        ...(permission ? ['--mcp-config', permission.mcpConfig, '--permission-prompt-tool', permission.toolName] : []),
         ...(sessionId ? ['--resume', sessionId] : []),
       ];
     },
