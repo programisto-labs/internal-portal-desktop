@@ -27,7 +27,7 @@ function buildShellConfirmDialog(req) {
     decisions.push('always');
     lines.push(
       '',
-      `« Toujours autoriser » couvre les commandes commençant par « ${prefix.join(' ')} », dans ${req.cwd} et ses sous-dossiers, pour cet agent et cet appareil. Jamais les commandes composées ni sensibles. Révocable dans Fichier > Opérations sur l’hôte.`
+      `« Toujours autoriser » couvre les commandes commençant par « ${prefix.join(' ')} », dans ${req.cwd} et ses sous-dossiers, pour cet agent et cet appareil. Jamais les commandes composées ni sensibles. Révocable dans Réglages > Cet ordinateur.`
     );
   } else if (req.notRememberableReason) {
     lines.push('', req.notRememberableReason);
@@ -35,8 +35,60 @@ function buildShellConfirmDialog(req) {
   return { title: 'Un agent demande à exécuter une commande', message: lines.join('\n'), buttons, decisions };
 }
 
+/** Lasco Code: an agent writes or edits a file of a local project. */
+function buildCodeConfirmDialog(req) {
+  const lines = [
+    `Agent : ${req.agentName}`,
+    `Projet : ${req.project} (${req.projectRoot})`,
+    `Fichier : ${req.file}`,
+    '',
+    req.summary,
+  ];
+  if (req.preview) lines.push('', req.preview);
+  lines.push('', 'Le fichier est modifié sur CET ORDINATEUR. Les changements restent visibles (et annulables) dans Git.');
+  const buttons = ['Refuser', 'Autoriser une fois'];
+  const decisions = ['deny', 'once'];
+  if (req.allowPersistent) {
+    buttons.push('Toujours autoriser dans ce projet');
+    decisions.push('always');
+    lines.push(
+      '',
+      `« Toujours autoriser » couvre les créations et modifications de fichiers par cet agent dans ${req.projectRoot}, sur cet appareil. Jamais les fichiers sensibles (.env, clés). Révocable dans Réglages > Cet ordinateur.`
+    );
+  } else if (req.sensitive) {
+    lines.push('', 'Fichier sensible (secrets, clés) : cette confirmation ne peut pas être mémorisée.');
+  }
+  const title = req.created ? 'Un agent demande à créer un fichier' : 'Un agent demande à modifier un fichier';
+  return { title, message: lines.join('\n'), buttons, decisions };
+}
+
+/** Harnais de code : un agent demande à lancer Claude Code, Codex, Cursor ou Vibe sur un projet. */
+function buildDelegateConfirmDialog(req) {
+  const prompt = String(req.prompt || '');
+  const lines = [
+    `Agent : ${req.agentName}`,
+    `Harnais : ${req.harnessLabel}`,
+    `Projet : ${req.project} (${req.projectRoot})`,
+    '',
+    'Consigne :',
+    prompt.length > 600 ? `${prompt.slice(0, 599)}…` : prompt,
+    '',
+    `Effet : ${req.harnessLabel} ${req.effect} Il travaille sur CET ORDINATEUR, dans ce projet ; les changements restent visibles (et annulables) dans Git.`,
+  ];
+  const buttons = ['Refuser', 'Lancer'];
+  const decisions = ['deny', 'once'];
+  if (req.allowPersistent) {
+    buttons.push(`Toujours autoriser ${req.harnessLabel} dans ce projet`);
+    decisions.push('always');
+    lines.push('', `« Toujours autoriser » vaut pour cet agent, ${req.harnessLabel} et ${req.projectRoot}, sur cet appareil. Révocable dans Réglages > Cet ordinateur.`);
+  }
+  return { title: `Un agent demande à lancer ${req.harnessLabel}`, message: lines.join('\n'), buttons, decisions };
+}
+
 function buildConfirmDialog(req) {
+  if (req.operation === 'code.delegate') return buildDelegateConfirmDialog(req);
   if (req.operation === 'shell.run') return buildShellConfirmDialog(req);
+  if (req.operation === 'code.write' || req.operation === 'code.edit') return buildCodeConfirmDialog(req);
   const lines = [`Agent : ${req.agentName}`, `Opération : ${OP_LABELS[req.operation] || req.operation}`, ''];
   if (req.source) lines.push(`Source : ${req.source}`);
   lines.push(`Destination : ${req.destination}`, '');
@@ -62,7 +114,7 @@ function buildConfirmDialog(req) {
     const roots = [...new Set([...(req.scope.sourceRoots || []), ...(req.scope.destinationRoots || [])])];
     buttons.push('Toujours autoriser ce type d’opération');
     decisions.push('always');
-    lines.push('', `« Toujours autoriser » ne vaut que pour cet agent, cette opération, cet appareil et ces dossiers : ${roots.join(', ')}. Révocable dans Lasco > Opérations sur l’hôte.`);
+    lines.push('', `« Toujours autoriser » ne vaut que pour cet agent, cette opération, cet appareil et ces dossiers : ${roots.join(', ')}. Révocable dans Réglages > Cet ordinateur.`);
   }
   return { title, message: lines.join('\n'), buttons, decisions };
 }

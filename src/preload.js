@@ -111,6 +111,61 @@ const hostOpsBridge = {
   getCapabilities: () => ipcRenderer.invoke('host-ops-capabilities'),
   execute: (request) => ipcRenderer.invoke('host-ops-execute', request),
   cancel: (requestId) => ipcRenderer.invoke('host-ops-cancel', requestId),
+  /**
+   * Confirmations in the Lasco AI chat: Desktop announces a request (`request` / `size` / `resolved`),
+   * the page reserves a placeholder and reports where it is. Desktop draws the card and its buttons.
+   */
+  onConfirm: (callback) => {
+    if (typeof callback !== 'function') return () => undefined;
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('host-ops-confirm', listener);
+    return () => ipcRenderer.removeListener('host-ops-confirm', listener);
+  },
+  placeConfirm: (id, placement) => ipcRenderer.send('host-ops-confirm-place', { id, placement }),
+  pendingConfirms: () => ipcRenderer.invoke('host-ops-confirm-pending'),
+  /** Profil > « Cet ordinateur ». Activer ouvre une confirmation native ; la page ne décide jamais seule. */
+  settings: {
+    status: () => ipcRenderer.invoke('host-ops-web-status'),
+    disable: (feature) => ipcRenderer.invoke('host-ops-web-disable', feature),
+    requestEnable: (feature) => ipcRenderer.invoke('host-ops-web-request-enable', feature),
+    revokeAll: () => ipcRenderer.invoke('host-ops-web-revoke-all'),
+    openSettings: () => ipcRenderer.invoke('host-ops-web-open-settings'),
+  },
+};
+
+/**
+ * Lasco Code workspace (IDE page): local git projects chosen natively, files, git, terminals.
+ * Same exposure rule as hostOps; main re-validates the sender on every call.
+ */
+/**
+ * Harnais de code : un agent lance Claude Code, Codex, Cursor ou Vibe sur un projet de Lasco Code.
+ * Lancement confirmé par Desktop ; la page ne reçoit que les étapes et le résultat.
+ */
+const codeHarnessBridge = {
+  status: () => ipcRenderer.invoke('code-harness-status'),
+  start: (request) => ipcRenderer.invoke('code-harness-start', request),
+  stop: (runId) => ipcRenderer.invoke('code-harness-stop', runId),
+  stopRequest: (requestId) => ipcRenderer.invoke('code-harness-stop-request', requestId),
+  runs: () => ipcRenderer.invoke('code-harness-runs'),
+  openLogin: (harness) => ipcRenderer.invoke('code-harness-open-login', harness),
+  login: (harness) => ipcRenderer.invoke('code-harness-login', harness),
+  retry: (runId) => ipcRenderer.invoke('code-harness-retry', runId),
+  followUp: (runId, prompt) => ipcRenderer.invoke('code-harness-follow-up', runId, prompt),
+  onEvent: (callback) => {
+    if (typeof callback !== 'function') return () => undefined;
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('code-harness-event', listener);
+    return () => ipcRenderer.removeListener('code-harness-event', listener);
+  },
+};
+
+const codeWorkspaceBridge = {
+  invoke: (method, payload) => ipcRenderer.invoke('code-workspace-invoke', { method, payload }),
+  terminalWrite: (id, data) => ipcRenderer.send('code-terminal-input', { id, data }),
+  terminalResize: (id, cols, rows) => ipcRenderer.send('code-terminal-resize', { id, cols, rows }),
+  onTerminalData: (callback) => subscribe('code-terminal-data', callback),
+  onTerminalExit: (callback) => subscribe('code-terminal-exit', callback),
+  onFsChanged: (callback) => subscribe('code-fs-changed', callback),
 };
 
 const desktopBridge = {
@@ -138,7 +193,7 @@ const desktopBridge = {
   },
   browserTabs: browserTabsBridge,
   ...(noAgents && { noAgents: true }),
-  ...(exposeHostOps && { hostOps: hostOpsBridge }),
+  ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
   closeNotification: (tag) => ipcRenderer.invoke('lasco-close-notification', tag),

@@ -42,6 +42,40 @@ function normalizeGrant(raw) {
       createdAt: Number(raw.createdAt) || 0,
     };
   }
+  if (raw.operation === 'code.delegate') {
+    // Harnais de code : cet agent peut lancer ce harnais dans ce projet sans nouvelle confirmation.
+    const destinationRoots = roots(raw.destinationRoots).slice(0, 1);
+    const harness = typeof raw.harness === 'string' && /^[a-z-]{1,32}$/.test(raw.harness) ? raw.harness : null;
+    if (!destinationRoots.length || !harness) return null;
+    return {
+      id: raw.id,
+      userId: raw.userId,
+      deviceId: raw.deviceId,
+      agentId: raw.agentId,
+      agentName: clip(raw.agentName),
+      operation: 'code.delegate',
+      harness,
+      sourceRoots: [],
+      destinationRoots,
+      createdAt: Number(raw.createdAt) || 0,
+    };
+  }
+  if (raw.operation === 'code.write') {
+    // Lasco Code: file writes and edits by this agent inside one project root.
+    const destinationRoots = roots(raw.destinationRoots).slice(0, 1);
+    if (!destinationRoots.length) return null;
+    return {
+      id: raw.id,
+      userId: raw.userId,
+      deviceId: raw.deviceId,
+      agentId: raw.agentId,
+      agentName: clip(raw.agentName),
+      operation: 'code.write',
+      sourceRoots: [],
+      destinationRoots,
+      createdAt: Number(raw.createdAt) || 0,
+    };
+  }
   if (!['file.move', 'file.copy', 'file.rename', 'folder.create'].includes(raw.operation)) return null;
   const sourceRoots = roots(raw.sourceRoots);
   const destinationRoots = roots(raw.destinationRoots);
@@ -78,6 +112,10 @@ function createHostOpsStore(filePath, fsImpl = fs) {
       enabled: Boolean(raw && raw.enabled === true),
       // Shell commands are a separate switch, off by default even when file operations are on.
       shellEnabled: Boolean(raw && raw.shellEnabled === true),
+      // Lasco Code projects for agents: a separate switch, off by default.
+      codeEnabled: Boolean(raw && raw.codeEnabled === true),
+      // Harnais de code (Claude Code, Codex, Cursor, Vibe) : interrupteur distinct, désactivé par défaut.
+      harnessEnabled: Boolean(raw && raw.harnessEnabled === true),
       deviceId,
       grants: raw && Array.isArray(raw.grants) ? raw.grants.map(normalizeGrant).filter(Boolean).slice(0, MAX_GRANTS) : [],
     };
@@ -111,6 +149,18 @@ function createHostOpsStore(filePath, fsImpl = fs) {
       load().shellEnabled = value === true;
       save();
       return load().shellEnabled;
+    },
+    isCodeEnabled: () => load().enabled && load().codeEnabled,
+    setCodeEnabled(value) {
+      load().codeEnabled = value === true;
+      save();
+      return load().codeEnabled;
+    },
+    isHarnessEnabled: () => load().enabled && load().codeEnabled && load().harnessEnabled,
+    setHarnessEnabled(value) {
+      load().harnessEnabled = value === true;
+      save();
+      return load().harnessEnabled;
     },
     getDeviceId: () => load().deviceId,
     listGrants: () => load().grants.map((g) => ({ ...g })),

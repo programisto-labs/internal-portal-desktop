@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification } = require('electron');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -18,6 +18,19 @@ const { createHostOpsStore, createJournal } = require('./host-ops/store');
 const { createHostOpsService } = require('./host-ops/service');
 const { createConfirm } = require('./host-ops/confirm');
 const { isTrustedHostOpsSender } = require('./host-ops/trust');
+const { createHostOpsWebSettings, buildEnableDialog } = require('./host-ops/web-settings');
+const { createInlineConfirm } = require('./host-ops/inline-confirm');
+const { createHarnessRunner } = require('./code-harness/runner');
+const { createRunHistory } = require('./code-harness/history');
+const { HARNESSES } = require('./code-harness/harnesses');
+const { getLoginEnv } = require('./code-workspace/login-env');
+const { createGitRunner } = require('./code-workspace/git');
+const { createProjectStore } = require('./code-workspace/projects');
+const { createFileOps } = require('./code-workspace/files');
+const { createTerminalManager } = require('./code-workspace/terminals');
+const { createWatcherManager } = require('./code-workspace/watcher');
+const { createCodeWorkspaceService } = require('./code-workspace/service');
+const { createCodeAgentOps } = require('./code-workspace/agent-ops');
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
@@ -46,6 +59,27 @@ function installApplicationMenu() {
       ? [
           {
             role: 'appMenu',
+            ...(NO_AGENTS
+              ? {}
+              : {
+                  submenu: [
+                    { role: 'about', label: 'À propos de Lasco' },
+                    { type: 'separator' },
+                    {
+                      label: 'Réglages…',
+                      accelerator: 'CmdOrCtrl+,',
+                      click: () => openHostOpsSettings(),
+                    },
+                    { type: 'separator' },
+                    { role: 'services', label: 'Services' },
+                    { type: 'separator' },
+                    { role: 'hide', label: 'Masquer Lasco' },
+                    { role: 'hideOthers', label: 'Masquer les autres' },
+                    { role: 'unhide', label: 'Tout afficher' },
+                    { type: 'separator' },
+                    { role: 'quit', label: 'Quitter Lasco' },
+                  ],
+                }),
           },
         ]
       : []),
@@ -65,11 +99,12 @@ function installApplicationMenu() {
             if (win) win.close();
           },
         },
-        ...(NO_AGENTS
+        // macOS : Lasco > Réglages… (⌘,). Ailleurs : Fichier > Réglages… (Ctrl+,).
+        ...(NO_AGENTS || isMac
           ? []
           : [
               { type: 'separator' },
-              { label: 'Opérations sur l’hôte (agents)…', click: () => openHostOpsSettings() },
+              { label: 'Réglages…', accelerator: 'CmdOrCtrl+,', click: () => openHostOpsSettings() },
             ]),
         ...(isMac
           ? []
@@ -142,19 +177,287 @@ let hostOpsStore = null;
 let hostOpsJournal = null;
 let hostOpsService = null;
 let hostOpsSettingsWin = null;
+let hostOpsWebSettings = null;
+let hostOpsInlineConfirm = null;
+let harnessRunner = null;
+
+/** Événements d'une exécution de harnais vers le portail (cadre principal, origine du portail seulement). */
+function sendHarnessEvent(event) {
+  const win = mainPortalWindow();
+  if (!win || win.webContents.isDestroyed()) return;
+  try {
+    if (new URL(win.webContents.getURL()).origin !== PORTAL_ORIGIN) return;
+  } catch (_) {
+    return;
+  }
+  win.webContents.send('code-harness-event', event);
+}
+
+function ensureHarnessRunner() {
+  if (!harnessRunner) {
+    // ensureHostOps crée le store et la confirmation en carte (avec la boîte native en repli).
+    ensureHostOps();
+    const core = ensureCodeCore();
+    harnessRunner = createHarnessRunner({
+      isEnabled: () => hostOpsStore.isHarnessEnabled(),
+      getProject: (userId, projectId) => core.projects.get(userId, projectId),
+      getEnv: () => getLoginEnv(),
+      emit: sendHarnessEvent,
+      // Cartes « sous-agent » gardées après un redémarrage de l'app.
+      history: createRunHistory(path.join(app.getPath('userData'), 'code-harness-runs.json')),
+      confirm: async (req) => {
+        const grant = hostOpsStore
+          .listGrants()
+          .find(
+            (g) =>
+              g.operation === 'code.delegate' &&
+              g.userId === req.userId &&
+              g.agentId === req.agentId &&
+              g.deviceId === hostOpsStore.getDeviceId() &&
+              g.harness === req.harness &&
+              (g.destinationRoots || []).includes(req.projectRoot)
+          );
+        if (grant) return 'grant';
+        const answer = await hostOpsInlineConfirm.confirm({ ...req, allowPersistent: true });
+        if (answer === 'always') {
+          hostOpsStore.addGrant({
+            userId: req.userId,
+            deviceId: hostOpsStore.getDeviceId(),
+            agentId: req.agentId,
+            agentName: req.agentName,
+            operation: 'code.delegate',
+            harness: req.harness,
+            destinationRoots: [req.projectRoot],
+          });
+        }
+        return answer;
+      },
+    });
+  }
+  return harnessRunner;
+}
+
+/** Ouvre un Terminal sur la commande de connexion du harnais (macOS) ; ailleurs, la page affiche la commande. */
+function openHarnessLogin(harnessId) {
+  const def = HARNESSES[harnessId];
+  if (!def) return { ok: false };
+  if (process.platform !== 'darwin') return { ok: true, opened: false, command: def.loginCommand };
+  const script = `tell application "Terminal" to do script ${JSON.stringify(def.loginCommand)}\ntell application "Terminal" to activate`;
+  require('child_process').execFile('osascript', ['-e', script], () => undefined);
+  return { ok: true, opened: true, command: def.loginCommand };
+}
+/** Native confirmation cards: webContents id -> { id, onDecide, onSize }. */
+const confirmCards = new Map();
+
+function mainPortalWindow() {
+  return mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null;
+}
+
+/** A native card view over the chat placeholder (separate `file:` web contents, no access from the portal). */
+function createConfirmCardView(id, { onDecide, onSize }) {
+  const view = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'host-ops', 'confirm-card-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+    },
+  });
+  view.setBackgroundColor('#00000000');
+  if (typeof view.setBorderRadius === 'function') view.setBorderRadius(18);
+  const wc = view.webContents;
+  wc.on('will-navigate', (e) => e.preventDefault());
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  confirmCards.set(wc.id, { id, onDecide, onSize });
+  let ready = false;
+  let pendingSpec = null;
+  let pendingArm = false;
+  const send = (channel, payload) => {
+    if (!wc.isDestroyed()) wc.send(channel, payload);
+  };
+  wc.once('did-finish-load', () => {
+    ready = true;
+    if (pendingSpec) send('confirm-card-render', pendingSpec);
+    send('confirm-card-arm', pendingArm);
+  });
+  wc.loadFile(path.join(__dirname, 'host-ops', 'confirm-card.html'));
+  let attached = false;
+  const onTheme = () => send('confirm-card-theme', nativeTheme.shouldUseDarkColors);
+  nativeTheme.on('updated', onTheme);
+  return {
+    render(spec) {
+      pendingSpec = {
+        title: spec.title,
+        message: spec.message,
+        buttons: spec.buttons,
+        decisions: spec.decisions,
+        dark: nativeTheme.shouldUseDarkColors,
+      };
+      if (ready) send('confirm-card-render', pendingSpec);
+    },
+    setBounds(bounds) {
+      const win = mainPortalWindow();
+      if (!win) return;
+      // Re-adding keeps the card on top of the browser tab views.
+      win.contentView.addChildView(view);
+      attached = true;
+      view.setBounds(bounds);
+      view.setVisible(true);
+    },
+    hide() {
+      view.setVisible(false);
+    },
+    arm(on) {
+      pendingArm = on === true;
+      if (ready) send('confirm-card-arm', pendingArm);
+    },
+    destroy() {
+      nativeTheme.removeListener('updated', onTheme);
+      confirmCards.delete(wc.id);
+      const win = mainPortalWindow();
+      if (attached && win) {
+        try {
+          win.contentView.removeChildView(view);
+        } catch (_) {
+          // already detached
+        }
+      }
+      if (!wc.isDestroyed()) wc.close();
+    },
+  };
+}
+
+/** Confirmations as cards in the Lasco AI chat (drawn by Desktop); native dialog when the chat cannot host them. */
+function ensureInlineConfirm(fallback) {
+  if (!hostOpsInlineConfirm) {
+    hostOpsInlineConfirm = createInlineConfirm({
+      fallback,
+      createCard: createConfirmCardView,
+      notifyPortal: (event) => {
+        const win = mainPortalWindow();
+        if (!win || win.webContents.isDestroyed()) return false;
+        let origin = null;
+        try {
+          origin = new URL(win.webContents.getURL()).origin;
+        } catch (_) {
+          origin = null;
+        }
+        // Only the portal hosts the card; an error page or another origin gets the native dialog.
+        if (origin !== PORTAL_ORIGIN || win.isMinimized() || !win.isVisible()) return false;
+        win.webContents.send('host-ops-confirm', event);
+        return true;
+      },
+      getContentSize: () => {
+        const win = mainPortalWindow();
+        if (!win || win.isMinimized() || !win.isVisible()) return null;
+        const [contentWidth, contentHeight] = win.getContentSize();
+        return { contentWidth, contentHeight };
+      },
+    });
+  }
+  return hostOpsInlineConfirm;
+}
+
+/** Réglages vus par le portail (profil > « Cet ordinateur ») : l'activation passe par un dialogue natif. */
+function ensureHostOpsWebSettings() {
+  ensureHostOps();
+  if (!hostOpsWebSettings) {
+    hostOpsWebSettings = createHostOpsWebSettings({
+      store: hostOpsStore,
+      openSettings: () => openHostOpsSettings(),
+      confirmEnable: async (request) => {
+        const options = buildEnableDialog(request);
+        const win = mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null;
+        if (win) win.focus();
+        const res = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+        return res.response === 1;
+      },
+    });
+  }
+  return hostOpsWebSettings;
+}
+
+/**
+ * Lasco Code workspace (IDE page of the portal): local git projects, files, git, terminals.
+ * Shared core (git runner, project list, file operations) used by the IDE and by agent operations.
+ */
+let codeCore = null;
+let codeWorkspaceService = null;
+
+function ensureCodeCore() {
+  if (!codeCore) {
+    const getEnv = () => getLoginEnv();
+    const git = createGitRunner({ getEnv });
+    codeCore = {
+      getEnv,
+      git,
+      projects: createProjectStore(path.join(app.getPath('userData'), 'code-projects.json')),
+      files: createFileOps({ git, trashItem: (p) => shell.trashItem(p) }),
+      terminals: createTerminalManager({ getEnv }),
+      watchers: createWatcherManager(),
+    };
+  }
+  return codeCore;
+}
+
+function ensureCodeWorkspace() {
+  if (!codeWorkspaceService) {
+    const core = ensureCodeCore();
+    const parent = () => (mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null);
+    codeWorkspaceService = createCodeWorkspaceService({
+      ...core,
+      pickFolder: async ({ title, buttonLabel }) => {
+        const options = { title, buttonLabel, properties: ['openDirectory', 'createDirectory'] };
+        const win = parent();
+        const res = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+        return res.canceled || !res.filePaths.length ? null : res.filePaths[0];
+      },
+      confirmInitRepository: async (dir) => {
+        const options = {
+          type: 'question',
+          title: 'Lasco',
+          message: 'Ce dossier n’est pas un dépôt git',
+          detail: `${dir}\n\nLasco Code travaille sur des dépôts git (modifications, diff, branches). Initialiser un dépôt git dans ce dossier ?`,
+          buttons: ['Annuler', 'Initialiser un dépôt git'],
+          defaultId: 1,
+          cancelId: 0,
+          noLink: true,
+        };
+        const win = parent();
+        const res = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+        return res.response === 1 ? 'init' : 'cancel';
+      },
+      openAgentSettings: () => openHostOpsSettings(),
+      getAgentAccess: () => {
+        ensureHostOps();
+        return {
+          enabled: hostOpsStore.isCodeEnabled(),
+          hostEnabled: hostOpsStore.isEnabled(),
+          shellEnabled: hostOpsStore.isShellEnabled(),
+        };
+      },
+    });
+  }
+  return codeWorkspaceService;
+}
 
 function ensureHostOps() {
   if (!hostOpsService) {
     const dir = app.getPath('userData');
+    const core = ensureCodeCore();
     hostOpsStore = createHostOpsStore(path.join(dir, 'host-ops.json'));
     hostOpsJournal = createJournal(path.join(dir, 'host-ops-journal.json'));
     hostOpsService = createHostOpsService({
       store: hostOpsStore,
       journal: hostOpsJournal,
-      confirm: createConfirm(
-        (...args) => dialog.showMessageBox(...args),
-        () => (mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null)
-      ),
+      codeAgent: createCodeAgentOps({ projects: core.projects, files: core.files, git: core.git }),
+      confirm: ensureInlineConfirm(
+        createConfirm(
+          (...args) => dialog.showMessageBox(...args),
+          () => (mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null)
+        )
+      ).confirm,
     });
   }
   return hostOpsService;
@@ -169,7 +472,7 @@ function openHostOpsSettings() {
   hostOpsSettingsWin = new BrowserWindow({
     width: 760,
     height: 620,
-    title: 'Opérations sur l’hôte',
+    title: 'Réglages — Cet ordinateur',
     webPreferences: {
       preload: path.join(__dirname, 'host-ops', 'settings-preload.js'),
       contextIsolation: true,
@@ -603,7 +906,24 @@ function createWindow() {
   }
 
   mainWindowRef = win;
+  // Lasco Code: a full reload of the portal (not an in-app navigation) ends its terminals and watchers.
+  const webContentsRef = win.webContents;
+  const releaseCodeWorkspace = () => {
+    if (!codeCore) return;
+    codeCore.terminals.killForWebContents(webContentsRef);
+    codeCore.watchers.unwatchWebContents(webContentsRef);
+  };
+  win.webContents.on('did-navigate', releaseCodeWorkspace);
+  win.webContents.on('render-process-gone', releaseCodeWorkspace);
+  // Chat confirmation cards: hidden until the page reports their spot again.
+  for (const name of ['resize', 'minimize', 'hide', 'enter-full-screen', 'leave-full-screen']) {
+    win.on(name, () => hostOpsInlineConfirm && hostOpsInlineConfirm.invalidateAll());
+  }
+  win.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+    if (isMainFrame && hostOpsInlineConfirm) hostOpsInlineConfirm.invalidateAll();
+  });
   win.on('closed', () => {
+    releaseCodeWorkspace();
     stopAutoRetry();
     if (browserTabManager) {
       browserTabManager.destroyAll();
@@ -771,6 +1091,104 @@ function registerWindowIPC() {
     if (!trustedHostOpsSender(event)) return forbidden;
     return ensureHostOps().cancel(requestId);
   });
+  // Profil > « Cet ordinateur » : état, désactivation, révocation ; l'activation est décidée par un dialogue natif.
+  const unavailable = { ok: false, error: { code: 'forbidden', message: 'Origine non autorisée.' } };
+  ipcMain.handle('host-ops-web-status', (event) => {
+    if (!trustedHostOpsSender(event)) return { available: false };
+    return ensureHostOpsWebSettings().status();
+  });
+  ipcMain.handle('host-ops-web-disable', (event, feature) => {
+    if (!trustedHostOpsSender(event)) return unavailable;
+    return ensureHostOpsWebSettings().disable(feature);
+  });
+  ipcMain.handle('host-ops-web-request-enable', (event, feature) => {
+    if (!trustedHostOpsSender(event)) return unavailable;
+    return ensureHostOpsWebSettings().requestEnable(feature);
+  });
+  ipcMain.handle('host-ops-web-revoke-all', (event) => {
+    if (!trustedHostOpsSender(event)) return unavailable;
+    return ensureHostOpsWebSettings().revokeAll();
+  });
+  ipcMain.handle('host-ops-web-open-settings', (event) => {
+    if (!trustedHostOpsSender(event)) return unavailable;
+    return ensureHostOpsWebSettings().open();
+  });
+  // Chat confirmation cards: the page reports where its placeholder is; only the native card decides.
+  ipcMain.on('host-ops-confirm-place', (event, message) => {
+    if (!trustedHostOpsSender(event) || !hostOpsInlineConfirm || !message || typeof message !== 'object') return;
+    const zoom = event.sender.getZoomFactor() || 1;
+    const p = message.placement && typeof message.placement === 'object' ? message.placement : null;
+    const placement = p
+      ? { visible: p.visible === true, x: p.x * zoom, y: p.y * zoom, width: p.width * zoom, height: p.height * zoom }
+      : null;
+    hostOpsInlineConfirm.place(String(message.id || ''), placement);
+  });
+  ipcMain.handle('host-ops-confirm-pending', (event) => {
+    if (!trustedHostOpsSender(event) || !hostOpsInlineConfirm) return [];
+    return hostOpsInlineConfirm.list();
+  });
+  ipcMain.on('confirm-card-decide', (event, index) => {
+    const card = confirmCards.get(event.sender.id);
+    if (!card || event.senderFrame !== event.sender.mainFrame || !String(event.senderFrame.url).startsWith('file:')) return;
+    card.onDecide(Number(index));
+  });
+  ipcMain.on('confirm-card-size', (event, height) => {
+    const card = confirmCards.get(event.sender.id);
+    if (!card) return;
+    card.onSize(Number(height));
+  });
+  // --- Harnais de code (Claude Code, Codex, Cursor, Vibe) : même expéditeur de confiance ---
+  ipcMain.handle('code-harness-status', async (event) => {
+    if (!trustedHostOpsSender(event)) return { enabled: false, harnesses: [] };
+    return ensureHarnessRunner().status();
+  });
+  ipcMain.handle('code-harness-start', (event, request) => {
+    if (!trustedHostOpsSender(event)) return unavailable;
+    return ensureHarnessRunner().start(request);
+  });
+  ipcMain.handle('code-harness-stop', (event, runId) => {
+    if (!trustedHostOpsSender(event) || typeof runId !== 'string') return unavailable;
+    return ensureHarnessRunner().stop(runId);
+  });
+  ipcMain.handle('code-harness-stop-request', (event, requestId) => {
+    if (!trustedHostOpsSender(event) || typeof requestId !== 'string') return unavailable;
+    return ensureHarnessRunner().stopByRequest(requestId);
+  });
+  ipcMain.handle('code-harness-runs', (event) => {
+    if (!trustedHostOpsSender(event)) return [];
+    return ensureHarnessRunner().list();
+  });
+  ipcMain.handle('code-harness-login', (event, harnessId) => {
+    if (!trustedHostOpsSender(event) || typeof harnessId !== 'string') return unavailable;
+    return ensureHarnessRunner().login(harnessId);
+  });
+  ipcMain.handle('code-harness-retry', (event, runId) => {
+    if (!trustedHostOpsSender(event) || typeof runId !== 'string') return unavailable;
+    return ensureHarnessRunner().retry(runId);
+  });
+  ipcMain.handle('code-harness-follow-up', (event, runId, prompt) => {
+    if (!trustedHostOpsSender(event) || typeof runId !== 'string' || typeof prompt !== 'string') return unavailable;
+    return ensureHarnessRunner().followUp(runId, prompt);
+  });
+  ipcMain.handle('code-harness-open-login', (event, harnessId) => {
+    if (!trustedHostOpsSender(event) || typeof harnessId !== 'string') return unavailable;
+    return openHarnessLogin(harnessId);
+  });
+  // --- Lasco Code workspace: same trusted sender as host operations (portal main frame) ---
+  ipcMain.handle('code-workspace-invoke', (event, message) => {
+    if (!trustedHostOpsSender(event)) return forbidden;
+    const m = message && typeof message === 'object' ? message : {};
+    return ensureCodeWorkspace().invoke(m.method, m.payload, { webContents: event.sender });
+  });
+  ipcMain.on('code-terminal-input', (event, message) => {
+    if (!trustedHostOpsSender(event) || !codeCore || !message || typeof message !== 'object') return;
+    codeCore.terminals.write(event.sender, message.id, message.data);
+  });
+  ipcMain.on('code-terminal-resize', (event, message) => {
+    if (!trustedHostOpsSender(event) || !codeCore || !message || typeof message !== 'object') return;
+    codeCore.terminals.resize(event.sender, message.id, message.cols, message.rows);
+  });
+
   // --- Host operations: local options window only (never reachable from web pages) ---
   const fromHostOpsSettings = (event) =>
     Boolean(
@@ -781,11 +1199,13 @@ function registerWindowIPC() {
         String(event.senderFrame.url).startsWith('file:')
     );
   ipcMain.handle('host-ops-admin-state', (event) => {
-    if (!fromHostOpsSettings(event)) return { enabled: false, shellEnabled: false, grants: [], journal: [] };
+    if (!fromHostOpsSettings(event)) return { enabled: false, shellEnabled: false, codeEnabled: false, grants: [], journal: [] };
     ensureHostOps();
     return {
       enabled: hostOpsStore.isEnabled(),
       shellEnabled: hostOpsStore.isShellEnabled(),
+      codeEnabled: hostOpsStore.isCodeEnabled(),
+      harnessEnabled: hostOpsStore.isHarnessEnabled(),
       grants: hostOpsStore.listGrants(),
       journal: hostOpsJournal.list(),
     };
@@ -794,6 +1214,16 @@ function registerWindowIPC() {
     if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
     ensureHostOps();
     return hostOpsStore.setShellEnabled(value);
+  });
+  ipcMain.handle('host-ops-admin-set-code-enabled', (event, value) => {
+    if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
+    ensureHostOps();
+    return hostOpsStore.setCodeEnabled(value);
+  });
+  ipcMain.handle('host-ops-admin-set-harness-enabled', (event, value) => {
+    if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
+    ensureHostOps();
+    return hostOpsStore.setHarnessEnabled(value);
   });
   ipcMain.handle('host-ops-admin-set-enabled', (event, value) => {
     if (!fromHostOpsSettings(event) || typeof value !== 'boolean') return false;
@@ -993,6 +1423,10 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    if (codeCore) {
+      codeCore.terminals.killAll();
+      codeCore.watchers.stopAll();
+    }
     if (browserTabManager) {
       browserTabManager.destroyAll();
     }

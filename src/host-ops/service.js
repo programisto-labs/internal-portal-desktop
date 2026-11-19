@@ -6,9 +6,15 @@ const { HostOpsError, isWithin } = require('./paths');
 const { OPERATIONS, buildPlan, planChanged, executePlan } = require('./executor');
 const { ID_RE } = require('./store');
 const { buildShellPlan, maskSecrets, runShell, shellGrantCovers } = require('./shell');
+const { CODE_OPERATIONS } = require('../code-workspace/agent-ops');
 
 const SHELL_OPERATION = 'shell.run';
-const ALL_OPERATIONS = [...OPERATIONS, SHELL_OPERATION];
+const ALL_OPERATIONS = [...OPERATIONS, SHELL_OPERATION, ...CODE_OPERATIONS];
+const MAX_CODE_FIELD = 4 * 1024 * 1024;
+
+function codeField(value, max = MAX_CODE_FIELD) {
+  return typeof value === 'string' && value.length <= max ? value : undefined;
+}
 
 const MAX_QUEUE = 10;
 const MAX_SEEN = 1000;
@@ -45,6 +51,8 @@ function createHostOpsService({
   execTimeoutMs = 60000,
   env = process.env,
   spawnImpl,
+  /** Lasco Code agent operations (code-workspace/agent-ops); absent: code operations unsupported. */
+  codeAgent = null,
 }) {
   const inflight = new Map(); // requestId -> AbortController
   const seen = new Set();
@@ -109,6 +117,7 @@ function createHostOpsService({
         let answer;
         try {
           answer = await confirm({
+            requestId: ctx.requestId,
             agentId: ctx.agentId,
             agentName: ctx.agentName,
             operation: plan.operation,
@@ -217,6 +226,7 @@ function createHostOpsService({
         let answer;
         try {
           answer = await confirm({
+            requestId: ctx.requestId,
             agentId: ctx.agentId,
             agentName: ctx.agentName,
             operation: SHELL_OPERATION,
@@ -309,14 +319,33 @@ function createHostOpsService({
     }
   }
 
+  async function runCodeRequest(ctx, controller) {
+    const { signal } = controller;
+    try {
+      if (signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      return await codeAgent.execute(ctx, controller, { store, journal, confirm, confirmTimeoutMs });
+    } catch (err) {
+      const { code, message } = mapError(err, signal);
+      return { requestId: ctx.requestId, operation: ctx.operation, ...failure(code, message), decision: 'none' };
+    }
+  }
+
+  function supportedOperations() {
+    const ops = [...OPERATIONS];
+    if (store.isShellEnabled()) ops.push(SHELL_OPERATION);
+    if (codeAgent && store.isCodeEnabled()) ops.push(...CODE_OPERATIONS);
+    return ops;
+  }
+
   return {
     getCapabilities() {
       return {
         available: true,
         enabled: store.isEnabled(),
         shellEnabled: store.isShellEnabled(),
+        codeEnabled: Boolean(codeAgent) && store.isCodeEnabled(),
         deviceId: store.getDeviceId(),
-        operations: store.isShellEnabled() ? [...ALL_OPERATIONS] : [...OPERATIONS],
+        operations: supportedOperations(),
         scope: 'host',
         // Lets the agent turn "~/Downloads/x.pdf" into an absolute path; never sent to the model unless asked.
         platform,
@@ -337,14 +366,24 @@ function createHostOpsService({
       if (![requestId, agentId, userId].every((v) => typeof v === 'string' && ID_RE.test(v))) {
         return failure('invalid_request', 'Identité de requête invalide.');
       }
-      if (!ALL_OPERATIONS.includes(operation)) return failure('unsupported_operation', 'Opération non supportée.', { requestId });
+      const isCode = CODE_OPERATIONS.includes(operation);
+      if (!ALL_OPERATIONS.includes(operation) || (isCode && !codeAgent)) {
+        return failure('unsupported_operation', 'Opération non supportée.', { requestId });
+      }
       if (!store.isEnabled()) {
         return failure('disabled', "Les opérations sur l'hôte ne sont pas activées dans les options de Lasco Desktop.", { requestId });
       }
       if (operation === SHELL_OPERATION && !store.isShellEnabled()) {
         return failure(
           'shell_disabled',
-          "Les commandes shell ne sont pas activées dans Lasco Desktop (Fichier > Opérations sur l'hôte).",
+          "Les commandes shell ne sont pas activées dans Lasco Desktop (Réglages > Cet ordinateur).",
+          { requestId }
+        );
+      }
+      if (isCode && !store.isCodeEnabled()) {
+        return failure(
+          'code_disabled',
+          "Les projets de code ne sont pas ouverts aux agents dans Lasco Desktop (Réglages > Cet ordinateur).",
           { requestId }
         );
       }
@@ -370,8 +409,23 @@ function createHostOpsService({
         rawDestination: typeof request.destination === 'string' ? request.destination : null,
         rawCommand: typeof request.command === 'string' ? request.command.slice(0, 300) : null,
         rawCwd: typeof request.cwd === 'string' ? request.cwd : null,
-        request:
-          operation === SHELL_OPERATION
+        request: isCode
+          ? {
+              projectId: codeField(request.projectId, 64),
+              path: codeField(request.path, 4096),
+              content: codeField(request.content),
+              oldString: codeField(request.oldString),
+              newString: codeField(request.newString),
+              replaceAll: request.replaceAll === true,
+              offset: request.offset,
+              limit: request.limit,
+              query: codeField(request.query, 1000),
+              regex: request.regex === true,
+              caseSensitive: request.caseSensitive === true,
+              pathspec: codeField(request.pathspec, 500),
+              staged: request.staged === true,
+            }
+          : operation === SHELL_OPERATION
             ? { command: request.command, cwd: request.cwd, timeoutMs: request.timeoutMs }
             : {
                 operation,
@@ -382,7 +436,9 @@ function createHostOpsService({
               },
       };
       pending += 1;
-      const job = queue.then(() => (operation === SHELL_OPERATION ? runShellRequest(ctx, controller) : run(ctx, controller)));
+      const job = queue.then(() =>
+        isCode ? runCodeRequest(ctx, controller) : operation === SHELL_OPERATION ? runShellRequest(ctx, controller) : run(ctx, controller)
+      );
       queue = job.catch(() => {});
       try {
         return await job;
