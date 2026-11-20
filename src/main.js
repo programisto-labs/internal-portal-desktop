@@ -1,4 +1,5 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, session, systemPreferences } = require('electron');
+const { installPortalMediaPermissions } = require('./media-permissions');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -1970,6 +1971,11 @@ if (!app.requestSingleInstanceLock()) {
     );
     if (coldDeepLink) handleLascoDeepLink(coldDeepLink);
 
+    // Micro de la voix des agents : portail seulement, audio seulement (voir media-permissions.js).
+    installPortalMediaPermissions(session.fromPartition('persist:portal'), {
+      isPortalUrl: isPortalNavigationUrl,
+      systemPreferences,
+    });
     registerWindowIPC();
     setupAutoUpdater();
     nativeTheme.on('updated', updateAllIcons);

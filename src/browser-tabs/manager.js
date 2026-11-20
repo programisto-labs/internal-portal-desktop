@@ -2,6 +2,7 @@
 
 const { app, WebContentsView, session, clipboard, ClipboardItem, shell, dialog, Menu } = require('electron');
 const { sanitizeBrowserUrl } = require('./url');
+const { installBrowserTabMediaPermissions } = require('../media-permissions');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
 const path = require('path');
@@ -162,6 +163,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     if (!sessionConfigured) {
       sessionConfigured = true;
       browserSession.setUserAgent(userAgent, buildAcceptLanguages(app.getPreferredSystemLanguages()));
+      // Pages web externes : jamais le micro ni la caméra de l'app.
+      installBrowserTabMediaPermissions(browserSession);
     }
     return browserSession;
   }
