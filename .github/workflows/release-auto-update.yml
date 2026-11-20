@@ -26,15 +26,48 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Auto-update (ShipIt) only installs an app signed by the same Developer ID as the installed one,
+      # and a first install from the DMG needs Apple notarization. Never publish a macOS build without both.
+      - name: Check signing and notarization secrets
+        env:
+          CSC_LINK: ${{ secrets.MAC_CERTS }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          [ -n "$CSC_LINK" ] || missing="$missing MAC_CERTS"
+          [ -n "$CSC_KEY_PASSWORD" ] || missing="$missing MAC_CERTS_PASSWORD"
+          [ -n "$APPLE_ID" ] || missing="$missing APPLE_ID"
+          [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] || missing="$missing APPLE_APP_SPECIFIC_PASSWORD"
+          [ -n "$APPLE_TEAM_ID" ] || missing="$missing APPLE_TEAM_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing. The macOS release would be unsigned or not notarized; aborting."
+            exit 1
+          fi
+
       - name: Build and publish macOS release
         env:
           # Prefer repo secret if set; otherwise use the Actions token (contents: write).
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          # Developer ID Application certificate (.p12, base64) imported by electron-builder into a temporary keychain.
+          CSC_LINK: ${{ secrets.MAC_CERTS }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_IDENTITY_AUTO_DISCOVERY: "true"
+        # publish:mac sets forceCodeSigning: the build fails instead of shipping an unsigned app.
         run: npm run publish:mac
+
+      - name: Verify the published app is signed and notarized
+        run: |
+          set -euo pipefail
+          app="dist/mac-arm64/Lasco.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | grep -q "TeamIdentifier=${{ secrets.APPLE_TEAM_ID }}"
+          spctl --assess --type execute --verbose=2 "$app"
+          xcrun stapler validate "$app"
 
   publish-windows:
     name: Publish Windows artifacts

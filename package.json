@@ -30,7 +30,7 @@
     "build:mac:internal": "bash scripts/build-and-package.sh",
     "build:win": "node scripts/pad-dock-icon.js && electron-builder --win",
     "build:linux": "node scripts/pad-dock-icon.js && electron-builder --linux",
-    "publish:mac": "node scripts/pad-dock-icon.js && electron-builder --mac --publish always",
+    "publish:mac": "node scripts/pad-dock-icon.js && electron-builder --mac --publish always -c.forceCodeSigning=true",
     "publish:win": "node scripts/pad-dock-icon.js && electron-builder --win --publish always",
     "publish:all": "node scripts/pad-dock-icon.js && electron-builder --mac --win --publish always"
   },
@@ -102,7 +102,8 @@
       {
         "provider": "github",
         "owner": "programisto-labs",
-        "repo": "internal-portal-desktop"
+        "repo": "internal-portal-desktop",
+        "releaseType": "release"
       }
     ],
     "asarUnpack": [
