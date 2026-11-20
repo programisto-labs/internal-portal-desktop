@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'none'">
+<title>Lasco</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: rgba(246, 246, 246, 0.96);
+    --fg: #111;
+    --muted: rgba(0, 0, 0, 0.55);
+    --edge: rgba(0, 0, 0, 0.1);
+    --row-hover: rgba(0, 0, 0, 0.05);
+    --section: rgba(0, 0, 0, 0.035);
+    --btn: rgba(0, 0, 0, 0.06);
+    --btn-hover: rgba(0, 0, 0, 0.11);
+    --primary: #111;
+    --primary-fg: #fff;
+    --accent: #ff6a13;
+    --badge: #e5484d;
+  }
+  :root[data-theme='dark'] {
+    --bg: rgba(32, 32, 32, 0.96);
+    --fg: #f2f2f2;
+    --muted: rgba(255, 255, 255, 0.58);
+    --edge: rgba(255, 255, 255, 0.1);
+    --row-hover: rgba(255, 255, 255, 0.06);
+    --section: rgba(255, 255, 255, 0.04);
+    --btn: rgba(255, 255, 255, 0.08);
+    --btn-hover: rgba(255, 255, 255, 0.14);
+    --primary: #f2f2f2;
+    --primary-fg: #111;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: transparent; }
+  body {
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    color: var(--fg);
+    -webkit-user-select: none;
+    user-select: none;
+    overflow: hidden;
+  }
+  .panel {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border: 1px solid var(--edge);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px 10px;
+  }
+  header h1 { margin: 0; font-size: 15px; font-weight: 650; flex: 1; }
+  header .summary { color: var(--muted); font-size: 12px; }
+  .ask {
+    margin: 0 12px 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: calc(100% - 24px);
+    padding: 8px 10px;
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    background: var(--btn);
+    color: var(--muted);
+    font: inherit;
+    text-align: left;
+    cursor: default;
+  }
+  .ask:hover { background: var(--btn-hover); color: var(--fg); }
+  .ask .kbd { margin-left: auto; font-size: 11px; opacity: 0.7; }
+  main { flex: 1; overflow-y: auto; border-top: 1px solid var(--edge); }
+  section h2 {
+    margin: 0;
+    padding: 7px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--section);
+    display: flex;
+    gap: 6px;
+  }
+  section h2 .count { font-variant-numeric: tabular-nums; }
+  section h2.attention { color: var(--accent); }
+  .row {
+    display: flex;
+    gap: 10px;
+    padding: 9px 14px;
+    align-items: flex-start;
+    border-bottom: 1px solid var(--edge);
+  }
+  .row.clickable:hover { background: var(--row-hover); }
+  .row:last-child { border-bottom: 0; }
+  .avatar {
+    flex: none;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 11px;
+    font-weight: 650;
+    color: #fff;
+    background: #6e6e73;
+  }
+  .content { flex: 1; min-width: 0; }
+  .title { display: flex; gap: 6px; align-items: baseline; }
+  .title strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .title .time { margin-left: auto; flex: none; color: var(--muted); font-size: 11px; }
+  .line { color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .badge {
+    flex: none;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--badge);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    display: grid;
+    place-items: center;
+    align-self: center;
+  }
+  .actions { display: flex; gap: 6px; margin-top: 7px; }
+  button.btn {
+    font: inherit;
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 6px;
+    border: 0;
+    background: var(--btn);
+    color: var(--fg);
+  }
+  button.btn:hover { background: var(--btn-hover); }
+  button.btn.primary { background: var(--primary); color: var(--primary-fg); }
+  button.btn:disabled { opacity: 0.45; }
+  .spinner {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    margin: 9px 9px 0;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+  .empty { padding: 26px 14px; text-align: center; color: var(--muted); }
+  footer {
+    border-top: 1px solid var(--edge);
+    padding: 4px 6px;
+    display: flex;
+    flex-direction: column;
+  }
+  footer button {
+    font: inherit;
+    text-align: left;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--fg);
+    display: flex;
+  }
+  footer button:hover { background: var(--row-hover); }
+  footer button .hint { margin-left: auto; color: var(--muted); }
+  footer hr { border: 0; border-top: 1px solid var(--edge); margin: 4px 2px; }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <header>
+      <h1>Lasco</h1>
+      <span class="summary" id="summary"></span>
+    </header>
+    <button class="ask" id="ask" type="button" hidden>Demander à Lasco…</button>
+    <main id="list"></main>
+    <footer id="footer"></footer>
+  </div>
+</body>
+</html>
