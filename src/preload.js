@@ -168,6 +168,41 @@ const codeWorkspaceBridge = {
   onFsChanged: (callback) => subscribe('code-fs-changed', callback),
 };
 
+/**
+ * Detached tab windows (docs/tab-windows.md). Desktop passes the window role and, for a new
+ * detached window, the tab it opens on. Decoded here without Node (sandboxed preload).
+ */
+const TAB_WINDOW_ARG_PREFIX = '--lasco-tab-window=';
+function readTabWindowArg() {
+  const arg = process.argv.find((a) => typeof a === 'string' && a.startsWith(TAB_WINDOW_ARG_PREFIX));
+  if (!arg) return { role: 'main', initialTab: null };
+  try {
+    const binary = atob(arg.slice(TAB_WINDOW_ARG_PREFIX.length));
+    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    return {
+      role: parsed && parsed.role === 'detached' ? 'detached' : 'main',
+      initialTab: parsed && parsed.initialTab && typeof parsed.initialTab === 'object' ? parsed.initialTab : null,
+    };
+  } catch (_) {
+    return { role: 'main', initialTab: null };
+  }
+}
+const tabWindowInfo = readTabWindowArg();
+const tabWindowsBridge = {
+  role: tabWindowInfo.role,
+  initialTab: tabWindowInfo.initialTab,
+  ready: () => ipcRenderer.invoke('tab-window-ready'),
+  onAdopt: (callback) => subscribe('tab-window-adopt', callback),
+  detach: (payload) => ipcRenderer.invoke('tab-window-detach', payload),
+  attach: (payload) => ipcRenderer.invoke('tab-window-attach', payload),
+  dragOut: (payload) => ipcRenderer.invoke('tab-window-drag-out', payload),
+  dragCancel: () => ipcRenderer.invoke('tab-window-drag-cancel'),
+  dragEnd: (payload) => ipcRenderer.invoke('tab-window-drag-end', payload),
+  onDragHover: (callback) => subscribe('tab-window-drag-hover', callback),
+  closeWindow: () => ipcRenderer.invoke('tab-window-close'),
+};
+
 const desktopBridge = {
   platform: process.platform,
   version: appVersion,
@@ -192,6 +227,7 @@ const desktopBridge = {
     onOpenTarget: onOpenPortalTab
   },
   browserTabs: browserTabsBridge,
+  tabWindows: tabWindowsBridge,
   /**
    * « Fenêtre » menu of the menu bar: same options as the burger menu of the internal browser.
    * The page reports its state (labels, checkmarks) and runs the commands Desktop relays.
@@ -199,6 +235,14 @@ const desktopBridge = {
   appMenu: {
     setState: (state) => ipcRenderer.send('app-menu-set-state', state),
     onCommand: (callback) => subscribe('app-menu-command', callback),
+  },
+  /**
+   * Icône Lasco de la barre des menus (macOS) : la page envoie son résumé (à valider, en cours,
+   * non lus ; `null` = déconnecté) et exécute les commandes choisies dans le popover. Voir docs/tray.md.
+   */
+  tray: {
+    setState: (state) => ipcRenderer.send('tray-set-state', state),
+    onCommand: (callback) => subscribe('tray-command', callback),
   },
   ...(noAgents && { noAgents: true }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),

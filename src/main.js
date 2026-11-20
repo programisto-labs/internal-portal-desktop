@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray } = require('electron');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -6,7 +6,17 @@ const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager } = require('./browser-tabs/manager');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
-const { buildTabMenuTemplate } = require('./browser-tabs/tab-menu');
+const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
+const { createHistoryStore } = require('./browser-tabs/history');
+const {
+  sanitizeTabDescriptor,
+  encodeTabWindowArg,
+  findWindowAtPoint,
+  buildDetachedWindowBounds,
+  createAdoptQueue,
+  resolveTabDropTarget,
+  followPosition,
+} = require('./tab-windows');
 const { APP_MENU_COMMANDS, normalizeAppMenuState, buildApplicationMenuTemplate } = require('./app-menu');
 const {
   applyBadgeCount,
@@ -34,6 +44,8 @@ const { createTerminalManager } = require('./code-workspace/terminals');
 const { createWatcherManager } = require('./code-workspace/watcher');
 const { createCodeWorkspaceService } = require('./code-workspace/service');
 const { createCodeAgentOps } = require('./code-workspace/agent-ops');
+const { createTrayController } = require('./tray/tray');
+const { normalizePortalTrayState, TRAY_PORTAL_COMMANDS } = require('./tray/tray-state');
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
@@ -57,7 +69,8 @@ let appMenuState = null;
 /** Relays a « Fenêtre » menu command to the portal page of the main window. */
 function sendAppMenuCommand(command) {
   if (!APP_MENU_COMMANDS.includes(command)) return;
-  const win = mainWindowRef;
+  const focused = BrowserWindow.getFocusedWindow();
+  const win = focused && portalWindows.has(focused.id) ? focused : mainWindowRef;
   if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
   win.webContents.send('app-menu-command', { command });
@@ -113,8 +126,21 @@ let updateCheckIntervalId = null;
 const LASCO_PROTOCOL = 'lasco';
 let pendingInitialPortalFullUrl = null;
 let mainWindowRef = null;
-/** @type {ReturnType<typeof createBrowserTabManager> | null} */
-let browserTabManager = null;
+/**
+ * Every window that shows the portal: the main one and detached tab windows (docs/tab-windows.md).
+ * Each has its own native browser views (`tabManager`, created on first use).
+ * @type {Map<number, { win: BrowserWindow, role: 'main' | 'detached', tabManager: ReturnType<typeof createBrowserTabManager> | null }>}
+ */
+const portalWindows = new Map();
+/** One history file for every window. */
+let browserHistoryStore = null;
+/** Tabs moved into a window before its page is ready to adopt them. */
+const tabAdoptQueue = createAdoptQueue({
+  send: (windowId, tab) => {
+    const entry = portalWindows.get(windowId);
+    if (entry && !entry.win.isDestroyed()) entry.win.webContents.send('tab-window-adopt', tab);
+  },
+});
 /** @type {ReturnType<typeof createSettingsStore> | null} */
 let settingsStore = null;
 
@@ -136,6 +162,7 @@ let harnessPermissions = null;
 
 /** Événements d'une exécution de harnais vers le portail (cadre principal, origine du portail seulement). */
 function sendHarnessEvent(event) {
+  scheduleTrayRefresh();
   const win = mainPortalWindow();
   if (!win || win.webContents.isDestroyed()) return;
   try {
@@ -327,6 +354,7 @@ function ensureInlineConfirm(fallback) {
       fallback,
       createCard: createConfirmCardView,
       notifyPortal: (event) => {
+        scheduleTrayRefresh();
         const win = mainPortalWindow();
         if (!win || win.webContents.isDestroyed()) return false;
         let origin = null;
@@ -579,11 +607,11 @@ function routePortalLinkInApp(urlString) {
   return true;
 }
 
-function openExternalAsBrowserTab(urlString) {
+function openExternalAsBrowserTab(urlString, targetWindow) {
   const safe = sanitizeBrowserUrl(urlString);
   if (!safe) return false;
-  const win = mainWindowRef;
-  if (!win || win.isDestroyed() || !browserTabManager) return false;
+  const win = targetWindow && portalWindows.has(targetWindow.id) ? targetWindow : mainWindowRef;
+  if (!win || win.isDestroyed()) return false;
   win.webContents.send('browser-tab-open-request', buildBrowserOpenRequest(safe));
   return true;
 }
@@ -834,14 +862,65 @@ function buildLascoDesktopUserAgent(baseUserAgent) {
   );
 }
 
-function ensureBrowserTabManager() {
-  if (!browserTabManager) {
-    browserTabManager = createBrowserTabManager({
-      getMainWindow: () => mainWindowRef,
+function getBrowserHistoryStore() {
+  if (!browserHistoryStore) {
+    browserHistoryStore = createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
+  }
+  return browserHistoryStore;
+}
+
+function portalWindowEntry(win) {
+  if (!win || win.isDestroyed()) return null;
+  return portalWindows.get(win.id) || null;
+}
+
+/** Native browser views of a portal window (null for any other window, e.g. Réglages). */
+function tabManagerFor(win) {
+  const entry = portalWindowEntry(win);
+  if (!entry) return null;
+  if (!entry.tabManager) {
+    entry.tabManager = createBrowserTabManager({
+      getMainWindow: () => (win.isDestroyed() ? null : win),
+      history: getBrowserHistoryStore(),
       interceptLink: routePortalLinkInApp,
     });
   }
-  return browserTabManager;
+  return entry.tabManager;
+}
+
+function destroyAllBrowserViews() {
+  for (const entry of portalWindows.values()) {
+    if (entry.tabManager) entry.tabManager.destroyAll();
+  }
+}
+
+/** Portal windows, focused first (used to find the window under a dropped tab). */
+function portalWindowsFrontToBack() {
+  const focused = BrowserWindow.getFocusedWindow();
+  const list = [...portalWindows.values()].filter((e) => !e.win.isDestroyed());
+  list.sort((a, b) => (a.win === focused ? -1 : b.win === focused ? 1 : 0));
+  return list;
+}
+
+/** Detached tab window, opened on `tab` (docs/tab-windows.md). */
+function openDetachedTabWindow(tab, { point, sourceWindow } = {}) {
+  const at = point || screen.getCursorScreenPoint();
+  const workArea = screen.getDisplayNearestPoint(at).workArea;
+  let size = null;
+  if (sourceWindow && !sourceWindow.isDestroyed()) {
+    const [width, height] = sourceWindow.getSize();
+    size = { width, height };
+  }
+  const bounds = buildDetachedWindowBounds({ point, size, workArea });
+  return createWindow({ role: 'detached', initialTab: tab, bounds });
+}
+
+/** Hand a tab to a portal window: it adopts it as soon as its page is ready. */
+function deliverTabToWindow(win, tab) {
+  tabAdoptQueue.deliver(win.id, tab);
+  if (win.isMinimized()) win.restore();
+  win.focus();
+  if (process.platform === 'darwin') win.moveTop();
 }
 
 function loadMainPortalUrl(win, urlString) {
@@ -865,7 +944,7 @@ function handleLascoDeepLink(urlString) {
   }
   const full = PORTAL_URL.replace(/\/$/, '') + target;
   const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
-  const win = wins[0];
+  const win = mainPortalWindow() || wins[0];
   if (win) {
     win.webContents.send('open-portal-tab', target);
     win.focus();
@@ -897,7 +976,11 @@ function registerLascoProtocolClient() {
   }
 }
 
-function createWindow() {
+/**
+ * A portal window. `main` is the usual Lasco window; `detached` holds tabs moved out of
+ * another window and opens on `initialTab` (docs/tab-windows.md).
+ */
+function createWindow({ role = 'main', initialTab = null, bounds = null, inactive = false } = {}) {
   let iconPath;
   try {
     iconPath = getIconPath();
@@ -913,12 +996,14 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
+    ...(bounds || {}),
     /* Compact floor ~ Spotify desktop; sidebar auto-collapses in the web shell below ~1100px. */
     minWidth: 800,
     minHeight: 500,
     title: 'Lasco',
     frame: false,
-    show: true,
+    // A window that follows a dragged tab appears without taking focus (the drag stays in its source).
+    show: !inactive,
     backgroundColor: usesSystemMaterial ? '#00000000' : '#222222',
     /* Native close / minimize / zoom — visible even if the web preload bridge is late or missing */
     ...(isMac && {
@@ -941,6 +1026,7 @@ function createWindow() {
       additionalArguments: [
         `${APP_VERSION_ARG_PREFIX}${app.getVersion()}`,
         `${PORTAL_ORIGIN_ARG_PREFIX}${PORTAL_ORIGIN}`,
+        encodeTabWindowArg({ role, initialTab }),
         ...(NO_AGENTS ? [NO_AGENTS_ARG] : []),
       ]
     },
@@ -951,8 +1037,9 @@ function createWindow() {
     setIconSafe(app.dock, iconPath);
   }
 
+  if (inactive) win.showInactive();
   win.once('ready-to-show', () => {
-    if (win.isDestroyed()) return;
+    if (win.isDestroyed() || inactive) return;
     win.focus();
     if (process.platform === 'darwin') {
       win.moveTop();
@@ -986,10 +1073,18 @@ function createWindow() {
     }, AUTO_RETRY_INTERVAL_MS);
   }
 
-  mainWindowRef = win;
+  const winId = win.id;
+  portalWindows.set(winId, { win, role, tabManager: null });
+  if (role === 'main') mainWindowRef = win;
+  // A full page load (login, reload): moved tabs wait until the new page asks for them.
+  win.webContents.on('did-navigate', () => tabAdoptQueue.reset(winId));
   // « Fenêtre » menu: a full page load (login, reload) drops the state until the portal reports it again.
   win.webContents.on('did-navigate', () => {
-    if (appMenuState === null) return;
+    if (win === mainWindowRef && trayPortalState !== null) {
+      trayPortalState = null;
+      scheduleTrayRefresh();
+    }
+    if (win !== mainWindowRef || appMenuState === null) return;
     appMenuState = null;
     installApplicationMenu();
   });
@@ -1012,11 +1107,15 @@ function createWindow() {
   win.on('closed', () => {
     releaseCodeWorkspace();
     stopAutoRetry();
-    if (browserTabManager) {
-      browserTabManager.destroyAll();
-    }
+    const entry = portalWindows.get(winId);
+    if (entry && entry.tabManager) entry.tabManager.destroyAll();
+    portalWindows.delete(winId);
+    tabAdoptQueue.forget(winId);
     if (mainWindowRef === win) {
-      mainWindowRef = null;
+      // The oldest detached window becomes the main one (bridges, badge, links).
+      const next = [...portalWindows.values()].find((e) => !e.win.isDestroyed());
+      if (next) next.role = 'main';
+      mainWindowRef = next ? next.win : null;
     }
   });
 
@@ -1057,15 +1156,19 @@ function createWindow() {
     // login opens in Chrome, callback never returns here, and /exchange hangs/401s).
     if (!shouldNavigateInApp(url)) {
       event.preventDefault();
-      if (!openExternalAsBrowserTab(url)) {
+      if (!openExternalAsBrowserTab(url, win)) {
         openUrlInDefaultBrowser(url);
       }
     }
   });
 
-  const initialUrl = pendingInitialPortalFullUrl || PORTAL_URL;
-  pendingInitialPortalFullUrl = null;
-  loadMainPortalUrl(win, initialUrl);
+  if (role === 'detached' && initialTab) {
+    loadMainPortalUrl(win, PORTAL_ORIGIN + initialTab.locationHref);
+  } else {
+    const initialUrl = pendingInitialPortalFullUrl || PORTAL_URL;
+    pendingInitialPortalFullUrl = null;
+    loadMainPortalUrl(win, initialUrl);
+  }
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isPortalNavigationUrl(url)) {
@@ -1087,11 +1190,12 @@ function createWindow() {
       }
       return { action: 'deny' };
     }
-    if (!openExternalAsBrowserTab(url)) {
+    if (!openExternalAsBrowserTab(url, win)) {
       openUrlInDefaultBrowser(url);
     }
     return { action: 'deny' };
   });
+  return win;
 }
 
 function updateAllIcons() {
@@ -1106,8 +1210,80 @@ function updateAllIcons() {
   } catch (_) { }
 }
 
+/**
+ * Icône Lasco de la barre des menus (macOS) : à valider, en cours, non lus (docs/tray.md).
+ * Le portail envoie son résumé (`tray-set-state`), Desktop y ajoute ses confirmations et harnais.
+ */
+let trayController = null;
+/** Résumé du portail de la fenêtre principale ; `null` tant qu'il ne l'a pas envoyé (connexion, rechargement). */
+let trayPortalState = null;
+let trayRefreshTimer = null;
+
+function scheduleTrayRefresh() {
+  if (!trayController || trayRefreshTimer) return;
+  trayRefreshTimer = setTimeout(() => {
+    trayRefreshTimer = null;
+    if (trayController) trayController.refresh();
+  }, 50);
+}
+
+function traySources() {
+  return {
+    portal: trayPortalState,
+    hostConfirms: hostOpsInlineConfirm ? hostOpsInlineConfirm.list() : [],
+    harnessRuns: harnessRunner ? harnessRunner.list() : [],
+    hostOpsEnabled: Boolean(hostOpsStore && hostOpsStore.isEnabled()),
+    noAgents: NO_AGENTS,
+  };
+}
+
+function showMainWindow() {
+  let win = mainPortalWindow();
+  if (!win) {
+    createWindow();
+    win = mainPortalWindow();
+  }
+  if (!win) return null;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  return win;
+}
+
+function setupTray() {
+  if (process.platform !== 'darwin' || trayController) return;
+  trayController = createTrayController({
+    Tray,
+    BrowserWindow,
+    nativeImage,
+    nativeTheme,
+    screen,
+    iconDir: path.join(__dirname, '..', 'build', 'tray'),
+    getSources: traySources,
+    onPortalCommand: (command, payload, { focus }) => {
+      if (!TRAY_PORTAL_COMMANDS.includes(command)) return;
+      const win = focus ? showMainWindow() : mainPortalWindow();
+      if (!win || win.webContents.isDestroyed()) return;
+      win.webContents.send('tray-command', { command, ...payload });
+    },
+    onNativeAction: (action) => {
+      if (action === 'show-main') showMainWindow();
+      else if (action === 'settings') {
+        showMainWindow();
+        openSettings('general');
+      } else if (action === 'quit') app.quit();
+      else if (action === 'pause-host-ops' && hostOpsStore) {
+        hostOpsStore.setEnabled(false);
+        refreshSettings();
+        scheduleTrayRefresh();
+      }
+    },
+  });
+  trayController.refresh();
+}
+
 function registerWindowIPC() {
-  ensureBrowserTabManager();
 
   ipcMain.handle('window-close', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -1278,19 +1454,230 @@ function registerWindowIPC() {
     if (!trustedHostOpsSender(event) || typeof harnessId !== 'string') return unavailable;
     return openHarnessLogin(harnessId);
   });
-  // --- Lasco Code workspace: same trusted sender as host operations (portal main frame) ---
+  // --- Lasco Code workspace: portal main frame of any portal window (a Code tab can be detached) ---
+  const trustedCodeSender = (event) => {
+    if (NO_AGENTS) return false;
+    const frame = event.senderFrame;
+    return isTrustedHostOpsSender({
+      isMainWindow: Boolean(portalWindowEntry(BrowserWindow.fromWebContents(event.sender))),
+      isMainFrame: Boolean(frame && frame === event.sender.mainFrame),
+      frameUrl: frame ? frame.url : null,
+      allowedOrigins: [PORTAL_ORIGIN],
+    });
+  };
   ipcMain.handle('code-workspace-invoke', (event, message) => {
-    if (!trustedHostOpsSender(event)) return forbidden;
+    if (!trustedCodeSender(event)) return forbidden;
     const m = message && typeof message === 'object' ? message : {};
     return ensureCodeWorkspace().invoke(m.method, m.payload, { webContents: event.sender });
   });
   ipcMain.on('code-terminal-input', (event, message) => {
-    if (!trustedHostOpsSender(event) || !codeCore || !message || typeof message !== 'object') return;
+    if (!trustedCodeSender(event) || !codeCore || !message || typeof message !== 'object') return;
     codeCore.terminals.write(event.sender, message.id, message.data);
   });
   ipcMain.on('code-terminal-resize', (event, message) => {
-    if (!trustedHostOpsSender(event) || !codeCore || !message || typeof message !== 'object') return;
+    if (!trustedCodeSender(event) || !codeCore || !message || typeof message !== 'object') return;
     codeCore.terminals.resize(event.sender, message.id, message.cols, message.rows);
+  });
+
+  // --- Detached tab windows (docs/tab-windows.md): portal main frame of a portal window ---
+  const tabWindowSender = (event) => {
+    const entry = portalWindowEntry(BrowserWindow.fromWebContents(event.sender));
+    const frame = event.senderFrame;
+    if (!entry || !frame || frame !== event.sender.mainFrame) return null;
+    try {
+      if (new URL(frame.url).origin !== PORTAL_ORIGIN) return null;
+    } catch (_) {
+      return null;
+    }
+    return entry;
+  };
+  const readTab = (payload) =>
+    sanitizeTabDescriptor(payload && typeof payload === 'object' ? payload.tab : null, { sanitizeBrowserUrl });
+  const readPoint = (payload) => {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    return Number.isFinite(p.screenX) && Number.isFinite(p.screenY)
+      ? { x: Math.round(p.screenX), y: Math.round(p.screenY) }
+      : null;
+  };
+  // The page subscribed to `tab-window-adopt`: hand it the tabs that arrived while it loaded.
+  ipcMain.handle('tab-window-ready', (event) => {
+    const entry = tabWindowSender(event);
+    if (!entry) return { ok: false, tabs: [] };
+    return { ok: true, role: entry.role, tabs: tabAdoptQueue.ready(entry.win.id) };
+  });
+  ipcMain.handle('tab-window-detach', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry) return { ok: false, error: 'forbidden' };
+    const tab = readTab(payload);
+    if (!tab) return { ok: false, error: 'invalid-tab' };
+    openDetachedTabWindow(tab, { point: readPoint(payload), sourceWindow: entry.win });
+    return { ok: true, action: 'detached' };
+  });
+  ipcMain.handle('tab-window-attach', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry) return { ok: false, error: 'forbidden' };
+    if (entry.role === 'main') return { ok: false, error: 'already-main' };
+    const tab = readTab(payload);
+    if (!tab) return { ok: false, error: 'invalid-tab' };
+    const target = mainPortalWindow();
+    if (!target) return { ok: false, error: 'no-main-window' };
+    deliverTabToWindow(target, tab);
+    return { ok: true, action: 'attached' };
+  });
+  // Tab dragged out of its window (like Chrome): the window appears as soon as the tab leaves the
+  // strip and follows the cursor; the page reports the release (`tab-window-drag-end`).
+  // Only tab of a window: the window itself follows the cursor.
+  const DRAG_FOLLOW_MS = 16;
+  const DRAG_MAX_MS = 60_000;
+  /** Tab offset in a new detached window (sidebar and Lasco AI hidden: first tab near the left). */
+  const DETACHED_TAB_GRAB = { x: 150, y: 22 };
+  let tabDrag = null;
+  const portalWindowList = () =>
+    portalWindowsFrontToBack().map((e) => ({
+      id: e.win.id,
+      win: e.win,
+      bounds: e.win.getBounds(),
+      minimized: e.win.isMinimized(),
+      visible: e.win.isVisible(),
+    }));
+  const sendDragHover = (windowId, payload) => {
+    const target = portalWindows.get(windowId);
+    if (target && !target.win.isDestroyed()) target.win.webContents.send('tab-window-drag-hover', payload);
+  };
+  /** The window that moves with the cursor: the new window, or the source when it holds the only tab. */
+  const movingWindow = (drag) => (drag.mode === 'move' ? portalWindows.get(drag.sourceId)?.win : drag.floating);
+  // Hovering another Lasco window: it shows the tab in its strip (live preview) and the moving
+  // window fades out, like Chrome snapping a tab into another strip.
+  const updateDragHover = (drag, cursor) => {
+    const target = resolveTabDropTarget({
+      windows: portalWindowList(),
+      point: cursor,
+      sourceId: drag.sourceId,
+      floatingId: drag.floating ? drag.floating.id : null,
+    });
+    const hoverId = target.kind === 'window' ? target.id : null;
+    if (hoverId !== drag.hoverId) {
+      if (drag.hoverId) sendDragHover(drag.hoverId, null);
+      drag.hoverId = hoverId;
+      const moving = movingWindow(drag);
+      if (moving && !moving.isDestroyed()) moving.setOpacity(hoverId ? 0 : 1);
+    }
+    if (hoverId) {
+      sendDragHover(hoverId, {
+        tab: { id: drag.tab.id, kind: drag.tab.kind, title: drag.tab.title, favicon: drag.tab.favicon },
+        screenX: cursor.x,
+        screenY: cursor.y,
+      });
+    }
+  };
+  const stopTabDragFollow = () => {
+    if (!tabDrag) return;
+    clearInterval(tabDrag.timer);
+    clearTimeout(tabDrag.expiry);
+    if (tabDrag.hoverId) sendDragHover(tabDrag.hoverId, null);
+    tabDrag.hoverId = null;
+    const moving = movingWindow(tabDrag);
+    if (moving && !moving.isDestroyed()) moving.setOpacity(1);
+  };
+  const endTabDrag = ({ keepFloating }) => {
+    if (!tabDrag) return null;
+    const drag = tabDrag;
+    stopTabDragFollow();
+    tabDrag = null;
+    if (!keepFloating && drag.floating && !drag.floating.isDestroyed()) drag.floating.close();
+    return drag;
+  };
+  const startFollowing = (win, offset) => {
+    let last = null;
+    const timer = setInterval(() => {
+      if (win.isDestroyed()) return endTabDrag({ keepFloating: false });
+      const cursor = screen.getCursorScreenPoint();
+      if (last && last.x === cursor.x && last.y === cursor.y) return;
+      last = cursor;
+      const { x, y } = followPosition(cursor, offset);
+      win.setPosition(x, y);
+      if (tabDrag) updateDragHover(tabDrag, cursor);
+    }, DRAG_FOLLOW_MS);
+    // Safety net: a release the page never reported.
+    const expiry = setTimeout(() => endTabDrag({ keepFloating: true }), DRAG_MAX_MS);
+    return { timer, expiry };
+  };
+  ipcMain.handle('tab-window-drag-out', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry) return { ok: false, error: 'forbidden' };
+    const tab = readTab(payload);
+    const point = readPoint(payload) || screen.getCursorScreenPoint();
+    if (!tab) return { ok: false, error: 'invalid-tab' };
+    endTabDrag({ keepFloating: false });
+    const grab = payload.grabOffset && typeof payload.grabOffset === 'object' ? payload.grabOffset : {};
+    if (payload.onlyTab === true) {
+      const offset = {
+        x: Number.isFinite(grab.x) ? Math.max(0, grab.x) : 200,
+        y: Number.isFinite(grab.y) ? Math.max(0, grab.y) : 20,
+      };
+      tabDrag = { sourceId: entry.win.id, tab, floating: null, mode: 'move', ...startFollowing(entry.win, offset) };
+      return { ok: true, mode: 'move' };
+    }
+    const [width, height] = entry.win.getSize();
+    const pos = followPosition(point, DETACHED_TAB_GRAB);
+    const floating = createWindow({
+      role: 'detached',
+      initialTab: tab,
+      bounds: { width, height, x: pos.x, y: pos.y },
+      inactive: true,
+    });
+    tabDrag = { sourceId: entry.win.id, tab, floating, mode: 'window', ...startFollowing(floating, DETACHED_TAB_GRAB) };
+    return { ok: true, mode: 'window' };
+  });
+  // Back over the tab strip before release: no new window after all.
+  ipcMain.handle('tab-window-drag-cancel', (event) => {
+    const entry = tabWindowSender(event);
+    if (!entry || !tabDrag || tabDrag.sourceId !== entry.win.id) return { ok: false };
+    endTabDrag({ keepFloating: tabDrag.mode === 'move' });
+    return { ok: true };
+  });
+  ipcMain.handle('tab-window-drag-end', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || !tabDrag || tabDrag.sourceId !== entry.win.id) return { ok: false, error: 'no-drag' };
+    const point = readPoint(payload) || screen.getCursorScreenPoint();
+    const drag = tabDrag;
+    stopTabDragFollow();
+    const windows = portalWindowList();
+    const target = resolveTabDropTarget({
+      windows,
+      point,
+      sourceId: drag.sourceId,
+      floatingId: drag.floating ? drag.floating.id : null,
+    });
+    if (target.kind === 'window') {
+      endTabDrag({ keepFloating: false });
+      // Dropped where the preview stood: the page inserts the tab at that point of its strip.
+      deliverTabToWindow(windows.find((w) => w.id === target.id).win, { ...drag.tab, dropScreenX: point.x });
+      return { ok: true, action: 'attached' };
+    }
+    if (drag.mode === 'move') {
+      endTabDrag({ keepFloating: true });
+      return { ok: true, action: 'moved' };
+    }
+    if (target.kind === 'source') {
+      endTabDrag({ keepFloating: false });
+      return { ok: true, action: 'cancelled' };
+    }
+    const kept = endTabDrag({ keepFloating: true });
+    if (kept.floating && !kept.floating.isDestroyed()) {
+      kept.floating.focus();
+      if (process.platform === 'darwin') kept.floating.moveTop();
+    }
+    return { ok: true, action: 'detached' };
+  });
+  // A detached window whose last tab left (closed, attached or dragged away).
+  ipcMain.handle('tab-window-close', (event) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.role !== 'detached') return { ok: false, error: 'forbidden' };
+    setImmediate(() => {
+      if (!entry.win.isDestroyed()) entry.win.close();
+    });
+    return { ok: true };
   });
 
   // --- Réglages (Desktop modal only, never reachable from web pages) ---
@@ -1379,6 +1766,24 @@ function registerWindowIPC() {
     return hostOpsStore.revokeGrant(id);
   });
 
+  // Icône de la barre des menus : résumé du portail (cadre principal de la fenêtre principale, origine du portail).
+  ipcMain.on('tray-set-state', (event, state) => {
+    const frame = event.senderFrame;
+    if (!assertFromMainWindow(event) || !frame || frame !== event.sender.mainFrame) return;
+    let origin = null;
+    try {
+      origin = new URL(frame.url).origin;
+    } catch {
+      return;
+    }
+    if (origin !== PORTAL_ORIGIN) return;
+    trayPortalState = normalizePortalTrayState(state);
+    scheduleTrayRefresh();
+  });
+  ipcMain.on('tray-popover-ready', (event) => trayController && trayController.handleReady(event));
+  ipcMain.on('tray-popover-size', (event, height) => trayController && trayController.handleSize(event, height));
+  ipcMain.on('tray-popover-action', (event, action) => trayController && trayController.handleAction(event, action));
+
   ipcMain.handle('lasco-set-badge-count', (event, count) => {
     if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
     return applyBadgeCount({
@@ -1423,58 +1828,74 @@ function registerWindowIPC() {
   });
 
   ipcMain.handle('browser-tab-create', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().create(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.create(payload || {});
   });
   ipcMain.handle('browser-tab-navigate', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().navigate(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.navigate(payload || {});
   });
   ipcMain.handle('browser-tab-select', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().select(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.select(payload || {});
   });
   ipcMain.handle('browser-tab-hide', (event) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().hide();
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.hide();
   });
   ipcMain.handle('browser-tab-close', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().close(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.close(payload || {});
   });
   ipcMain.handle('browser-tab-go-back', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().goBack(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.goBack(payload || {});
   });
   ipcMain.handle('browser-tab-go-forward', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().goForward(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.goForward(payload || {});
   });
   ipcMain.handle('browser-tab-reload', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().reload(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.reload(payload || {});
   });
   ipcMain.handle('browser-tab-stop', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().stop(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.stop(payload || {});
   });
   ipcMain.handle('browser-tab-set-bounds', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    return ensureBrowserTabManager().setBounds(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    return manager.setBounds(payload || {});
   });
   ipcMain.handle('browser-tab-get-state', (event, payload) => {
-    if (!assertFromMainWindow(event)) return null;
-    return ensureBrowserTabManager().getState(payload || {});
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return null;
+    return manager.getState(payload || {});
   });
 
   ipcMain.handle('browser-tab-show-context-menu', (event, payload) => {
-    if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-    const win = getTargetMainWindow();
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const entry = portalWindowEntry(win);
+    if (!entry) return { ok: false, error: 'forbidden' };
     const p = payload && typeof payload === 'object' ? payload : {};
-    if (!win) return { ok: false, error: 'no-window' };
     const template = buildTabMenuTemplate({
       tabId: p.tabId,
-      actions: p.actions,
+      actions: resolveWindowMenuActions({
+        actions: p.actions,
+        windowActions: p.windowActions === true,
+        role: entry.role,
+        tabCount: p.tabCount,
+      }),
       labels: p.labels,
       tabCount: p.tabCount,
       tabIndex: p.tabIndex,
@@ -1513,8 +1934,9 @@ function registerWindowIPC() {
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {
-      if (!assertFromMainWindow(event)) return { ok: false, error: 'forbidden' };
-      return ensureBrowserTabManager()[method](payload || {});
+      const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+      if (!manager) return { ok: false, error: 'forbidden' };
+      return manager[method](payload || {});
     });
   }
 }
@@ -1525,7 +1947,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', (_event, argv) => {
     const url = argv.find((s) => typeof s === 'string' && s.startsWith(`${LASCO_PROTOCOL}:`));
     if (url) handleLascoDeepLink(url);
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = mainPortalWindow() || BrowserWindow.getAllWindows()[0];
     if (win && !win.isDestroyed()) {
       if (win.isMinimized()) win.restore();
       win.focus();
@@ -1552,6 +1974,7 @@ if (!app.requestSingleInstanceLock()) {
     setupAutoUpdater();
     nativeTheme.on('updated', updateAllIcons);
     createWindow();
+    setupTray();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -1567,14 +1990,16 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    if (trayController) {
+      trayController.destroy();
+      trayController = null;
+    }
     if (harnessPermissions) harnessPermissions.close();
     if (codeCore) {
       codeCore.terminals.killAll();
       codeCore.watchers.stopAll();
     }
-    if (browserTabManager) {
-      browserTabManager.destroyAll();
-    }
+    destroyAllBrowserViews();
     if (updateCheckIntervalId) {
       clearInterval(updateCheckIntervalId);
       updateCheckIntervalId = null;

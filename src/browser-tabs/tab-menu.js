@@ -14,7 +14,10 @@ const TAB_MENU_ACTIONS = Object.freeze([
   'close-right',
 ]);
 
-const TAB_MENU_ACTION_SET = new Set(TAB_MENU_ACTIONS);
+/** Window actions, shown only when the page handles them (`windowActions: true`). */
+const TAB_WINDOW_ACTIONS = Object.freeze(['detach', 'attach']);
+
+const TAB_MENU_ACTION_SET = new Set([...TAB_MENU_ACTIONS, ...TAB_WINDOW_ACTIONS]);
 
 const DEFAULT_LABELS = Object.freeze({
   reload: 'Actualiser',
@@ -22,7 +25,33 @@ const DEFAULT_LABELS = Object.freeze({
   close: "Fermer l'onglet",
   'close-others': 'Fermer les autres onglets',
   'close-right': 'Fermer les onglets à droite',
+  detach: 'Détacher dans une nouvelle fenêtre',
+  attach: 'Rattacher à la fenêtre principale',
 });
+
+/**
+ * Menu actions for a window. `windowActions` is true only when the page handles
+ * detach / attach (older portal builds never receive them).
+ * - Main window: « Détacher » (needs another tab to keep the window open).
+ * - Detached window: « Rattacher », and « Détacher » when it holds several tabs.
+ */
+function resolveWindowMenuActions({ actions, windowActions, role, tabCount }) {
+  const base = normalizeMenuActions(actions).filter((a) => !TAB_WINDOW_ACTIONS.includes(a));
+  if (!windowActions) return base;
+  const count = Number.isFinite(tabCount) ? tabCount : 1;
+  const extra = [];
+  if (role === 'detached') {
+    extra.push('attach');
+    if (count > 1) extra.push('detach');
+  } else if (count > 1) {
+    extra.push('detach');
+  }
+  if (!extra.length) return base;
+  // Window actions sit right before the « Fermer… » group.
+  const closeIndex = base.indexOf('close');
+  const at = closeIndex < 0 ? base.length : closeIndex;
+  return [...base.slice(0, at), ...extra, ...base.slice(at)];
+}
 
 function isValidTabId(tabId) {
   return typeof tabId === 'string' && tabId.length > 0 && tabId.length <= 200;
@@ -31,6 +60,7 @@ function isValidTabId(tabId) {
 /** Keep only known actions, drop duplicates, preserve order. */
 function normalizeMenuActions(actions) {
   const source = Array.isArray(actions) && actions.length ? actions : TAB_MENU_ACTIONS;
+  // Window actions are only added by resolveWindowMenuActions.
   const seen = new Set();
   const out = [];
   for (const action of source) {
@@ -49,6 +79,13 @@ function resolveLabel(action, labels) {
   return DEFAULT_LABELS[action];
 }
 
+/** Separators between page actions, window actions and « Fermer… » actions. */
+function menuGroup(action) {
+  if (TAB_WINDOW_ACTIONS.includes(action)) return 'window';
+  if (action === 'close' || action === 'close-others' || action === 'close-right') return 'close';
+  return 'page';
+}
+
 /**
  * Build a menu template. `onAction(action)` is invoked on click.
  * Items that cannot apply are disabled (e.g. "close others" with a single tab).
@@ -63,7 +100,8 @@ function buildTabMenuTemplate({ tabId, actions, labels, tabCount = 1, tabIndex =
     let enabled = true;
     if (action === 'close-others') enabled = count > 1;
     if (action === 'close-right') enabled = index < count - 1;
-    if (action === 'close' && template.length && list.includes('close')) {
+    const previous = template.length ? list[list.indexOf(action) - 1] : null;
+    if (previous && menuGroup(previous) !== menuGroup(action)) {
       template.push({ type: 'separator' });
     }
     template.push({
@@ -79,6 +117,8 @@ function buildTabMenuTemplate({ tabId, actions, labels, tabCount = 1, tabIndex =
 
 module.exports = {
   TAB_MENU_ACTIONS,
+  TAB_WINDOW_ACTIONS,
+  resolveWindowMenuActions,
   normalizeMenuActions,
   buildTabMenuTemplate,
   isValidTabId,
