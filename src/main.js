@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, session, systemPreferences } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, globalShortcut, session, systemPreferences } = require('electron');
 const { installPortalMediaPermissions } = require('./media-permissions');
 const path = require('path');
 const http = require('http');
@@ -47,6 +47,24 @@ const { createCodeWorkspaceService } = require('./code-workspace/service');
 const { createCodeAgentOps } = require('./code-workspace/agent-ops');
 const { createTrayController } = require('./tray/tray');
 const { normalizePortalTrayState, TRAY_PORTAL_COMMANDS } = require('./tray/tray-state');
+const { SHORTCUT_IDS, DEFAULT_SHORTCUTS, formatAccelerator, updateShortcut, acceleratorFromKeyEvent } = require('./background-mode');
+const { trayPlaceLabel } = require('./tray/tray-platform');
+const {
+  LOGIN_HIDDEN_ARG,
+  linuxLaunchPath,
+  windowsLaunchPath,
+  autostartDir,
+  createLinuxAutostart,
+  launchedHidden,
+} = require('./login-item');
+
+/**
+ * Linux / Wayland: global shortcuts go through the desktop portal (org.freedesktop.portal.GlobalShortcuts);
+ * without it `globalShortcut` only works under X11. Must be set before the app is ready.
+ */
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('enable-features', 'GlobalShortcutsPortal');
+}
 
 // Set app name as early as possible so macOS menu bar shows "Lasco" instead of "Electron" in dev
 app.setName('Lasco');
@@ -476,7 +494,13 @@ function ensureHostOps() {
       confirm: ensureInlineConfirm(
         createConfirm(
           (...args) => dialog.showMessageBox(...args),
-          () => (mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null)
+          () => {
+            const win = mainPortalWindow();
+            // A sheet on a hidden window (Lasco in the background) would never be seen: free-standing dialog.
+            if (win && win.isVisible() && !win.isMinimized()) return win;
+            if (process.platform === 'darwin' && app.dock) app.dock.bounce('informational');
+            return null;
+          }
         )
       ).confirm,
     });
@@ -503,6 +527,7 @@ function settingsWebContents() {
 }
 
 function closeSettings() {
+  resumeGlobalShortcuts();
   const surface = settingsSurface;
   if (!surface) return;
   settingsSurface = null;
@@ -529,7 +554,7 @@ function openSettings(section = 'general') {
   };
   const query = { section, agents: NO_AGENTS ? '0' : '1' };
   const win = mainPortalWindow();
-  if (win && !win.isMinimized()) {
+  if (win && !win.isMinimized() && win.isVisible()) {
     const view = new WebContentsView({ webPreferences });
     view.setBackgroundColor('#00000000');
     const fit = () => {
@@ -570,6 +595,7 @@ function openSettings(section = 'general') {
     });
     query.standalone = '1';
     standalone.on('closed', () => {
+      resumeGlobalShortcuts();
       if (settingsSurface && settingsSurface.window === standalone) settingsSurface = null;
     });
     settingsSurface = {
@@ -647,8 +673,17 @@ async function promptRestartForUpdate(info) {
   });
 
   if (response.response === 0) {
-    autoUpdater.quitAndInstall(false, true);
+    quitAndInstallUpdate();
   }
+}
+
+/**
+ * quitAndInstall closes the windows before `before-quit`: say first that Lasco really quits,
+ * otherwise the main window would only hide (background mode) and the update would never install.
+ */
+function quitAndInstallUpdate() {
+  isQuitting = true;
+  autoUpdater.quitAndInstall(false, true);
 }
 
 function isUpdaterEnabled() {
@@ -944,11 +979,11 @@ function handleLascoDeepLink(urlString) {
     return;
   }
   const full = PORTAL_URL.replace(/\/$/, '') + target;
-  const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
-  const win = mainPortalWindow() || wins[0];
+  const win = mainPortalWindow();
   if (win) {
     win.webContents.send('open-portal-tab', target);
-    win.focus();
+    // The main window may be hidden (background mode).
+    showMainWindow();
     if (process.platform === 'darwin') {
       win.moveTop();
     }
@@ -981,7 +1016,7 @@ function registerLascoProtocolClient() {
  * A portal window. `main` is the usual Lasco window; `detached` holds tabs moved out of
  * another window and opens on `initialTab` (docs/tab-windows.md).
  */
-function createWindow({ role = 'main', initialTab = null, bounds = null, inactive = false } = {}) {
+function createWindow({ role = 'main', initialTab = null, bounds = null, inactive = false, hidden = false } = {}) {
   let iconPath;
   try {
     iconPath = getIconPath();
@@ -1004,7 +1039,8 @@ function createWindow({ role = 'main', initialTab = null, bounds = null, inactiv
     title: 'Lasco',
     frame: false,
     // A window that follows a dragged tab appears without taking focus (the drag stays in its source).
-    show: !inactive,
+    // `hidden`: opened at login, Lasco starts in the menu bar only.
+    show: !inactive && !hidden,
     backgroundColor: usesSystemMaterial ? '#00000000' : '#222222',
     /* Native close / minimize / zoom — visible even if the web preload bridge is late or missing */
     ...(isMac && {
@@ -1024,6 +1060,8 @@ function createWindow({ role = 'main', initialTab = null, bounds = null, inactiv
       sandbox: true,
       webSecurity: true,
       partition: 'persist:portal',
+      // Main window hidden in the background: agent turns, chat stream and tray summary keep their pace.
+      backgroundThrottling: role !== 'main',
       additionalArguments: [
         `${APP_VERSION_ARG_PREFIX}${app.getVersion()}`,
         `${PORTAL_ORIGIN_ARG_PREFIX}${PORTAL_ORIGIN}`,
@@ -1038,9 +1076,9 @@ function createWindow({ role = 'main', initialTab = null, bounds = null, inactiv
     setIconSafe(app.dock, iconPath);
   }
 
-  if (inactive) win.showInactive();
+  if (inactive && !hidden) win.showInactive();
   win.once('ready-to-show', () => {
-    if (win.isDestroyed() || inactive) return;
+    if (win.isDestroyed() || inactive || hidden) return;
     win.focus();
     if (process.platform === 'darwin') {
       win.moveTop();
@@ -1104,6 +1142,13 @@ function createWindow({ role = 'main', initialTab = null, bounds = null, inactiv
   }
   win.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
     if (isMainFrame && hostOpsInlineConfirm) hostOpsInlineConfirm.invalidateAll();
+  });
+  // Background mode: closing the main window hides it, the portal keeps running (docs/background.md).
+  win.on('close', (event) => {
+    if (win !== mainWindowRef || !backgroundModeActive()) return;
+    event.preventDefault();
+    hideMainWindow(win);
+    showBackgroundHintOnce();
   });
   win.on('closed', () => {
     releaseCodeWorkspace();
@@ -1235,6 +1280,8 @@ function traySources() {
     harnessRuns: harnessRunner ? harnessRunner.list() : [],
     hostOpsEnabled: Boolean(hostOpsStore && hostOpsStore.isEnabled()),
     noAgents: NO_AGENTS,
+    askShortcut: shortcutStatus.ask === 'ok' ? formatAccelerator(getSettings().shortcuts.ask) : '',
+    askAccelerator: shortcutStatus.ask === 'ok' ? getSettings().shortcuts.ask : '',
   };
 }
 
@@ -1245,6 +1292,8 @@ function showMainWindow() {
     win = mainPortalWindow();
   }
   if (!win) return null;
+  // Lasco hidden by app.hide() (background mode): unhide before showing the window.
+  if (process.platform === 'darwin') app.show();
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
@@ -1252,36 +1301,225 @@ function showMainWindow() {
   return win;
 }
 
-function setupTray() {
-  if (process.platform !== 'darwin' || trayController) return;
-  trayController = createTrayController({
-    Tray,
-    BrowserWindow,
-    nativeImage,
-    nativeTheme,
-    screen,
-    iconDir: path.join(__dirname, '..', 'build', 'tray'),
-    getSources: traySources,
-    onPortalCommand: (command, payload, { focus }) => {
-      if (!TRAY_PORTAL_COMMANDS.includes(command)) return;
-      const win = focus ? showMainWindow() : mainPortalWindow();
-      if (!win || win.webContents.isDestroyed()) return;
-      win.webContents.send('tray-command', { command, ...payload });
-    },
-    onNativeAction: (action) => {
-      if (action === 'show-main') showMainWindow();
-      else if (action === 'settings') {
-        showMainWindow();
-        openSettings('general');
-      } else if (action === 'quit') app.quit();
-      else if (action === 'pause-host-ops' && hostOpsStore) {
-        hostOpsStore.setEnabled(false);
-        refreshSettings();
-        scheduleTrayRefresh();
-      }
-    },
+/**
+ * Background mode and global shortcuts (docs/background.md).
+ * `isQuitting`: a real quit (⌘Q, « Quitter Lasco », update): the main window then closes for good.
+ */
+let isQuitting = false;
+/** Last registration result per shortcut: 'ok' | 'off' | 'unavailable'. */
+const shortcutStatus = Object.fromEntries(SHORTCUT_IDS.map((id) => [id, 'off']));
+/** Shortcuts released while the Réglages record a new one (the keys must reach the page). */
+let shortcutsSuspended = false;
+
+/** Closing hides only with the Lasco icon (menu bar, notification area, system tray): otherwise nothing would bring Lasco back. */
+function backgroundModeActive() {
+  return !isQuitting && Boolean(trayController) && getSettings().keepInBackground;
+}
+
+function hideMainWindow(win = mainPortalWindow()) {
+  if (!win || win.isDestroyed()) return;
+  // Without the menu bar icon, a hidden window could not be found again: minimize.
+  if (!trayController) {
+    win.minimize();
+    return;
+  }
+  if (win.isFullScreen()) {
+    // Hiding a full-screen window leaves an empty Space: leave full screen first.
+    win.once('leave-full-screen', () => {
+      if (!win.isDestroyed()) hideMainWindow(win);
+    });
+    win.setFullScreen(false);
+    return;
+  }
+  win.hide();
+  // No other Lasco window on screen: give focus back to the previous app.
+  const othersVisible = [...portalWindows.values()].some(
+    (e) => e.win !== win && !e.win.isDestroyed() && e.win.isVisible()
+  );
+  if (process.platform === 'darwin' && !othersVisible) app.hide();
+}
+
+/** First time the window hides on close: say Lasco is still there and how to quit. */
+function showBackgroundHintOnce() {
+  if (getSettings().backgroundHintShown) return;
+  getSettingsStore().set({ backgroundHintShown: true });
+  if (!Notification.isSupported()) return;
+  const quit = process.platform === 'darwin' ? '⌘Q pour quitter.' : 'Pour quitter : « Quitter Lasco » dans le menu de l’icône.';
+  const hint = new Notification({
+    title: 'Lasco reste ouvert',
+    body: `Lasco continue dans ${trayPlaceLabel(process.platform)} : agents, validations et notifications. ${quit}`,
+    silent: true,
   });
-  trayController.refresh();
+  hint.on('click', () => showMainWindow());
+  hint.show();
+}
+
+/** Global shortcut « Afficher / masquer Lasco ». */
+function toggleMainWindow() {
+  const win = mainPortalWindow();
+  if (win && win.isVisible() && !win.isMinimized() && win.isFocused()) hideMainWindow(win);
+  else showMainWindow();
+}
+
+/** Global shortcut « Demander à Lasco » : Lasco devant, nouvelle conversation (même commande que le popover). */
+function askLasco() {
+  const win = showMainWindow();
+  if (NO_AGENTS || !win || win.webContents.isDestroyed()) return;
+  // Page not connected yet (login, reload): just show Lasco.
+  if (!trayPortalState || !trayPortalState.canAsk) return;
+  win.webContents.send('tray-command', { command: 'ask' });
+}
+
+const SHORTCUT_HANDLERS = { toggleWindow: toggleMainWindow, ask: askLasco };
+
+/** Without agents (--no-agents), « Demander à Lasco » does not exist. */
+function activeShortcutIds() {
+  return SHORTCUT_IDS.filter((id) => !(NO_AGENTS && id === 'ask'));
+}
+
+/** (Re)register the global shortcuts from the settings. */
+function applyGlobalShortcuts() {
+  globalShortcut.unregisterAll();
+  if (shortcutsSuspended) return;
+  const { shortcuts } = getSettings();
+  const active = activeShortcutIds();
+  for (const id of SHORTCUT_IDS) {
+    const accelerator = active.includes(id) ? shortcuts[id] : '';
+    if (!accelerator) {
+      shortcutStatus[id] = 'off';
+      continue;
+    }
+    let ok = false;
+    try {
+      ok = globalShortcut.register(accelerator, SHORTCUT_HANDLERS[id]);
+    } catch (_) {
+      ok = false;
+    }
+    // false: another app already holds the combination.
+    shortcutStatus[id] = ok ? 'ok' : 'unavailable';
+  }
+  scheduleTrayRefresh();
+}
+
+function suspendGlobalShortcuts() {
+  if (shortcutsSuspended) return;
+  shortcutsSuspended = true;
+  globalShortcut.unregisterAll();
+}
+
+function resumeGlobalShortcuts() {
+  if (!shortcutsSuspended) return;
+  shortcutsSuspended = false;
+  applyGlobalShortcuts();
+}
+
+function shortcutsSnapshot() {
+  const { shortcuts } = getSettings();
+  return activeShortcutIds().map((id) => ({
+    id,
+    accelerator: shortcuts[id],
+    label: formatAccelerator(shortcuts[id]),
+    defaultLabel: formatAccelerator(DEFAULT_SHORTCUTS[id]),
+    isDefault: shortcuts[id] === DEFAULT_SHORTCUTS[id],
+    status: shortcutStatus[id],
+  }));
+}
+
+/** Windows: the Run key entry, with `--lasco-hidden` (same path + args to read it back). */
+function windowsLoginItemOptions() {
+  return { path: windowsLaunchPath(), args: [LOGIN_HIDDEN_ARG] };
+}
+
+/** Linux: XDG autostart file (Electron has no login item API there). */
+function linuxAutostart() {
+  return createLinuxAutostart({
+    fs: require('fs'),
+    dir: autostartDir({ homeDir: app.getPath('home') }),
+    launchPath: linuxLaunchPath(),
+  });
+}
+
+/**
+ * « Ouvrir Lasco à l'ouverture de session » : l'état vient du système (modifiable aussi ailleurs :
+ * Réglages Système, Gestionnaire des tâches, ~/.config/autostart).
+ */
+function loginItemSnapshot() {
+  // In development the login item would launch the bare Electron binary.
+  const off = { available: false, enabled: false, requiresApproval: false };
+  if (!app.isPackaged) return off;
+  try {
+    if (process.platform === 'darwin') {
+      const s = app.getLoginItemSettings();
+      return { available: true, enabled: s.openAtLogin === true, requiresApproval: s.status === 'requires-approval' };
+    }
+    if (process.platform === 'win32') {
+      const s = app.getLoginItemSettings(windowsLoginItemOptions());
+      // Disabled in the Task Manager (« Démarrage ») : the entry exists but will not run.
+      return { available: true, enabled: s.executableWillLaunchAtLogin === true, requiresApproval: false };
+    }
+    if (process.platform === 'linux') {
+      return { available: true, enabled: linuxAutostart().isEnabled(), requiresApproval: false };
+    }
+  } catch (err) {
+    console.warn('[login-item] read failed:', err && err.message);
+  }
+  return off;
+}
+
+function setOpenAtLogin(enabled) {
+  if (process.platform === 'darwin') app.setLoginItemSettings({ openAtLogin: enabled });
+  else if (process.platform === 'win32') app.setLoginItemSettings({ openAtLogin: enabled, ...windowsLoginItemOptions() });
+  else if (process.platform === 'linux') linuxAutostart().setEnabled(enabled);
+}
+
+/** Opened by the session login with background mode on: start with the Lasco icon only. */
+function openedAtLoginInBackground() {
+  if (!app.isPackaged || !getSettings().keepInBackground) return false;
+  if (process.platform !== 'darwin') return launchedHidden(process.argv);
+  try {
+    return app.getLoginItemSettings().wasOpenedAtLogin === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function setupTray() {
+  if (trayController) return;
+  try {
+    trayController = createTrayController({
+      Tray,
+      BrowserWindow,
+      Menu,
+      nativeImage,
+      nativeTheme,
+      screen,
+      iconDir: path.join(__dirname, '..', 'build', 'tray'),
+      getSources: traySources,
+      onPortalCommand: (command, payload, { focus }) => {
+        if (!TRAY_PORTAL_COMMANDS.includes(command)) return;
+        const win = focus ? showMainWindow() : mainPortalWindow();
+        if (!win || win.webContents.isDestroyed()) return;
+        win.webContents.send('tray-command', { command, ...payload });
+      },
+      onNativeAction: (action) => {
+        if (action === 'show-main') showMainWindow();
+        else if (action === 'settings') {
+          showMainWindow();
+          openSettings('general');
+        } else if (action === 'quit') app.quit();
+        else if (action === 'pause-host-ops' && hostOpsStore) {
+          hostOpsStore.setEnabled(false);
+          refreshSettings();
+          scheduleTrayRefresh();
+        }
+      },
+    });
+    trayController.refresh();
+  } catch (err) {
+    // Linux without a system tray (StatusNotifier / AppIndicator): no icon, so no background mode.
+    console.warn('[tray] unavailable:', err && err.message);
+    trayController = null;
+  }
 }
 
 function registerWindowIPC() {
@@ -1322,7 +1560,7 @@ function registerWindowIPC() {
   });
   ipcMain.handle('update-install-now', () => {
     if (updateState.status !== 'downloaded') return false;
-    autoUpdater.quitAndInstall(false, true);
+    quitAndInstallUpdate();
     return true;
   });
 
@@ -1711,7 +1949,15 @@ function registerWindowIPC() {
       };
     }
     return {
-      general: { themeSource: settings.themeSource, openLinksInApp: settings.openLinksInApp },
+      general: {
+        themeSource: settings.themeSource,
+        openLinksInApp: settings.openLinksInApp,
+        // Background mode needs the menu bar icon (macOS).
+        backgroundAvailable: Boolean(trayController),
+        keepInBackground: settings.keepInBackground,
+        loginItem: loginItemSnapshot(),
+        shortcuts: shortcutsSnapshot(),
+      },
       update: buildUpdateSnapshot(),
       hostOps,
     };
@@ -1731,6 +1977,63 @@ function registerWindowIPC() {
     }
     return true;
   });
+  ipcMain.handle('settings-modal-set-keep-in-background', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
+    getSettingsStore().set({ keepInBackground: enabled });
+    return true;
+  });
+  ipcMain.handle('settings-modal-set-open-at-login', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean' || !loginItemSnapshot().available) return false;
+    try {
+      setOpenAtLogin(enabled);
+    } catch (err) {
+      console.warn('[login-item] write failed:', err && err.message);
+      return false;
+    }
+    return true;
+  });
+  // macOS 13+: the login item may wait for approval in Réglages Système > Général > Ouverture.
+  ipcMain.handle('settings-modal-open-login-items', (event) => {
+    if (!fromSettings(event) || process.platform !== 'darwin') return false;
+    void shell.openExternal('x-apple.systempreferences:com.apple.LoginItems-Settings.extension');
+    return true;
+  });
+  // Recording a shortcut: global shortcuts released so the keys reach the Réglages page.
+  ipcMain.handle('settings-modal-shortcut-recording', (event, recording) => {
+    if (!fromSettings(event) || typeof recording !== 'boolean') return false;
+    if (recording) suspendGlobalShortcuts();
+    else resumeGlobalShortcuts();
+    return true;
+  });
+  /**
+   * value: the recorded keystroke `{ code, ctrlKey, altKey, shiftKey, metaKey }`, '' to turn off,
+   * null for the default. The accelerator is built and checked here, never taken from the page.
+   */
+  ipcMain.handle('settings-modal-set-shortcut', (event, id, value) => {
+    if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
+    if (!activeShortcutIds().includes(id)) return { ok: false, error: 'invalid' };
+    let next = value;
+    if (value && typeof value === 'object') {
+      const keystroke = acceleratorFromKeyEvent({
+        code: value.code,
+        ctrlKey: value.ctrlKey === true,
+        altKey: value.altKey === true,
+        shiftKey: value.shiftKey === true,
+        metaKey: value.metaKey === true,
+      });
+      if (keystroke.error) return { ok: false, error: keystroke.error };
+      next = keystroke.accelerator;
+    } else if (!(value === null || value === '')) {
+      return { ok: false, error: 'invalid' };
+    }
+    const result = updateShortcut(getSettings().shortcuts, id, next);
+    if (!result.ok) return result;
+    getSettingsStore().set({ shortcuts: result.shortcuts });
+    shortcutsSuspended = false;
+    applyGlobalShortcuts();
+    if (shortcutStatus[id] === 'unavailable') return { ok: false, error: 'unavailable', saved: true };
+    return { ok: true };
+  });
   ipcMain.handle('settings-modal-update-check', async (event) => {
     if (!fromSettings(event)) return null;
     await checkForUpdates();
@@ -1738,7 +2041,7 @@ function registerWindowIPC() {
   });
   ipcMain.handle('settings-modal-update-install', (event) => {
     if (!fromSettings(event) || updateState.status !== 'downloaded') return false;
-    autoUpdater.quitAndInstall(false, true);
+    quitAndInstallUpdate();
     return true;
   });
   ipcMain.handle('host-ops-admin-set-shell-enabled', (event, value) => {
@@ -1948,11 +2251,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', (_event, argv) => {
     const url = argv.find((s) => typeof s === 'string' && s.startsWith(`${LASCO_PROTOCOL}:`));
     if (url) handleLascoDeepLink(url);
-    const win = mainPortalWindow() || BrowserWindow.getAllWindows()[0];
-    if (win && !win.isDestroyed()) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
-    }
+    else showMainWindow();
   });
 
   app.on('open-url', (event, url) => {
@@ -1979,14 +2278,21 @@ if (!app.requestSingleInstanceLock()) {
     registerWindowIPC();
     setupAutoUpdater();
     nativeTheme.on('updated', updateAllIcons);
-    createWindow();
+    const startHidden = openedAtLoginInBackground();
+    createWindow({ hidden: startHidden });
     setupTray();
+    // No icon after all (Linux without a system tray): a hidden window could not be reached.
+    if (startHidden && !trayController) showMainWindow();
+    applyGlobalShortcuts();
 
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
+    // Dock icon: brings back the main window, hidden or closed (the tray popover is a window too).
+    app.on('activate', (_event, hasVisibleWindows) => {
+      if (!hasVisibleWindows || !mainPortalWindow()) showMainWindow();
     });
+  });
+
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
   });
 
   app.on('window-all-closed', () => {
@@ -1996,6 +2302,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    isQuitting = true;
     if (trayController) {
       trayController.destroy();
       trayController = null;

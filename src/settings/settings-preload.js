@@ -26,6 +26,28 @@ const el = (tag, className, text) => {
 };
 
 let current = 'general';
+const IS_MAC = process.platform === 'darwin';
+/** Où vit l'icône Lasco (même libellé que src/tray/tray-platform.js : le preload sandboxé ne peut pas l'importer). */
+const TRAY_PLACE = IS_MAC ? 'la barre des menus' : process.platform === 'win32' ? 'la zone de notification' : 'la barre système';
+const QUIT_HINT = IS_MAC ? '⌘Q quitte Lasco.' : '« Quitter Lasco » dans le menu de l’icône quitte Lasco.';
+
+/** Raccourcis globaux (docs/background.md). */
+const SHORTCUT_TEXT = {
+  toggleWindow: { label: 'Afficher / masquer Lasco', hint: 'Fait passer Lasco devant, ou le masque s’il est déjà devant.' },
+  ask: { label: 'Demander à Lasco', hint: 'Ouvre Lasco sur une nouvelle conversation.' },
+};
+const SHORTCUT_ERRORS = {
+  'needs-modifier': IS_MAC ? 'Ajoutez ⌘, ⌃ ou ⌥ à la touche.' : 'Ajoutez Ctrl ou Alt à la touche.',
+  'unsupported-key': 'Cette touche ne peut pas servir de raccourci.',
+  reserved: 'Raccourci réservé par le système ou par Lasco.',
+  duplicate: 'Déjà utilisé par l’autre raccourci.',
+  unavailable: 'Déjà pris par une autre app : choisissez une autre combinaison.',
+  invalid: 'Raccourci invalide.',
+};
+/** Action en cours d'enregistrement ({ id, button }) ; les raccourcis globaux sont suspendus pendant ce temps. */
+let recording = null;
+/** Dernière erreur par action, affichée sous la ligne jusqu'au prochain changement. */
+const shortcutErrors = {};
 
 function showSection(name) {
   const wanted = SECTIONS.includes(name) ? name : 'general';
@@ -41,7 +63,102 @@ function showSection(name) {
 }
 
 function close() {
+  stopRecording();
   ipcRenderer.send('settings-modal-close');
+}
+
+function stopRecording() {
+  if (!recording) return;
+  const { button } = recording;
+  recording = null;
+  document.removeEventListener('keydown', onRecordKey, true);
+  button.classList.remove('recording');
+  ipcRenderer.invoke('settings-modal-shortcut-recording', false);
+  render();
+}
+
+function startRecording(id, button) {
+  if (recording) stopRecording();
+  recording = { id, button };
+  delete shortcutErrors[id];
+  button.classList.add('recording');
+  button.textContent = 'Tapez…';
+  document.addEventListener('keydown', onRecordKey, true);
+  ipcRenderer.invoke('settings-modal-shortcut-recording', true);
+}
+
+async function onRecordKey(e) {
+  if (!recording) return;
+  // Avant le gestionnaire « Échap ferme les réglages » et les raccourcis de la page.
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (e.key === 'Escape' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+    stopRecording();
+    return;
+  }
+  const { id } = recording;
+  const res = await ipcRenderer.invoke('settings-modal-set-shortcut', id, {
+    code: e.code,
+    ctrlKey: e.ctrlKey,
+    altKey: e.altKey,
+    shiftKey: e.shiftKey,
+    metaKey: e.metaKey,
+  });
+  if (!recording || recording.id !== id) return;
+  // Modificateur seul : on attend la touche.
+  if (res && res.error === 'modifier-only') return;
+  if (res && !res.ok && !res.saved) {
+    // Combinaison refusée : on reste en enregistrement pour en taper une autre.
+    shortcutErrors[id] = SHORTCUT_ERRORS[res.error] || SHORTCUT_ERRORS.invalid;
+    const hint = document.querySelector(`[data-shortcut-hint="${id}"]`);
+    if (hint) {
+      hint.textContent = shortcutErrors[id];
+      hint.classList.add('error');
+    }
+    return;
+  }
+  // Enregistré : l'erreur d'une frappe refusée juste avant disparaît (sauf « pris par une autre app »).
+  if (res && res.error) shortcutErrors[id] = SHORTCUT_ERRORS[res.error] || SHORTCUT_ERRORS.invalid;
+  else delete shortcutErrors[id];
+  stopRecording();
+}
+
+async function setShortcut(id, value) {
+  delete shortcutErrors[id];
+  const res = await ipcRenderer.invoke('settings-modal-set-shortcut', id, value);
+  if (res && res.error) shortcutErrors[id] = SHORTCUT_ERRORS[res.error] || SHORTCUT_ERRORS.invalid;
+  render();
+}
+
+function renderShortcuts(list) {
+  const group = $('shortcuts');
+  group.replaceChildren();
+  for (const sc of list) {
+    const copy = SHORTCUT_TEXT[sc.id];
+    if (!copy) continue;
+    const row = el('div', 'row');
+    const text = el('div', 'text');
+    const error = shortcutErrors[sc.id] || (sc.status === 'unavailable' ? SHORTCUT_ERRORS.unavailable : '');
+    const hint = el('div', error ? 'hint error' : 'hint', error || copy.hint);
+    hint.dataset.shortcutHint = sc.id;
+    text.append(el('div', 'label', copy.label), hint);
+    row.append(text);
+    if (!sc.isDefault) {
+      const reset = el('button', 'link', `Rétablir ${sc.defaultLabel}`);
+      reset.onclick = () => setShortcut(sc.id, null);
+      row.append(reset);
+    }
+    if (sc.accelerator) {
+      const off = el('button', 'link', 'Désactiver');
+      off.onclick = () => setShortcut(sc.id, '');
+      row.append(off);
+    }
+    const keys = el('button', sc.accelerator ? 'keys' : 'keys off', sc.label || 'Aucun');
+    keys.setAttribute('aria-label', `${copy.label} : ${sc.label || 'aucun raccourci'}. Modifier`);
+    keys.onclick = () => startRecording(sc.id, keys);
+    row.append(keys);
+    group.append(row);
+  }
 }
 
 function bindSwitch(id, channel) {
@@ -89,6 +206,22 @@ async function render() {
     b.setAttribute('aria-pressed', String(b.dataset.value === s.general.themeSource));
   }
   $('openLinksInApp').checked = s.general.openLinksInApp;
+  const g = s.general;
+  $('keepInBackgroundRow').hidden = !g.backgroundAvailable;
+  $('keepInBackground').checked = g.keepInBackground;
+  const login = g.loginItem || { available: false };
+  $('openAtLoginRow').classList.toggle('disabled', !login.available);
+  $('openAtLogin').disabled = !login.available;
+  $('openAtLogin').checked = login.enabled === true;
+  $('openAtLoginHint').textContent = !login.available
+    ? 'Disponible dans la version installée de Lasco.'
+    : g.backgroundAvailable && g.keepInBackground
+      ? `Lasco démarre masqué, dans ${TRAY_PLACE}.`
+      : 'Lasco démarre avec l’ordinateur.';
+  $('openAtLoginApproval').hidden = !(login.enabled && login.requiresApproval);
+  $('openLoginItems').hidden = !(login.enabled && login.requiresApproval);
+  // Pas de redessin pendant l'enregistrement : le bouton « Tapez… » resterait sinon sans écouteur.
+  if (!recording) renderShortcuts(g.shortcuts || []);
   renderUpdate(s.update);
 
   if (!s.hostOps) return;
@@ -143,6 +276,14 @@ async function render() {
 
 window.addEventListener('DOMContentLoaded', () => {
   if (STANDALONE) document.body.classList.add('standalone');
+  $('keepInBackgroundLabel').textContent = `Garder Lasco ouvert dans ${TRAY_PLACE}`;
+  $('keepInBackground').setAttribute('aria-label', `Garder Lasco ouvert dans ${TRAY_PLACE}`);
+  $('keepInBackgroundHint').textContent =
+    `Fermer la fenêtre la masque : les agents, les validations et les notifications continuent. ${QUIT_HINT}`;
+  if (!IS_MAC) {
+    $('shortcutsIntro').textContent =
+      'Disponibles partout, même quand Lasco est masqué. Cliquez sur un raccourci puis tapez la nouvelle combinaison (avec Ctrl ou Alt). Échap annule.';
+  }
   if (!AGENTS) for (const n of document.querySelectorAll('[data-agents]')) n.remove();
 
   for (const b of document.querySelectorAll('nav button[data-section]')) {
@@ -155,6 +296,11 @@ window.addEventListener('DOMContentLoaded', () => {
     };
   }
   bindSwitch('openLinksInApp', 'settings-modal-set-open-links');
+  bindSwitch('keepInBackground', 'settings-modal-set-keep-in-background');
+  bindSwitch('openAtLogin', 'settings-modal-set-open-at-login');
+  $('openLoginItems').onclick = () => ipcRenderer.invoke('settings-modal-open-login-items');
+  // La vue perd le focus pendant un enregistrement : on l'arrête (raccourcis globaux rétablis).
+  window.addEventListener('blur', () => stopRecording());
   if (AGENTS) {
     bindSwitch('enabled', 'host-ops-admin-set-enabled');
     bindSwitch('shellEnabled', 'host-ops-admin-set-shell-enabled');

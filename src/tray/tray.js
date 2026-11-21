@@ -1,10 +1,11 @@
 'use strict';
 
 /**
- * Icône Lasco de la barre des menus (macOS) et son popover.
- * - Icône « template » (teintée par macOS), avec un point quand quelque chose attend ;
- *   le nombre d'éléments à valider s'affiche à côté (`setTitle`).
- * - Clic : popover sous l'icône (fenêtre sans cadre, `file:` isolée, fermée quand elle perd le focus).
+ * Icône Lasco (barre des menus macOS, zone de notification Windows, barre système Linux) et son popover.
+ * - Icône avec un point quand quelque chose attend ; macOS : image « template » et nombre à valider
+ *   à côté (`setTitle`) ; Windows / Linux : flamme en couleur.
+ * - Clic : popover à côté de l'icône (fenêtre sans cadre, `file:` isolée, fermée quand elle perd le focus).
+ * - Windows : clic droit = menu natif. Linux : menu natif attaché (le clic n'arrive pas toujours à l'app).
  * Voir docs/tray.md.
  */
 const path = require('path');
@@ -15,22 +16,42 @@ const {
   trayTooltip,
   resolveTrayAction,
 } = require('./tray-state');
+const {
+  trayIconFiles,
+  supportsTrayTitle,
+  usesAttachedMenu,
+  computePopoverBounds,
+  buildTrayMenuItems,
+} = require('./tray-platform');
 
 const WIDTH = 360;
 const MIN_HEIGHT = 180;
 const MAX_HEIGHT = 640;
 
-function createTrayController({ Tray, BrowserWindow, nativeImage, nativeTheme, screen, iconDir, getSources, onPortalCommand, onNativeAction }) {
+function createTrayController({
+  Tray,
+  BrowserWindow,
+  Menu,
+  nativeImage,
+  nativeTheme,
+  screen,
+  iconDir,
+  platform = process.platform,
+  getSources,
+  onPortalCommand,
+  onNativeAction,
+}) {
+  const isMac = platform === 'darwin';
+  const files = trayIconFiles(platform);
   const icons = {
-    plain: nativeImage.createFromPath(path.join(iconDir, 'trayTemplate.png')),
-    dot: nativeImage.createFromPath(path.join(iconDir, 'trayDotTemplate.png')),
+    plain: nativeImage.createFromPath(path.join(iconDir, files.plain)),
+    dot: nativeImage.createFromPath(path.join(iconDir, files.dot)),
   };
-  for (const image of Object.values(icons)) image.setTemplateImage(true);
+  if (files.template) for (const image of Object.values(icons)) image.setTemplateImage(true);
 
   const tray = new Tray(icons.plain);
   tray.setToolTip('Lasco');
-  // Clic droit : même popover (pas de menu séparé à maintenir).
-  tray.setIgnoreDoubleClickEvents(true);
+  if (isMac) tray.setIgnoreDoubleClickEvents(true);
 
   let popover = null;
   let ready = false;
@@ -49,14 +70,32 @@ function createTrayController({ Tray, BrowserWindow, nativeImage, nativeTheme, s
     }
   }
 
+  /** Menu natif construit sur la vue courante ; chaque entrée repasse par `resolveTrayAction`. */
+  function buildMenu(forView) {
+    const items = buildTrayMenuItems(forView, { askShortcut: forView.askAccelerator });
+    return Menu.buildFromTemplate(
+      items.map((item) =>
+        item.type === 'separator'
+          ? { type: 'separator' }
+          : {
+              label: item.label,
+              ...(item.accelerator ? { accelerator: item.accelerator, registerAccelerator: false } : {}),
+              click: () => runAction(forView, item.action),
+            },
+      ),
+    );
+  }
+
   /** Icône, compteur et info-bulle ; le popover ouvert se redessine. */
   function refresh() {
     const next = currentView();
     const variant = trayIconVariant(next);
     tray.setImage(icons[variant]);
     const pending = trayPendingCount(next);
-    tray.setTitle(pending ? String(pending) : '', { fontType: 'monospacedDigit' });
+    if (supportsTrayTitle(platform)) tray.setTitle(pending ? String(pending) : '', { fontType: 'monospacedDigit' });
     tray.setToolTip(trayTooltip(next));
+    // Linux : le menu attaché suit l'état (compteurs, « Demander à Lasco »).
+    if (usesAttachedMenu(platform)) tray.setContextMenu(buildMenu(next));
     if (popover && popover.isVisible()) renderView();
   }
 
@@ -73,11 +112,12 @@ function createTrayController({ Tray, BrowserWindow, nativeImage, nativeTheme, s
       fullscreenable: false,
       skipTaskbar: true,
       alwaysOnTop: true,
-      transparent: true,
+      // Linux : la transparence dépend du compositeur ; fenêtre opaque, le panneau garde son fond.
+      transparent: platform !== 'linux',
+      backgroundColor: platform === 'linux' ? (nativeTheme.shouldUseDarkColors ? '#202020' : '#f6f6f6') : undefined,
       hasShadow: true,
       roundedCorners: true,
-      vibrancy: 'popover',
-      visualEffectState: 'active',
+      ...(isMac ? { vibrancy: 'popover', visualEffectState: 'active' } : {}),
       webPreferences: {
         preload: path.join(__dirname, 'tray-popover-preload.js'),
         contextIsolation: true,
@@ -99,13 +139,24 @@ function createTrayController({ Tray, BrowserWindow, nativeImage, nativeTheme, s
   }
 
   function position() {
-    const bounds = tray.getBounds();
-    const display = screen.getDisplayNearestPoint({ x: bounds.x, y: bounds.y });
-    const area = display.workArea;
-    const x = Math.round(Math.min(Math.max(bounds.x + bounds.width / 2 - WIDTH / 2, area.x + 8), area.x + area.width - WIDTH - 8));
-    const y = Math.round(bounds.y + bounds.height + 4);
-    const h = Math.min(height, area.y + area.height - y - 8);
-    popover.setBounds({ x, y, width: WIDTH, height: h });
+    let trayBounds = null;
+    try {
+      trayBounds = tray.getBounds();
+    } catch (_) {
+      trayBounds = null;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const anchor = trayBounds && trayBounds.width > 0 ? { x: trayBounds.x, y: trayBounds.y } : cursor;
+    const display = screen.getDisplayNearestPoint(anchor);
+    popover.setBounds(
+      computePopoverBounds({
+        trayBounds,
+        display: { bounds: display.bounds, workArea: display.workArea },
+        cursor,
+        width: WIDTH,
+        height,
+      }),
+    );
   }
 
   function show() {
@@ -131,7 +182,16 @@ function createTrayController({ Tray, BrowserWindow, nativeImage, nativeTheme, s
   }
 
   tray.on('click', toggle);
-  tray.on('right-click', toggle);
+  if (isMac) {
+    // Clic droit : même popover (pas de menu séparé à maintenir).
+    tray.on('right-click', toggle);
+  } else if (!usesAttachedMenu(platform)) {
+    // Windows : clic droit = menu natif, comme les autres icônes de la zone de notification.
+    tray.on('right-click', () => {
+      hide();
+      tray.popUpContextMenu(buildMenu(currentView()));
+    });
+  }
   nativeTheme.on('updated', () => {
     if (popover && popover.isVisible()) renderView();
   });
@@ -157,7 +217,12 @@ function createTrayController({ Tray, BrowserWindow, nativeImage, nativeTheme, s
 
   function handleAction(event, action) {
     if (!isPopoverSender(event) || !view) return;
-    const resolved = resolveTrayAction(view, action);
+    runAction(view, action);
+  }
+
+  /** Action du popover ou du menu natif, revérifiée contre la vue qui l'a affichée. */
+  function runAction(shownView, action) {
+    const resolved = resolveTrayAction(shownView, action);
     if (!resolved) return;
     if (resolved.kind === 'portal') {
       // Approuver / refuser laisse le popover ouvert (la ligne disparaît au prochain état) ; le reste ouvre Lasco.
