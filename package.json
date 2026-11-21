@@ -23,7 +23,7 @@
     "build:mac:dmg": "node scripts/pad-dock-icon.js && CSC_IDENTITY_AUTO_DISCOVERY=true CSC_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db CSC_NAME='Programisto (48UZ7QZ7W5)' electron-builder --mac dmg",
     "build:mac:p12": "node scripts/pad-dock-icon.js && CSC_LINK=\"$(pwd)/Certificates.p12\" electron-builder --mac",
     "test:quarantine": "bash scripts/test-quarantine.sh",
-    "test:unit": "node --test scripts/test-browser-url.js scripts/test-browser-manager.js scripts/test-browser-history.js scripts/test-link-handling.js scripts/test-agent-notifications.js scripts/test-tab-menu.js scripts/test-tab-windows.js scripts/test-app-menu.js scripts/test-tray-state.js scripts/test-background-mode.js scripts/test-tray-platform.js scripts/test-login-item.js scripts/test-host-ops.js scripts/test-host-shell.js scripts/test-host-web-settings.js scripts/test-inline-confirm.js scripts/test-code-harness.js scripts/test-code-workspace.js",
+    "test:unit": "node --test scripts/test-browser-url.js scripts/test-browser-manager.js scripts/test-browser-history.js scripts/test-link-handling.js scripts/test-agent-notifications.js scripts/test-tab-menu.js scripts/test-tab-windows.js scripts/test-app-menu.js scripts/test-tray-state.js scripts/test-background-mode.js scripts/test-tray-platform.js scripts/test-login-item.js scripts/test-host-ops.js scripts/test-host-shell.js scripts/test-host-web-settings.js scripts/test-inline-confirm.js scripts/test-code-harness.js scripts/test-code-workspace.js scripts/test-media-permissions.js",
     "debug:signing": "bash scripts/debug-signing.sh",
     "fix:quarantine": "bash scripts/fix-quarantine.sh",
     "install:mac": "bash scripts/install-lasco-macos.sh",
@@ -63,6 +63,9 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Lasco utilise le micro pour la dictée et le mode vocal de vos agents."
+      },
       "notarize": true
     },
     "dmg": {
