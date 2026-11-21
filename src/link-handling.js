@@ -2,21 +2,34 @@
 
 const fs = require('fs');
 const path = require('path');
+const { normalizeShortcuts } = require('./background-mode');
 
 const LASCO_PROTOCOL = 'lasco';
 /** `themeSource`: app appearance (Réglages > Général), applied to `nativeTheme.themeSource`. */
 const THEME_SOURCES = Object.freeze(['system', 'light', 'dark']);
-const DEFAULT_SETTINGS = Object.freeze({ openLinksInApp: true, themeSource: 'system' });
+/**
+ * `keepInBackground`: closing the main window hides it, Lasco stays in the menu bar (macOS).
+ * `backgroundHintShown`: the « Lasco reste ouvert » notification was shown once.
+ * `shortcuts`: global shortcuts (see background-mode.js). Docs: docs/background.md.
+ */
+const DEFAULT_SETTINGS = Object.freeze({
+  openLinksInApp: true,
+  themeSource: 'system',
+  keepInBackground: true,
+  backgroundHintShown: false,
+});
 
 /** Keep only known keys with valid types; unknown / invalid values fall back to defaults. */
 function normalizeSettings(raw) {
   const out = { ...DEFAULT_SETTINGS };
-  if (raw && typeof raw === 'object' && typeof raw.openLinksInApp === 'boolean') {
-    out.openLinksInApp = raw.openLinksInApp;
+  const obj = raw && typeof raw === 'object' ? raw : {};
+  for (const key of ['openLinksInApp', 'keepInBackground', 'backgroundHintShown']) {
+    if (typeof obj[key] === 'boolean') out[key] = obj[key];
   }
-  if (raw && typeof raw === 'object' && THEME_SOURCES.includes(raw.themeSource)) {
-    out.themeSource = raw.themeSource;
+  if (THEME_SOURCES.includes(obj.themeSource)) {
+    out.themeSource = obj.themeSource;
   }
+  out.shortcuts = normalizeShortcuts(obj.shortcuts);
   return out;
 }
 
