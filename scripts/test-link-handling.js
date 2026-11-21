@@ -3,6 +3,8 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeSettings, createSettingsStore, extractPortalTarget } = require('../src/link-handling');
+const { DEFAULT_SHORTCUTS } = require('../src/background-mode');
+const BASE = { keepInBackground: true, backgroundHintShown: false, shortcuts: { ...DEFAULT_SHORTCUTS } };
 
 const isPortal = (u) => new URL(u).hostname === 'app.lascoapp.com';
 
@@ -22,11 +24,11 @@ describe('link handling', () => {
   });
 
   it('normalizes settings with defaults', () => {
-    assert.deepEqual(normalizeSettings(null), { openLinksInApp: true, themeSource: 'system' });
-    assert.deepEqual(normalizeSettings({ openLinksInApp: 'no', x: 1 }), { openLinksInApp: true, themeSource: 'system' });
-    assert.deepEqual(normalizeSettings({ openLinksInApp: false }), { openLinksInApp: false, themeSource: 'system' });
-    assert.deepEqual(normalizeSettings({ themeSource: 'dark' }), { openLinksInApp: true, themeSource: 'dark' });
-    assert.deepEqual(normalizeSettings({ themeSource: 'sepia' }), { openLinksInApp: true, themeSource: 'system' });
+    assert.deepEqual(normalizeSettings(null), { openLinksInApp: true, themeSource: 'system', ...BASE });
+    assert.deepEqual(normalizeSettings({ openLinksInApp: 'no', x: 1 }), { openLinksInApp: true, themeSource: 'system', ...BASE });
+    assert.deepEqual(normalizeSettings({ openLinksInApp: false }), { openLinksInApp: false, themeSource: 'system', ...BASE });
+    assert.deepEqual(normalizeSettings({ themeSource: 'dark' }), { openLinksInApp: true, themeSource: 'dark', ...BASE });
+    assert.deepEqual(normalizeSettings({ themeSource: 'sepia' }), { openLinksInApp: true, themeSource: 'system', ...BASE });
   });
 
   it('persists settings through the store', () => {

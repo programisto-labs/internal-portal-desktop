@@ -21,3 +21,7 @@ In `scripts/pad-dock-icon.js`:
 ## Menu bar icon (macOS)
 
 `build/tray/trayTemplate.png` / `trayDotTemplate.png` (+ `@2x`) are **generated** from `icon-source.png` (same flame as the app icon): black silhouette on transparent, macOS « template » image (tinted for light / dark menu bars), yellow core cut out so the flame stays readable at 18 pt. The `Dot` variant adds a point when something waits or is unread. Regenerate with `npm run icons:tray` after changing `icon-source.png`.
+
+## Tray icon (Windows / Linux)
+
+`build/tray/tray.png` / `trayDot.png` (+ `@2x`) are **generated** by the same script: the flame in color, 16 px (32 px @2x), nearest-neighbour (pixel art). The `Dot` variant adds a red point ringed in white (readable on light and dark taskbars).

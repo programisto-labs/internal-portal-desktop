@@ -92,6 +92,8 @@ function render(view) {
 
   const ask = document.getElementById('ask');
   ask.hidden = !view.canAsk;
+  ask.replaceChildren(document.createTextNode('Demander à Lasco…'));
+  if (view.askShortcut) ask.append(el('span', 'kbd', view.askShortcut));
 
   if (pending) {
     const s = section('À valider', pending, true);

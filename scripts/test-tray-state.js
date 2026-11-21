@@ -84,6 +84,12 @@ describe('tray view', () => {
     assert.equal(v.canAsk, false);
     assert.equal(v.hostOpsEnabled, false);
   });
+
+  it('shows the « Demander à Lasco » shortcut as bounded text', () => {
+    assert.equal(buildTrayView({ portal, askShortcut: '⌥⇧ Espace' }).askShortcut, '⌥⇧ Espace');
+    assert.equal(buildTrayView({ portal }).askShortcut, '');
+    assert.equal(buildTrayView({ portal, askShortcut: { x: 1 } }).askShortcut, '');
+  });
 });
 
 describe('tray actions', () => {
