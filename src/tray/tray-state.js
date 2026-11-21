@@ -14,6 +14,8 @@
  * Docs : docs/tray.md.
  */
 
+const { parseAccelerator } = require('../background-mode');
+
 const OBJECT_ID = /^[a-f0-9]{24}$/i;
 const CALL_ID = /^[A-Za-z0-9_.:-]{1,120}$/;
 const MAX_ITEMS = 6;
@@ -105,7 +107,7 @@ function normalizePortalTrayState(input) {
  *   harnessRuns?: Array<{runId: string, status: string, harnessLabel?: string, projectName?: string, agentName?: string}>,
  *   hostOpsEnabled?: boolean, noAgents?: boolean }} input
  */
-function buildTrayView({ portal, hostConfirms = [], harnessRuns = [], hostOpsEnabled = false, noAgents = false }) {
+function buildTrayView({ portal, hostConfirms = [], harnessRuns = [], hostOpsEnabled = false, noAgents = false, askShortcut = '', askAccelerator = '' }) {
   const confirms = (Array.isArray(hostConfirms) ? hostConfirms : []).slice(0, MAX_ITEMS).map((c) => ({
     id: text(c && c.id, 80),
     title: text(c && c.title, 140) || 'Opération sur cet ordinateur',
@@ -130,6 +132,10 @@ function buildTrayView({ portal, hostConfirms = [], harnessRuns = [], hostOpsEna
     unread: p.unread,
     unreadTotal: p.unreadTotal,
     canAsk: p.canAsk && !noAgents,
+    // Libellé du raccourci global « Demander à Lasco » (ex. « ⌥⇧ Espace »), '' sans raccourci.
+    askShortcut: text(askShortcut, 24),
+    // Même raccourci en accelerator Electron, affiché dans le menu natif (Windows / Linux).
+    askAccelerator: parseAccelerator(askAccelerator) || '',
     hostOpsEnabled: hostOpsEnabled === true && !noAgents,
   };
 }
