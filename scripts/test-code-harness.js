@@ -9,6 +9,7 @@ const path = require('path');
 const { HARNESSES, parseHarnessLine } = require('../src/code-harness/harnesses');
 const { createHarnessRunner } = require('../src/code-harness/runner');
 const { createRunHistory } = require('../src/code-harness/history');
+const { resolveHarnessCommand } = require('../src/code-harness/command');
 const { createHarnessPermissions, PERMISSION_TOOL } = require('../src/code-harness/permissions');
 const { handleMessage, askDesktop } = require('../src/code-harness/permission-mcp');
 const { buildShellPlan, shellGrantCovers } = require('../src/host-ops/shell');
@@ -124,6 +125,7 @@ describe('harnais de code : exécutions', () => {
       },
       listFiles: async () => [{ status: 'M', path: 'src/a.ts' }],
       checkAuth: async () => ({ state: 'ok' }),
+      probeFlags: async () => null,
       ...overrides,
     });
   const request = (extra = {}) => ({ requestId: 'call_1', userId: 'u1', agentId: 'a1', agentName: 'Dev', projectId: 'p1', harness: 'claude-code', prompt: 'Ajoute un test', ...extra });
@@ -175,6 +177,57 @@ describe('harnais de code : exécutions', () => {
     assert.equal(res.result.sessionId, 's-9');
     assert.deepEqual(events.map((e) => e.type), ['started', 'step', 'done']);
     assert.equal(events[1].text, 'Write · test.sh');
+  });
+
+  it('Cursor ancien : --trust non passé s’il est absent de --help, message de mise à jour si une option est refusée', async () => {
+    const runner = mk({ probeFlags: async () => new Set(['--print', '--force', '--output-format']) });
+    const pending = runner.start(request({ harness: 'cursor' }));
+    await tick();
+    await tick();
+    assert.ok(child.spawned.args.includes('--force'));
+    assert.ok(!child.spawned.args.includes('--trust'));
+    child.stderr.emit('data', Buffer.from("error: unknown option '--output-format'\n"));
+    child.end(1);
+    const res = await pending;
+    assert.equal(res.ok, false);
+    assert.match(res.error.message, /trop ancienne \(option --output-format inconnue\)/);
+    assert.match(res.error.message, /cursor-agent update/);
+  });
+
+  it('Cursor récent : --trust passé', async () => {
+    const runner = mk({ probeFlags: async () => new Set(['--force', '--trust']) });
+    const pending = runner.start(request({ harness: 'cursor' }));
+    await tick();
+    await tick();
+    assert.ok(child.spawned.args.includes('--trust'));
+    child.feed({ type: 'result', subtype: 'success', is_error: false, result: 'Fait.' });
+    child.end(0);
+    assert.equal((await pending).ok, true);
+  });
+
+  it('commande résolue (Windows) : programme et script lancés sans shell', async () => {
+    const runner = mk({ resolveCommand: () => ({ command: 'C:\\ca\\node.exe', prefixArgs: ['C:\\ca\\index.js'] }) });
+    const pending = runner.start(request({ harness: 'cursor' }));
+    await tick();
+    await tick();
+    assert.equal(child.spawned.bin, 'C:\\ca\\node.exe');
+    assert.equal(child.spawned.args[0], 'C:\\ca\\index.js');
+    assert.equal(child.spawned.args[1], '-p');
+    assert.equal(child.spawned.opts.shell, undefined);
+    child.end(0);
+    await pending;
+  });
+
+  it('script Windows illisible : refusé avec un message, jamais lancé par cmd.exe', async () => {
+    let spawned = false;
+    const runner = mk({
+      resolveCommand: () => ({ error: 'unsupported_shim', shim: 'C:\\x\\cursor-agent.cmd' }),
+      spawnImpl: () => ((spawned = true), fakeChild()),
+    });
+    const res = await runner.start(request({ harness: 'cursor' }));
+    assert.equal(spawned, false);
+    assert.equal(res.ok, false);
+    assert.match(res.error.message, /ne sait pas lancer ce script sous Windows/);
   });
 
   it('non connecté : statut login_required et commande de connexion', async () => {
@@ -527,5 +580,93 @@ describe('harnais de code : autorisations remontées dans le chat (Claude Code)'
     while (!release) await new Promise((r) => setTimeout(r, 5));
     prepared.dispose();
     assert.equal((await pending).behavior, 'deny');
+  });
+});
+
+describe('harnais de code : commande sous Windows', () => {
+  /** Faux disque : chemins Windows → contenu (fichier) ou liste (dossier). */
+  function fakeFs(tree) {
+    const norm = (p) => p.toLowerCase();
+    const files = new Map(Object.entries(tree).map(([k, v]) => [norm(k), v]));
+    return {
+      statSync(p) {
+        const v = files.get(norm(p));
+        if (v === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        return { isFile: () => typeof v === 'string' };
+      },
+      readFileSync(p) {
+        const v = files.get(norm(p));
+        if (typeof v !== 'string') throw new Error('ENOENT');
+        return v;
+      },
+      readdirSync(p) {
+        const v = files.get(norm(p));
+        if (!Array.isArray(v)) throw new Error('ENOENT');
+        return v;
+      },
+    };
+  }
+  const env = { Path: 'C:\\Windows\\System32;C:\\Users\\r\\AppData\\Roaming\\npm', LOCALAPPDATA: 'C:\\Users\\r\\AppData\\Local', APPDATA: 'C:\\Users\\r\\AppData\\Roaming', USERPROFILE: 'C:\\Users\\r' };
+
+  it('hors Windows : le nom du binaire', () => {
+    assert.deepEqual(resolveHarnessCommand('cursor-agent', { platform: 'darwin' }), { command: 'cursor-agent', prefixArgs: [] });
+  });
+
+  it('.exe trouvé dans le PATH (clé Path) : lancé tel quel', () => {
+    const fs = fakeFs({ 'C:\\Users\\r\\.local\\bin\\claude.exe': 'MZ' });
+    assert.deepEqual(resolveHarnessCommand('claude', { platform: 'win32', env, fs }), { command: 'C:\\Users\\r\\.local\\bin\\claude.exe', prefixArgs: [] });
+  });
+
+  it('raccourci npm (codex.cmd) : node + script JS, sans cmd.exe', () => {
+    const shim = [
+      '@ECHO off',
+      'GOTO start',
+      ':find_dp0',
+      'SET dp0=%~dp0',
+      'EXIT /b',
+      ':start',
+      'SETLOCAL',
+      'CALL :find_dp0',
+      'IF EXIST "%dp0%\\node.exe" (',
+      '  SET "_prog=%dp0%\\node.exe"',
+      ') ELSE (',
+      '  SET "_prog=node"',
+      ')',
+      'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*',
+    ].join('\r\n');
+    const fs = fakeFs({
+      'C:\\Users\\r\\AppData\\Roaming\\npm\\codex.cmd': shim,
+      'C:\\Program Files\\nodejs\\node.exe': 'MZ',
+    });
+    const res = resolveHarnessCommand('codex', { platform: 'win32', env: { ...env, Path: `${env.Path};C:\\Program Files\\nodejs` }, fs });
+    assert.deepEqual(res, {
+      command: 'C:\\Program Files\\nodejs\\node.exe',
+      prefixArgs: ['C:\\Users\\r\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js'],
+    });
+  });
+
+  it('Cursor installé après le lancement de Desktop (hors PATH) : node.exe + index.js de la version la plus récente', () => {
+    const root = 'C:\\Users\\r\\AppData\\Local\\cursor-agent';
+    const fs = fakeFs({
+      [`${root}\\cursor-agent.cmd`]: '@echo off\r\nsetlocal\r\ncall "%~dp0versions\\%CURSOR_V%\\cursor-agent.cmd" %*',
+      [`${root}\\versions`]: ['2026.08.11-e8db854', '2026.11.05-86047df', '2026.11.06-aaaa.staged'],
+      [`${root}\\versions\\2026.08.11-e8db854\\node.exe`]: 'MZ',
+      [`${root}\\versions\\2026.08.11-e8db854\\index.js`]: '',
+      [`${root}\\versions\\2026.11.05-86047df\\node.exe`]: 'MZ',
+      [`${root}\\versions\\2026.11.05-86047df\\index.js`]: '',
+    });
+    assert.deepEqual(resolveHarnessCommand('cursor-agent', { platform: 'win32', env, fs }), {
+      command: `${root}\\versions\\2026.11.05-86047df\\node.exe`,
+      prefixArgs: [`${root}\\versions\\2026.11.05-86047df\\index.js`],
+    });
+  });
+
+  it('.exe préféré au .cmd ; script inconnu refusé ; absent = not_installed', () => {
+    const root = 'C:\\Users\\r\\AppData\\Local\\cursor-agent';
+    const both = fakeFs({ [`${root}\\cursor-agent.exe`]: 'MZ', [`${root}\\cursor-agent.cmd`]: '' });
+    assert.equal(resolveHarnessCommand('cursor-agent', { platform: 'win32', env, fs: both }).command, `${root}\\cursor-agent.exe`);
+    const unknown = fakeFs({ 'C:\\Windows\\System32\\vibe.cmd': '@echo off\r\npython -m vibe %*' });
+    assert.equal(resolveHarnessCommand('vibe', { platform: 'win32', env, fs: unknown }).error, 'unsupported_shim');
+    assert.deepEqual(resolveHarnessCommand('vibe', { platform: 'win32', env, fs: fakeFs({}) }), { error: 'not_installed' });
   });
 });

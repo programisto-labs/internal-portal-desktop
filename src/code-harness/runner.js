@@ -16,6 +16,7 @@ const { spawn: spawnDefault, execFile } = require('child_process');
 const { HARNESSES, parseHarnessLine } = require('./harnesses');
 const { checkAuth: checkAuthDefault, startLogin: startLoginDefault } = require('./auth');
 const { pruneRuns } = require('./history');
+const { resolveHarnessCommand, execHarness, helpFlags } = require('./command');
 
 const ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const CONVERSATION_RE = /^[a-f0-9]{24}$/;
@@ -59,6 +60,10 @@ function createHarnessRunner({
   startLogin = startLoginDefault,
   /** Relais des demandes d'autorisation du harnais (`permissions.js`) ; absent = refus d'office (mode -p). */
   permissions = null,
+  /** Commande réelle du binaire (Windows : `.exe`, ou programme derrière un `.cmd`). */
+  resolveCommand = (bin, env) => resolveHarnessCommand(bin, { env }),
+  /** Options connues de la version installée (`--help`), `null` si inconnues. */
+  probeFlags = (bin, env) => helpFlags(bin, { env }),
 }) {
   const runs = new Map();
   const logins = new Map(); // harness -> cancel
@@ -182,7 +187,7 @@ function createHarnessRunner({
       Object.values(HARNESSES).map(
         (h) =>
           new Promise((resolve) => {
-            execFile(h.bin, ['--version'], { env, timeout: 8000 }, (err, stdout) => {
+            execHarness(h.bin, ['--version'], { env, timeout: 8000 }, (err, stdout) => {
               const version = err ? null : clip(String(stdout).split('\n')[0].trim(), 80);
               resolve({ id: h.id, label: h.label, installed: Boolean(version), version, loginCommand: h.loginCommand });
             });
@@ -298,18 +303,33 @@ function createHarnessRunner({
         .catch(() => null);
       if (permission) Object.assign(env, permission.env || {});
     }
-    const args = def.args({ prompt, sessionId: run.sessionId, cwd: project.root, permission });
+    const resolved = resolveCommand(def.bin, env);
+    const flags = def.probeHelp && !resolved.error ? await probeFlags(def.bin, env).catch(() => null) : null;
+    const supports = (flag) => (flags ? flags.has(flag) : true);
+    const args = def.args({ prompt, sessionId: run.sessionId, cwd: project.root, permission, supports });
     return new Promise((resolve) => {
-      let child;
-      try {
-        child = spawnImpl(def.bin, args, { cwd: project.root, env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
-      } catch {
-        child = null;
+      let child = null;
+      if (!resolved.error) {
+        try {
+          child = spawnImpl(resolved.command, [...resolved.prefixArgs, ...args], {
+            cwd: project.root,
+            env,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            detached: process.platform !== 'win32',
+            windowsHide: true,
+          });
+        } catch {
+          child = null;
+        }
       }
       if (!child) {
         permission?.dispose();
         run.status = 'error';
-        run.result = { ok: false, summary: `${def.label} n’a pas pu être lancé. Est-il installé ?`, files: [] };
+        const summary =
+          resolved.error === 'unsupported_shim'
+            ? `${def.label} est installé (${resolved.shim}), mais Lasco Desktop ne sait pas lancer ce script sous Windows. Réinstallez ${def.label} avec son installeur officiel, puis relancez.`
+            : `${def.label} n’a pas pu être lancé. Est-il installé ?`;
+        run.result = { ok: false, summary, files: [] };
         emit({ type: 'done', run: view(run) });
         return resolve({ ok: false, status: 'error', error: { code: 'spawn_failed', message: run.result.summary }, run: view(run) });
       }
@@ -326,7 +346,7 @@ function createHarnessRunner({
         else if (event.kind === 'login_required') run.loginRequired = event.text;
         else if (event.kind === 'step') {
           // Chemins affichés relatifs au projet.
-          event = { ...event, text: event.text.split(`${project.root}/`).join('') };
+          event = { ...event, text: event.text.split(`${project.root}/`).join('').split(`${project.root}\\`).join('') };
           run.steps.push({ at: now(), text: event.text });
           if (run.steps.length > MAX_STEPS) run.steps.shift();
           emit({ type: 'step', runId: run.runId, text: event.text });
@@ -369,6 +389,11 @@ function createHarnessRunner({
           summary = `${def.label} a été arrêté après ${Math.round(maxMs / 60000)} minutes.`;
         } else if (run.status === 'stopped') {
           summary = `${def.label} a été arrêté.`;
+        } else if (!ok && !summary && /unknown option|unrecognized option|unexpected argument/i.test(stderr)) {
+          // Version trop ancienne pour une option que Desktop passe : message utile plutôt que l'erreur brute.
+          const option = /(?:unknown|unrecognized) option '([^']+)'|unexpected argument '([^']+)'/i.exec(stderr);
+          const name = option ? option[1] || option[2] : null;
+          summary = `La version de ${def.label} installée sur cet ordinateur est trop ancienne${name ? ` (option ${name} inconnue)` : ''}. Mettez-la à jour${def.updateCommand ? ` dans un terminal avec \`${def.updateCommand}\`` : ''}, puis relancez la demande.`;
         } else if (!ok && !summary) {
           summary = clip(stderr.trim() || `${def.label} s’est arrêté avec le code ${code}.`, 2000);
           ok = false;
@@ -400,7 +425,10 @@ function createHarnessRunner({
     if (!run || run.status !== 'running' || !run.child) return { ok: true, stopped: false };
     run.status = reason === 'timeout' ? 'timeout' : 'stopped';
     try {
-      if (run.child.pid && process.platform !== 'win32') process.kill(-run.child.pid, 'SIGTERM');
+      if (run.child.pid && process.platform === 'win32') {
+        // Windows : pas de groupe de processus ; taskkill /T arrête aussi les commandes lancées par le harnais.
+        spawnImpl('taskkill', ['/pid', String(run.child.pid), '/T', '/F'], { windowsHide: true }).on?.('error', () => undefined);
+      } else if (run.child.pid) process.kill(-run.child.pid, 'SIGTERM');
       else run.child.kill('SIGTERM');
     } catch {
       try {
