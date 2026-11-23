@@ -8,9 +8,10 @@ const { ipcRenderer } = require('electron');
 const params = new URLSearchParams(globalThis.location ? globalThis.location.search : '');
 const STANDALONE = params.get('standalone') === '1';
 const AGENTS = params.get('agents') !== '0';
-const SECTIONS = ['general', 'computer', 'permissions', 'journal', 'updates'];
+const SECTIONS = ['general', 'drive', 'computer', 'permissions', 'journal', 'updates'];
 const TITLES = {
   general: 'Général',
+  drive: 'My Drive',
   computer: 'Cet ordinateur',
   permissions: 'Autorisations',
   journal: 'Journal',
@@ -187,6 +188,63 @@ const UPDATE_LABELS = {
   error: 'La recherche de mise à jour a échoué.',
 };
 
+/** Mêmes messages que le portail (lib/desktop-drive-sync/engine.ts). */
+const DRIVE_ERRORS = {
+  'desktop-unavailable': 'Synchronisation indisponible.',
+  'no-folder': 'Choisissez un dossier de destination.',
+  'permission-denied': 'Lasco n’a pas l’autorisation d’écrire dans ce dossier. Choisissez-en un autre ou autorisez l’accès dans les réglages du système.',
+  'folder-not-found': 'Le dossier est introuvable (déplacé, supprimé ou disque déconnecté).',
+  'folder-not-writable': 'Le dossier n’est pas accessible en écriture.',
+  'disk-full': 'Le disque est plein : libérez de l’espace pour poursuivre la synchronisation.',
+  'path-escape': 'Un chemin a été refusé car il sortait du dossier choisi.',
+  network: 'Connexion interrompue. La synchronisation reprendra automatiquement.',
+  unauthorized: 'Session expirée : reconnectez-vous à Lasco.',
+  'account-mismatch': 'Ce dossier est déjà synchronisé pour un autre compte. Choisissez un autre dossier pour ce compte.',
+  unknown: 'Erreur inattendue pendant la synchronisation.',
+};
+const DRIVE_NOTICES = {
+  'remote-missing': 'Des fichiers ne sont plus dans My Drive ; leurs copies sont conservées.',
+  'native-document-skipped': 'Les documents Lasco (texte, présentation, tableur) ne sont pas encore copiés.',
+  'conflict-kept': 'Un fichier existant a été gardé ; la version Lasco porte un autre nom.',
+  'path-rejected': 'Des noms de fichiers inutilisables sur cet ordinateur ont été ignorés.',
+};
+/** Erreur d'une action des réglages (choix du dossier), affichée jusqu'au prochain changement. */
+let driveActionError = null;
+
+function renderDrive(d) {
+  if (!d) return;
+  $('driveEnabled').checked = d.enabled;
+  $('driveFolder').textContent = d.rootPath || 'Aucun dossier choisi';
+  $('driveChooseFolder').textContent = d.rootPath ? 'Changer…' : 'Choisir…';
+  $('driveOpenFolder').hidden = !d.rootPath;
+  const run = d.lastRun;
+  let status = 'Désactivée.';
+  if (d.enabled && !d.bound) status = 'En attente : connectez-vous à Lasco dans cette fenêtre.';
+  else if (d.enabled && !run) status = 'Première synchronisation en cours…';
+  else if (d.enabled && run) {
+    const when = run.at ? new Date(run.at).toLocaleString() : '';
+    if (run.status === 'error') status = `Dernier essai ${when} : échec.`;
+    else if (run.status === 'syncing') status = 'Synchronisation en cours…';
+    else status = `À jour (${when})${run.downloaded ? ` · ${run.downloaded} fichier(s) copié(s)` : ''}.`;
+  }
+  if (d.enabled && d.ownerLabel) status += ` Compte : ${d.ownerLabel}.`;
+  $('driveStatus').textContent = status;
+  const kinds = d.enabled && run ? run.noticeKinds || [] : [];
+  const notices = kinds.map((k) => DRIVE_NOTICES[k]).filter(Boolean);
+  $('driveNotices').hidden = notices.length === 0;
+  $('driveNotices').textContent = notices.join(' ');
+  const code =
+    driveActionError || (d.enabled && d.rejected ? 'account-mismatch' : null) || (d.enabled && run && run.status === 'error' ? run.error : null);
+  $('driveError').hidden = !code;
+  $('driveError').textContent = code ? DRIVE_ERRORS[code] || DRIVE_ERRORS.unknown : '';
+}
+
+async function driveAction(channel, arg) {
+  const res = await ipcRenderer.invoke(channel, arg);
+  driveActionError = res && !res.ok && !res.cancelled ? res.error || 'unknown' : null;
+  render();
+}
+
 function renderUpdate(u) {
   $('version').textContent = u.currentVersion || '';
   let text = UPDATE_LABELS[u.status] || '';
@@ -223,6 +281,7 @@ async function render() {
   // Pas de redessin pendant l'enregistrement : le bouton « Tapez… » resterait sinon sans écouteur.
   if (!recording) renderShortcuts(g.shortcuts || []);
   renderUpdate(s.update);
+  renderDrive(s.driveSync);
 
   if (!s.hostOps) return;
   const h = s.hostOps;
@@ -299,6 +358,9 @@ window.addEventListener('DOMContentLoaded', () => {
   bindSwitch('keepInBackground', 'settings-modal-set-keep-in-background');
   bindSwitch('openAtLogin', 'settings-modal-set-open-at-login');
   $('openLoginItems').onclick = () => ipcRenderer.invoke('settings-modal-open-login-items');
+  $('driveEnabled').onchange = () => driveAction('settings-modal-drive-set-enabled', $('driveEnabled').checked);
+  $('driveChooseFolder').onclick = () => driveAction('settings-modal-drive-choose-folder');
+  $('driveOpenFolder').onclick = () => ipcRenderer.invoke('settings-modal-drive-open-folder');
   // La vue perd le focus pendant un enregistrement : on l'arrête (raccourcis globaux rétablis).
   window.addEventListener('blur', () => stopRecording());
   if (AGENTS) {

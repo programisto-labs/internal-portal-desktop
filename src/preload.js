@@ -203,6 +203,26 @@ const tabWindowsBridge = {
   closeWindow: () => ipcRenderer.invoke('tab-window-close'),
 };
 
+/**
+ * Synchronisation My Drive → dossier de cet ordinateur (docs/drive-sync.md). Le dossier se choisit
+ * dans les Réglages de Desktop ; la page ne lit et n'écrit que dans ce dossier, une fois lié à son
+ * compte. Même règle d'exposition que hostOps, sans dépendre des agents.
+ */
+const exposePortalBridges = Boolean(portalOrigin) && Boolean(globalThis.location) && globalThis.location.origin === portalOrigin;
+const driveSyncBridge = {
+  getConfig: () => ipcRenderer.invoke('drive-sync-get-config'),
+  onConfigChange: (callback) => subscribe('drive-sync-config-changed', callback),
+  bind: (payload) => ipcRenderer.invoke('drive-sync-bind', payload),
+  report: (payload) => ipcRenderer.invoke('drive-sync-report', payload),
+  openSettings: () => ipcRenderer.invoke('drive-sync-open-settings'),
+  chooseFolder: () => ipcRenderer.invoke('drive-sync-choose-folder'),
+  validateFolder: (payload) => ipcRenderer.invoke('drive-sync-validate-folder', payload),
+  readManifest: (payload) => ipcRenderer.invoke('drive-sync-read-manifest', payload),
+  writeManifest: (payload) => ipcRenderer.invoke('drive-sync-write-manifest', payload),
+  stat: (payload) => ipcRenderer.invoke('drive-sync-stat', payload),
+  writeFile: (payload) => ipcRenderer.invoke('drive-sync-write-file', payload),
+};
+
 const desktopBridge = {
   platform: process.platform,
   version: appVersion,
@@ -245,6 +265,7 @@ const desktopBridge = {
     onCommand: (callback) => subscribe('tray-command', callback),
   },
   ...(noAgents && { noAgents: true }),
+  ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
