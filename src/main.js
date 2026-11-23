@@ -695,11 +695,29 @@ async function checkForUpdates() {
   try {
     await autoUpdater.checkForUpdates();
   } catch (error) {
-    setUpdateState({
-      status: 'error',
-      error: error?.message || 'Update check failed.'
-    });
+    reportUpdaterError(error, 'Update check failed.');
   }
+}
+
+/**
+ * A release whose files for this platform are not published (yet) is not a failed update:
+ * the jobs of a release finish one after the other, and a failed job publishes only part of it.
+ * Stay on the current version without telling the user anything went wrong.
+ */
+function isUpdateNotPublishedError(error) {
+  return error?.code === 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND';
+}
+
+function reportUpdaterError(error, fallbackMessage) {
+  if (isUpdateNotPublishedError(error)) {
+    console.warn('[auto-update] release not published for this platform yet:', error?.message);
+    setUpdateState({ status: 'idle', error: null });
+    return;
+  }
+  setUpdateState({
+    status: 'error',
+    error: error?.message || fallbackMessage
+  });
 }
 
 function setupAutoUpdater() {
@@ -764,10 +782,7 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on('error', (error) => {
-    setUpdateState({
-      status: 'error',
-      error: error?.message || 'Auto-update failed.'
-    });
+    reportUpdaterError(error, 'Auto-update failed.');
   });
 
   void checkForUpdates();
