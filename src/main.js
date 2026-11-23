@@ -17,6 +17,8 @@ const {
   createAdoptQueue,
   resolveTabDropTarget,
   followPosition,
+  isPortalPath,
+  isSpareWindowUsable,
 } = require('./tab-windows');
 const { APP_MENU_COMMANDS, normalizeAppMenuState, buildApplicationMenuTemplate } = require('./app-menu');
 const {
@@ -948,7 +950,7 @@ function destroyAllBrowserViews() {
 /** Portal windows, focused first (used to find the window under a dropped tab). */
 function portalWindowsFrontToBack() {
   const focused = BrowserWindow.getFocusedWindow();
-  const list = [...portalWindows.values()].filter((e) => !e.win.isDestroyed());
+  const list = [...portalWindows.values()].filter((e) => !e.win.isDestroyed() && !e.spare);
   list.sort((a, b) => (a.win === focused ? -1 : b.win === focused ? 1 : 0));
   return list;
 }
@@ -963,7 +965,71 @@ function openDetachedTabWindow(tab, { point, sourceWindow } = {}) {
     size = { width, height };
   }
   const bounds = buildDetachedWindowBounds({ point, size, workArea });
-  return createWindow({ role: 'detached', initialTab: tab, bounds });
+  return takeSpareTabWindow(tab, { bounds }) || createWindow({ role: 'detached', initialTab: tab, bounds });
+}
+
+/**
+ * Spare detached window: a hidden portal window already loaded on the new-tab page, so
+ * detaching a tab only loads the tab itself, not the whole shell (docs/tab-windows.md).
+ * Loaded when the page signals the intent (tab menu, tab drag), then kept once used.
+ * @type {{ win: BrowserWindow, href: string } | null}
+ */
+let spareTabWindow = null;
+let spareReplenishTimer = null;
+const SPARE_REPLENISH_DELAY_MS = 3000;
+
+function discardSpareTabWindow() {
+  const spare = spareTabWindow;
+  spareTabWindow = null;
+  if (spare && !spare.win.isDestroyed()) spare.win.destroy();
+}
+
+function prewarmSpareTabWindow(href) {
+  if (!isPortalPath(href) || !mainPortalWindow()) return false;
+  if (spareTabWindow && !spareTabWindow.win.isDestroyed()) {
+    if (spareTabWindow.href === href) return true;
+    discardSpareTabWindow();
+  }
+  const win = createWindow({ role: 'detached', hidden: true, spareHref: href });
+  spareTabWindow = { win, href };
+  return true;
+}
+
+function scheduleSpareReplenish(href) {
+  clearTimeout(spareReplenishTimer);
+  spareReplenishTimer = setTimeout(() => {
+    spareReplenishTimer = null;
+    if (!spareTabWindow) prewarmSpareTabWindow(href);
+  }, SPARE_REPLENISH_DELAY_MS);
+}
+
+/**
+ * Take the spare window for a detached tab: placed at `bounds`, shown (without focus when
+ * `inactive`, for a tab being dragged), tab delivered. Null when there is no usable spare.
+ */
+function takeSpareTabWindow(tab, { bounds, inactive = false }) {
+  const spare = spareTabWindow;
+  spareTabWindow = null;
+  if (!spare || spare.win.isDestroyed()) return null;
+  const { win, href } = spare;
+  if (!isSpareWindowUsable({ url: win.webContents.getURL(), href, origin: PORTAL_ORIGIN })) {
+    win.destroy();
+    return null;
+  }
+  const entry = portalWindows.get(win.id);
+  if (entry) entry.spare = false;
+  if (bounds) win.setBounds(bounds);
+  // The page replaces its untouched « Nouvel onglet » with the delivered tab.
+  tabAdoptQueue.deliver(win.id, { ...tab, replaceBlank: true });
+  if (inactive) {
+    win.showInactive();
+  } else {
+    win.show();
+    win.focus();
+    if (process.platform === 'darwin') win.moveTop();
+  }
+  scheduleSpareReplenish(href);
+  return win;
 }
 
 /** Hand a tab to a portal window: it adopts it as soon as its page is ready. */
@@ -1031,7 +1097,14 @@ function registerLascoProtocolClient() {
  * A portal window. `main` is the usual Lasco window; `detached` holds tabs moved out of
  * another window and opens on `initialTab` (docs/tab-windows.md).
  */
-function createWindow({ role = 'main', initialTab = null, bounds = null, inactive = false, hidden = false } = {}) {
+function createWindow({
+  role = 'main',
+  initialTab = null,
+  bounds = null,
+  inactive = false,
+  hidden = false,
+  spareHref = null,
+} = {}) {
   let iconPath;
   try {
     iconPath = getIconPath();
@@ -1128,7 +1201,8 @@ function createWindow({ role = 'main', initialTab = null, bounds = null, inactiv
   }
 
   const winId = win.id;
-  portalWindows.set(winId, { win, role, tabManager: null });
+  // `spare`: hidden, pre-loaded detached window (never a drop target nor the next main window).
+  portalWindows.set(winId, { win, role, tabManager: null, spare: Boolean(spareHref) });
   if (role === 'main') mainWindowRef = win;
   // A full page load (login, reload): moved tabs wait until the new page asks for them.
   win.webContents.on('did-navigate', () => tabAdoptQueue.reset(winId));
@@ -1172,11 +1246,14 @@ function createWindow({ role = 'main', initialTab = null, bounds = null, inactiv
     if (entry && entry.tabManager) entry.tabManager.destroyAll();
     portalWindows.delete(winId);
     tabAdoptQueue.forget(winId);
+    if (spareTabWindow && spareTabWindow.win === win) spareTabWindow = null;
     if (mainWindowRef === win) {
       // The oldest detached window becomes the main one (bridges, badge, links).
-      const next = [...portalWindows.values()].find((e) => !e.win.isDestroyed());
+      const next = [...portalWindows.values()].find((e) => !e.win.isDestroyed() && !e.spare);
       if (next) next.role = 'main';
       mainWindowRef = next ? next.win : null;
+      // No portal window left on screen: the spare must not keep the app alive.
+      if (!next) discardSpareTabWindow();
     }
   });
 
@@ -1184,6 +1261,12 @@ function createWindow({ role = 'main', initialTab = null, bounds = null, inactiv
     if (!isMainFrame || win.isDestroyed()) return;
     // Don't show error page for aborted navigations (e.g. user navigated away)
     if (errorCode === -3) return;
+    // A spare that failed to load is useless: the next detach opens a fresh window.
+    if (portalWindows.get(winId)?.spare) {
+      if (spareTabWindow && spareTabWindow.win === win) spareTabWindow = null;
+      win.destroy();
+      return;
+    }
     win.loadFile(errorPagePath, {
       query: {
         code: String(errorCode),
@@ -1223,7 +1306,9 @@ function createWindow({ role = 'main', initialTab = null, bounds = null, inactiv
     }
   });
 
-  if (role === 'detached' && initialTab) {
+  if (spareHref) {
+    loadMainPortalUrl(win, PORTAL_ORIGIN + spareHref);
+  } else if (role === 'detached' && initialTab) {
     loadMainPortalUrl(win, PORTAL_ORIGIN + initialTab.locationHref);
   } else {
     const initialUrl = pendingInitialPortalFullUrl || PORTAL_URL;
@@ -1759,6 +1844,14 @@ function registerWindowIPC() {
     if (!entry) return { ok: false, tabs: [] };
     return { ok: true, role: entry.role, tabs: tabAdoptQueue.ready(entry.win.id) };
   });
+  // The page is about to detach a tab (tab menu opened, tab drag started): load the spare window.
+  ipcMain.handle('tab-window-prewarm', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    const href = payload && typeof payload === 'object' ? payload.href : null;
+    if (!isPortalPath(href)) return { ok: false, error: 'invalid-href' };
+    return { ok: prewarmSpareTabWindow(href) };
+  });
   ipcMain.handle('tab-window-detach', (event, payload) => {
     const entry = tabWindowSender(event);
     if (!entry) return { ok: false, error: 'forbidden' };
@@ -1874,12 +1967,10 @@ function registerWindowIPC() {
     }
     const [width, height] = entry.win.getSize();
     const pos = followPosition(point, DETACHED_TAB_GRAB);
-    const floating = createWindow({
-      role: 'detached',
-      initialTab: tab,
-      bounds: { width, height, x: pos.x, y: pos.y },
-      inactive: true,
-    });
+    const floatingBounds = { width, height, x: pos.x, y: pos.y };
+    const floating =
+      takeSpareTabWindow(tab, { bounds: floatingBounds, inactive: true }) ||
+      createWindow({ role: 'detached', initialTab: tab, bounds: floatingBounds, inactive: true });
     tabDrag = { sourceId: entry.win.id, tab, floating, mode: 'window', ...startFollowing(floating, DETACHED_TAB_GRAB) };
     return { ok: true, mode: 'window' };
   });

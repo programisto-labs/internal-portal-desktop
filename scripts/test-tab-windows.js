@@ -12,6 +12,7 @@ const {
   isPortalPath,
   resolveTabDropTarget,
   followPosition,
+  isSpareWindowUsable,
 } = require('../src/tab-windows');
 const { sanitizeBrowserUrl } = require('../src/browser-tabs/url');
 const { resolveWindowMenuActions, buildTabMenuTemplate } = require('../src/browser-tabs/tab-menu');
@@ -172,5 +173,20 @@ describe('live drag out', () => {
   });
   it('keeps the grabbed point under the cursor', () => {
     assert.deepEqual(followPosition({ x: 500, y: 300 }, { x: 150, y: 22 }), { x: 350, y: 278 });
+  });
+});
+
+describe('spare window', () => {
+  const origin = 'https://app.lascoapp.com';
+  it('is usable while it still sits on its new-tab page', () => {
+    assert.equal(isSpareWindowUsable({ url: `${origin}/clad/new-tab`, href: '/clad/new-tab', origin }), true);
+    assert.equal(isSpareWindowUsable({ url: `${origin}/clad/new-tab?x=1#a`, href: '/clad/new-tab', origin }), true);
+  });
+  it('is dropped once it left that page (login, error page, other workspace)', () => {
+    assert.equal(isSpareWindowUsable({ url: `${origin}/login`, href: '/clad/new-tab', origin }), false);
+    assert.equal(isSpareWindowUsable({ url: 'file:///app/error.html', href: '/clad/new-tab', origin }), false);
+    assert.equal(isSpareWindowUsable({ url: `${origin}/other/new-tab`, href: '/clad/new-tab', origin }), false);
+    assert.equal(isSpareWindowUsable({ url: '', href: '/clad/new-tab', origin }), false);
+    assert.equal(isSpareWindowUsable({ url: `${origin}/clad/new-tab`, href: '//evil/new-tab', origin }), false);
   });
 });
