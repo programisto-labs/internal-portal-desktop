@@ -47,6 +47,9 @@ const { createTerminalManager } = require('./code-workspace/terminals');
 const { createWatcherManager } = require('./code-workspace/watcher');
 const { createCodeWorkspaceService } = require('./code-workspace/service');
 const { createCodeAgentOps } = require('./code-workspace/agent-ops');
+const { createDriveSyncStore } = require('./drive-sync/store');
+const { createDriveSyncFsOps } = require('./drive-sync/fs-ops');
+const { registerDriveSyncIpc, driveSyncSettingsState } = require('./drive-sync/ipc');
 const { createTrayController } = require('./tray/tray');
 const { normalizePortalTrayState, TRAY_PORTAL_COMMANDS } = require('./tray/tray-state');
 const { SHORTCUT_IDS, DEFAULT_SHORTCUTS, formatAccelerator, updateShortcut, acceleratorFromKeyEvent } = require('./background-mode');
@@ -170,6 +173,14 @@ function getSettingsStore() {
     settingsStore = createSettingsStore(path.join(app.getPath('userData'), 'settings.json'));
   }
   return settingsStore;
+}
+
+/** My Drive → dossier de cet ordinateur (Réglages > My Drive, docs/drive-sync.md). Désactivé par défaut. */
+let driveSyncStore = null;
+
+function getDriveSyncStore() {
+  if (!driveSyncStore) driveSyncStore = createDriveSyncStore(path.join(app.getPath('userData'), 'drive-sync.json'));
+  return driveSyncStore;
 }
 
 /** Host operations (agent file ops on this computer). Disabled until enabled in Desktop options. */
@@ -1687,8 +1698,8 @@ function registerWindowIPC() {
   });
 
   // --- Host operations: bridge for the web app (strictly validated natively) ---
-  const trustedHostOpsSender = (event) => {
-    if (NO_AGENTS) return false;
+  /** Cadre principal de la fenêtre principale, chargé depuis l'origine exacte du portail. */
+  const trustedPortalSender = (event) => {
     const frame = event.senderFrame;
     return isTrustedHostOpsSender({
       isMainWindow: assertFromMainWindow(event),
@@ -1697,6 +1708,39 @@ function registerWindowIPC() {
       allowedOrigins: [PORTAL_ORIGIN],
     });
   };
+  const trustedHostOpsSender = (event) => !NO_AGENTS && trustedPortalSender(event);
+
+  // --- My Drive → dossier de cet ordinateur (indépendant des agents) ---
+  registerDriveSyncIpc({
+    ipcMain,
+    store: getDriveSyncStore(),
+    fsOps: createDriveSyncFsOps({
+      manifestDir: path.join(app.getPath('userData'), 'drive-sync'),
+      // Stockage local en http en développement seulement.
+      allowHttp: new URL(PORTAL_ORIGIN).protocol === 'http:',
+    }),
+    isTrustedPortalSender: trustedPortalSender,
+    isFromSettings: (event) => fromSettings(event),
+    pickFolder: async (current) => {
+      const win = settingsSurface && settingsSurface.window ? settingsSurface.window : mainPortalWindow();
+      const options = {
+        title: 'Dossier de synchronisation My Drive',
+        buttonLabel: 'Choisir',
+        defaultPath: current || app.getPath('documents'),
+        properties: ['openDirectory', 'createDirectory', 'promptToCreate'],
+      };
+      const res = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+      return res.canceled || !res.filePaths || !res.filePaths[0] ? null : res.filePaths[0];
+    },
+    openFolder: (folder) => void shell.openPath(folder),
+    openSettings: () => openSettings('drive'),
+    refreshSettings: () => refreshSettings(),
+    notifyPortal: (config) => {
+      const win = mainPortalWindow();
+      if (win && !win.webContents.isDestroyed()) win.webContents.send('drive-sync-config-changed', config);
+      refreshSettings();
+    },
+  });
   const forbidden = { ok: false, status: 'error', error: { code: 'forbidden', message: 'Origine non autorisée.' } };
   ipcMain.handle('host-ops-capabilities', (event) => {
     if (!trustedHostOpsSender(event)) return { available: false, enabled: false, operations: [] };
@@ -2065,6 +2109,7 @@ function registerWindowIPC() {
         shortcuts: shortcutsSnapshot(),
       },
       update: buildUpdateSnapshot(),
+      driveSync: driveSyncSettingsState(getDriveSyncStore()),
       hostOps,
     };
   });
