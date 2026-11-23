@@ -8,7 +8,8 @@
  *   l'URL qu'il affiche, au cas où le navigateur ne s'ouvre pas). Les jetons restent dans le CLI.
  */
 
-const { execFile, spawn: spawnDefault } = require('child_process');
+const { spawn: spawnDefault } = require('child_process');
+const { execHarness, resolveHarnessCommand } = require('./command');
 
 const AUTH = {
   'claude-code': {
@@ -66,7 +67,7 @@ function supportsLogin(harness) {
 }
 
 /** État de connexion : `ok`, `logged_out`, `no_plan`, `config_error`, `unknown` (statut indisponible). */
-function checkAuth(harness, { env, execFileImpl = execFile } = {}) {
+function checkAuth(harness, { env, execFileImpl = execHarness } = {}) {
   const def = AUTH[harness];
   if (!def) return Promise.resolve({ state: 'unknown' });
   const [bin, args] = def.status;
@@ -92,7 +93,9 @@ function startLogin(harness, { env, onUpdate, spawnImpl = spawnDefault, timeoutM
   const [bin, args] = def.login;
   let child;
   try {
-    child = spawnImpl(bin, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const resolved = resolveHarnessCommand(bin, { env });
+    if (resolved.error) throw new Error(resolved.error);
+    child = spawnImpl(resolved.command, [...resolved.prefixArgs, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   } catch {
     onUpdate({ state: 'error', message: `${bin} n’a pas pu être lancé.` });
     return () => undefined;

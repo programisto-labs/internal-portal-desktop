@@ -14,6 +14,7 @@ const HARNESSES = {
     label: 'Claude Code',
     bin: 'claude',
     loginCommand: 'claude /login',
+    updateCommand: 'claude update',
     // Modifications de fichiers acceptées ; chaque autre outil (commande npm, npx, git…) passe par le relais
     // d'autorisation de Desktop (`permissions.js`) et s'affiche en carte dans le chat. Sans relais, refusé.
     effect:
@@ -38,6 +39,7 @@ const HARNESSES = {
     label: 'Codex',
     bin: 'codex',
     loginCommand: 'codex login',
+    updateCommand: 'npm install -g @openai/codex@latest',
     // Bac à sable de Codex : écriture limitée au projet, sans réseau.
     effect: 'modifie les fichiers et lance des commandes dans le bac à sable de Codex (écriture limitée au projet, sans réseau).',
     // Pas de reprise de session en mode exec avec cette version : chaque demande repart du projet.
@@ -51,8 +53,20 @@ const HARNESSES = {
     bin: 'cursor-agent',
     loginCommand: 'cursor-agent login',
     effect: 'modifie les fichiers et lance des commandes avec vos droits, sans confirmer chaque action.',
-    args({ prompt, sessionId }) {
-      return ['-p', prompt, '--output-format', 'stream-json', '--force', '--trust', ...(sessionId ? ['--resume', sessionId] : [])];
+    updateCommand: 'cursor-agent update',
+    // `--trust` (sans lui, un projet jamais ouvert attend une confirmation) n'existe que dans les versions
+    // récentes : une version plus ancienne refuse l'option et ne démarre pas. On ne passe que ce qu'elle connaît.
+    probeHelp: true,
+    args({ prompt, sessionId, supports = () => true }) {
+      return [
+        '-p',
+        prompt,
+        '--output-format',
+        'stream-json',
+        ...(supports('--force') ? ['--force'] : []),
+        ...(supports('--trust') ? ['--trust'] : []),
+        ...(sessionId ? ['--resume', sessionId] : []),
+      ];
     },
   },
   vibe: {
