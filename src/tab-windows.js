@@ -190,8 +190,24 @@ function createAdoptQueue({ send }) {
   };
 }
 
+/**
+ * Spare detached window (pre-loaded, hidden): usable only while its page still sits on the
+ * portal path it was opened on (not on the login page, an error page or another workspace).
+ */
+function isSpareWindowUsable({ url, href, origin }) {
+  if (!isPortalPath(href) || typeof url !== 'string') return false;
+  try {
+    const current = new URL(url);
+    const expected = new URL(href, origin);
+    return current.origin === expected.origin && current.pathname === expected.pathname;
+  } catch (_) {
+    return false;
+  }
+}
+
 module.exports = {
   TAB_WINDOW_ARG_PREFIX,
+  isSpareWindowUsable,
   isPortalPath,
   sanitizeTabDescriptor,
   encodeTabWindowArg,

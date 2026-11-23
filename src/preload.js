@@ -201,6 +201,8 @@ const tabWindowsBridge = {
   dragEnd: (payload) => ipcRenderer.invoke('tab-window-drag-end', payload),
   onDragHover: (callback) => subscribe('tab-window-drag-hover', callback),
   closeWindow: () => ipcRenderer.invoke('tab-window-close'),
+  /** Load the spare window ahead of a detach (`{ href }`: the portal's new-tab path). */
+  prewarm: (payload) => ipcRenderer.invoke('tab-window-prewarm', payload),
 };
 
 const desktopBridge = {

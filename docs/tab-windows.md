@@ -28,6 +28,7 @@ Appels acceptés seulement depuis le cadre principal d'une fenêtre du portail, 
 | `dragEnd({ screenX, screenY })` | Lâcher. `action` : `attached` (autre fenêtre sous le point), `detached` (la nouvelle fenêtre reste), `cancelled` (lâché sur la fenêtre d'origine), `moved` (seul onglet). La page retire l'onglet pour `attached` et `detached`. |
 | `onDragHover(cb)` | Un onglet glissé depuis une autre fenêtre survole celle-ci : `{ tab: { id, kind, title, favicon }, screenX, screenY }`, puis `null` quand il la quitte. La page montre l'onglet dans sa barre à cet endroit (aperçu en direct) ; la fenêtre qui suivait le curseur devient transparente. Au lâcher, `onAdopt` reçoit `dropScreenX` : l'onglet est inséré là. |
 | `closeWindow()` | Fenêtre détachée sans onglet : Desktop la ferme. |
+| `prewarm({ href })` | Intention de détacher (menu de l'onglet ouvert, onglet saisi avec au moins deux onglets) : Desktop précharge la fenêtre de réserve sur `href` (chemin du nouvel onglet). Refusé depuis la réserve elle-même. |
 
 Descripteur `tab` (`sanitizeTabDescriptor`, `src/tab-windows.js`) : `id`, `kind` (`internal` | `external`), `href` (chemin du portail, ou URL http(s) d'un onglet web), `locationHref` (chemin chargé par la fenêtre : `href` pour une page du portail, `…/new-tab` pour un onglet web), `title`, `favicon` (http(s)), `blank`.
 
@@ -38,3 +39,13 @@ Un onglet web déplacé se recharge sur son URL dans la nouvelle fenêtre (la vu
 Une fenêtre détachée s'ouvre sans barre latérale ni colonne Lasco AI (boutons pour les rouvrir) ; cet état reste propre à la fenêtre.
 
 Côté portail : les onglets d'une fenêtre détachée sont gardés dans le `sessionStorage` de la fenêtre (rechargement compris), jamais dans la liste partagée de la fenêtre principale.
+
+## Fenêtre de réserve (détachement instantané)
+
+Sans réserve, une fenêtre détachée démarre à froid : nouveau processus, coquille du portail chargée en entier, puis l'onglet. Avec la réserve, seul l'onglet se charge.
+
+- **Préchargement à l'intention** : la page appelle `prewarm({ href })` à l'ouverture du menu d'un onglet ou au début du glisser d'un onglet. Desktop crée une fenêtre `detached` **cachée** sur `href` (le nouvel onglet du workspace). Une seule réserve ; un autre `href` la remplace.
+- **Détacher** (menu ou glisser) : Desktop prend la réserve, la place, l'affiche (sans focus pendant un glisser) et lui remet l'onglet par `onAdopt` avec `replaceBlank: true` : la page remplace son « Nouvel onglet » vierge par l'onglet. Sans réserve utilisable, une fenêtre neuve comme avant.
+- **Réserve utilisable** (`isSpareWindowUsable`) : sa page est toujours sur `href` (ni connexion, ni page d'erreur, ni autre workspace). Un échec de chargement la détruit.
+- **Après usage**, une nouvelle réserve est préparée 3 s plus tard (la personne détache souvent plusieurs onglets à la suite). Jamais avant un premier geste : pas de processus caché chez qui ne détache rien.
+- La réserve n'est ni cible de dépôt, ni candidate pour devenir la fenêtre principale ; elle est détruite quand la dernière fenêtre du portail se ferme.
