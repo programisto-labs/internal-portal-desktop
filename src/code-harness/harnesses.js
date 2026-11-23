@@ -81,7 +81,8 @@ const HARNESSES = {
   },
 };
 
-const LOGIN_RE = /not logged in|please run \/login|\blogin required\b|authenticat(e|ion) (required|failed)|no api key|api key (is )?(missing|not set)|unauthorized|401\b/i;
+const LOGIN_RE =
+  /not logged in|please run \/login|\blogin required\b|authenticat(e|ion) (required|failed)|no api key|invalid api key|api key (is )?(missing|not set|invalid)|missing [a-z_]*api_key\b|unauthorized|401\b/i;
 
 function clip(text, max = 400) {
   const value = String(text ?? '').replace(/\s+/g, ' ').trim();
@@ -198,4 +199,16 @@ function parseHarnessLine(harness, line) {
   return out;
 }
 
-module.exports = { HARNESSES, parseHarnessLine, LOGIN_RE };
+/**
+ * Pur : message « non connecté » lu dans la sortie d'erreur d'un harnais arrêté sans ligne JSON
+ * (Mistral Vibe : « Invalid API key », « Missing MISTRAL_API_KEY » ; Cursor : « Authentication required »).
+ */
+function loginMessageFromStderr(stderr) {
+  const lines = String(stderr ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && line.length < 300 && LOGIN_RE.test(line));
+  return lines.length ? clip(lines[lines.length - 1], 300) : null;
+}
+
+module.exports = { HARNESSES, parseHarnessLine, loginMessageFromStderr, LOGIN_RE };
