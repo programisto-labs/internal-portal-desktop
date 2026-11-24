@@ -7,6 +7,20 @@ const OP_LABELS = {
   'folder.create': 'Créer un dossier',
 };
 
+/**
+ * Mise en page de la carte du chat pour une commande : informations en tête, commande dans un bloc
+ * façon terminal, notes courtes, puis les boutons. La boîte de dialogue native garde `message`.
+ */
+function commandCard({ meta, command, notes }) {
+  return {
+    meta: meta
+      .filter(([, value]) => typeof value === 'string' && value)
+      .map(([label, value]) => ({ label, value: value.slice(0, 400) })),
+    command: String(command || '').slice(0, 20000),
+    notes: notes.filter((n) => typeof n === 'string' && n).map((n) => n.slice(0, 600)),
+  };
+}
+
 function buildShellConfirmDialog(req) {
   const lines = [
     `Agent : ${req.agentName}`,
@@ -23,7 +37,7 @@ function buildShellConfirmDialog(req) {
   const decisions = ['deny', 'once'];
   const prefix = (req.scope && req.scope.commandPrefix) || [];
   if (req.allowPersistent && prefix.length) {
-    buttons.push(`Toujours autoriser « ${prefix.join(' ')} » dans ce dossier`);
+    buttons.push(`Toujours autoriser « ${prefix.join(' ')} »`);
     decisions.push('always');
     lines.push(
       '',
@@ -32,7 +46,22 @@ function buildShellConfirmDialog(req) {
   } else if (req.notRememberableReason) {
     lines.push('', req.notRememberableReason);
   }
-  return { title: 'Un agent demande à exécuter une commande', message: lines.join('\n'), buttons, decisions };
+  return {
+    title: 'Un agent demande à exécuter une commande',
+    message: lines.join('\n'),
+    buttons,
+    decisions,
+    card: commandCard({
+      meta: [['Agent', req.agentName], ['Dossier', req.cwd]],
+      command: req.command,
+      notes: [
+        `Sur cet ordinateur, avec vos droits, ${Math.round((req.timeoutMs || 120000) / 1000)} s au plus. Elle peut modifier ou supprimer des fichiers et utiliser le réseau.`,
+        req.allowPersistent && prefix.length
+          ? `« Toujours autoriser » : commandes commençant par « ${prefix.join(' ')} », dans ce dossier et ses sous-dossiers, pour cet agent et cet appareil. Révocable dans Réglages > Cet ordinateur.`
+          : req.notRememberableReason,
+      ],
+    }),
+  };
 }
 
 /** Lasco Code: an agent writes or edits a file of a local project. */
@@ -104,7 +133,7 @@ function buildHarnessCommandConfirmDialog(req) {
   const decisions = ['deny', 'once'];
   const prefix = (req.scope && req.scope.commandPrefix) || [];
   if (req.allowPersistent && prefix.length) {
-    buttons.push(`Toujours autoriser « ${prefix.join(' ')} » dans ce projet`);
+    buttons.push(`Toujours autoriser « ${prefix.join(' ')} »`);
     decisions.push('always');
     lines.push(
       '',
@@ -113,7 +142,23 @@ function buildHarnessCommandConfirmDialog(req) {
   } else if (req.notRememberableReason) {
     lines.push('', req.notRememberableReason);
   }
-  return { title: `${req.harnessLabel} demande à exécuter une commande`, message: lines.join('\n'), buttons, decisions };
+  return {
+    title: `${req.harnessLabel} demande à exécuter une commande`,
+    message: lines.join('\n'),
+    buttons,
+    decisions,
+    card: commandCard({
+      meta: [['Agent', req.agentName], ['Harnais', req.harnessLabel], ['Projet', req.projectRoot]],
+      command: req.command,
+      notes: [
+        req.description ? `But : ${req.description}` : null,
+        `Sur cet ordinateur, dans le projet, avec vos droits. Si vous refusez, ${req.harnessLabel} continue sans elle.`,
+        req.allowPersistent && prefix.length
+          ? `« Toujours autoriser » : commandes commençant par « ${prefix.join(' ')} », dans ce projet, pour cet agent et ses harnais sur cet appareil. Révocable dans Réglages > Cet ordinateur.`
+          : req.notRememberableReason,
+      ],
+    }),
+  };
 }
 
 /** Harnais en cours : un outil autre qu'une commande (accès web, serveur MCP…), autorisé une fois. */
@@ -192,4 +237,4 @@ function createConfirm(showMessageBox, getParent) {
   };
 }
 
-module.exports = { buildConfirmDialog, createConfirm };
+module.exports = { buildConfirmDialog, createConfirm, commandCard };
