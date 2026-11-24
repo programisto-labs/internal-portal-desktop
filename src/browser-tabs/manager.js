@@ -1,8 +1,33 @@
 'use strict';
 
-const { app, WebContentsView, session, clipboard, ClipboardItem, shell, dialog, Menu, nativeTheme } = require('electron');
+const {
+  app,
+  BrowserWindow,
+  WebContentsView,
+  session,
+  clipboard,
+  ClipboardItem,
+  shell,
+  dialog,
+  Menu,
+  nativeTheme,
+} = require('electron');
 const { sanitizeBrowserUrl } = require('./url');
-const { installBrowserTabMediaPermissions } = require('../media-permissions');
+const {
+  createSitePermissionStore,
+  installSitePermissions,
+  describeSitePermissions,
+  permissionPolicy,
+  siteOrigin,
+  siteHost,
+} = require('./site-permissions');
+const {
+  ERROR_PAGE,
+  classifyLoadFailure,
+  isTabCrash,
+  securityStateOf,
+  errorPageQuery,
+} = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
 const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
@@ -187,6 +212,38 @@ function sharedExternalAppPermissions() {
   return externalAppPermissionStore;
 }
 
+/** Autorisations des sites (docs/site-permissions.md), partagées par toutes les fenêtres (un fichier). */
+let sitePermissionStore = null;
+function sharedSitePermissions() {
+  if (!sitePermissionStore) {
+    sitePermissionStore = createSitePermissionStore({
+      filePath: path.join(app.getPath('userData'), 'browser-site-permissions.json'),
+    });
+  }
+  return sitePermissionStore;
+}
+
+/** webContents id d'un onglet web → fenêtre qui l'affiche (pour poser la question dans la bonne fenêtre). */
+const tabWindowGetters = new Map();
+
+async function askSitePermission({ origin, label, webContents }) {
+  const getWindow = webContents ? tabWindowGetters.get(webContents.id) : null;
+  const candidate = (getWindow && getWindow()) || BrowserWindow.getFocusedWindow();
+  const win = candidate && !candidate.isDestroyed() ? candidate : null;
+  const options = {
+    type: 'question',
+    message: `${siteHost(origin)} souhaite ${label}`,
+    detail:
+      "Votre choix est retenu pour ce site. Vous pourrez le modifier depuis l'icône à gauche de l'adresse.",
+    buttons: ['Autoriser', 'Bloquer', 'Ignorer'],
+    defaultId: 2,
+    cancelId: 2,
+    noLink: true,
+  };
+  const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+  return ['allow', 'block', 'dismiss'][response] || 'dismiss';
+}
+
 function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
   const historyStore =
     history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
@@ -199,8 +256,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     getParentWindow: () => getMainWindow(),
     permissions: externalAppPermissions,
   });
+  const sitePermissions = sharedSitePermissions();
   const userAgent = buildChromiumUserAgent();
   let sessionConfigured = false;
+  /** Plein écran demandé par une page (vidéo) : la fenêtre était-elle déjà en plein écran ? */
+  let fullscreenWindowState = null;
+  let windowListenersFor = null;
 
   /** @type {Map<string, { view: import('electron').WebContentsView, url: string }>} */
   const tabs = new Map();
@@ -329,8 +390,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       browserSession.setUserAgent(userAgent, buildAcceptLanguages(app.getPreferredSystemLanguages()));
       // Electron sends no Sec-CH-UA headers: Google sign-in then refuses the browser.
       installClientHintHeaders(browserSession);
-      // Pages web externes : jamais le micro ni la caméra de l'app.
-      installBrowserTabMediaPermissions(browserSession);
+      // Autorisations des sites : demandées puis retenues par site, jamais le micro ni la caméra.
+      installSitePermissions(browserSession, { store: sitePermissions, ask: askSitePermission });
     }
     return browserSession;
   }
@@ -346,17 +407,22 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     if (!entry) return null;
     const wc = entry.view.webContents;
     if (wc.isDestroyed()) return null;
-    const url = sanitizeBrowserUrl(wc.getURL()) || entry.url || '';
+    const url = (entry.errorPage ? entry.url : sanitizeBrowserUrl(wc.getURL()) || entry.url) || '';
     const history = wc.navigationHistory;
     return {
       tabId,
       url,
-      title: wc.getTitle() || entry.title || url || 'Nouvel onglet',
+      title: (entry.errorPage && entry.errorPage.title) || wc.getTitle() || entry.title || url || 'Nouvel onglet',
       favicon: entry.favicon || null,
       canGoBack: history ? history.canGoBack() : wc.canGoBack(),
       canGoForward: history ? history.canGoForward() : wc.canGoForward(),
       isLoading: wc.isLoading(),
       zoomFactor: wc.getZoomFactor(),
+      // Cadenas de la barre d'adresse : secure | insecure | dangerous | local | null.
+      security: securityStateOf(url, entry.errorPage),
+      // Page affichée par Lasco à la place du site : crashed | network | certificate.
+      pageError: entry.errorPage ? entry.errorPage.kind : null,
+      htmlFullscreen: Boolean(entry.htmlFullscreen),
     };
   }
 
@@ -371,8 +437,33 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     emitToRenderer(STATE_CHANNEL, state);
   }
 
+  function entryOfView(view) {
+    for (const entry of tabs.values()) {
+      if (entry.view === view) return entry;
+    }
+    return null;
+  }
+
+  /** Taille de la zone de contenu de la fenêtre : la vue d'une vidéo en plein écran la couvre. */
+  function fullWindowBounds() {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed()) return null;
+    const [width, height] = win.getContentSize();
+    return { x: 0, y: 0, width, height };
+  }
+
   function applyBounds(view) {
-    if (!lastBounds || !view) return;
+    if (!view) return;
+    const fullscreenEntry = entryOfView(view);
+    if (fullscreenEntry && fullscreenEntry.htmlFullscreen) {
+      const full = fullWindowBounds();
+      if (full) {
+        view.setBounds(full);
+        view.setVisible(true);
+        return;
+      }
+    }
+    if (!lastBounds) return;
     const { x, y, width, height } = lastBounds;
     if (width < 1 || height < 1) {
       view.setVisible(false);
@@ -425,6 +516,11 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     tabs.delete(tabId);
     passwords.forgetTab(tabId);
     if (activeTabId === tabId) activeTabId = null;
+    if (entry.htmlFullscreen) {
+      entry.htmlFullscreen = false;
+      restoreWindowAfterFullscreen();
+    }
+    if (entry.hangDialog) entry.hangDialog.abort();
     const { view } = entry;
     detachView(view);
     const wc = view.webContents;
@@ -447,10 +543,142 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     historyStore.flush();
   }
 
+  /** Le site doit quitter son plein écran (onglet changé, fenêtre sortie du plein écran). */
+  function exitPageFullscreen(entry) {
+    if (!entry || !entry.htmlFullscreen) return;
+    const wc = entry.view.webContents;
+    if (wc.isDestroyed()) return;
+    wc.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {});
+  }
+
+  function restoreWindowAfterFullscreen() {
+    const state = fullscreenWindowState;
+    fullscreenWindowState = null;
+    const win = getMainWindow();
+    if (!state || !win || win.isDestroyed()) return;
+    if (!state.wasFullScreen && win.isFullScreen()) win.setFullScreen(false);
+  }
+
+  function ensureWindowListeners() {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed() || windowListenersFor === win) return;
+    windowListenersFor = win;
+    win.on('resize', () => {
+      for (const entry of tabs.values()) {
+        if (entry.htmlFullscreen) applyBounds(entry.view);
+      }
+    });
+    // Sortie du plein écran par la fenêtre (bouton vert, ⌃⌘F) : la vidéo le quitte aussi.
+    win.on('leave-full-screen', () => {
+      for (const entry of tabs.values()) exitPageFullscreen(entry);
+    });
+  }
+
+  function enterPageFullscreen(tabId) {
+    const entry = tabs.get(tabId);
+    const win = getMainWindow();
+    if (!entry || !win || win.isDestroyed()) return;
+    ensureWindowListeners();
+    passwords.hidePopover();
+    entry.htmlFullscreen = true;
+    if (!fullscreenWindowState) fullscreenWindowState = { wasFullScreen: win.isFullScreen() };
+    if (!win.isFullScreen()) win.setFullScreen(true);
+    if (activeTabId === tabId && viewsVisible) attachView(entry.view);
+    else applyBounds(entry.view);
+    pushState(tabId);
+  }
+
+  function leavePageFullscreen(tabId) {
+    const entry = tabs.get(tabId);
+    if (!entry || !entry.htmlFullscreen) return;
+    entry.htmlFullscreen = false;
+    restoreWindowAfterFullscreen();
+    applyBounds(entry.view);
+    pushState(tabId);
+  }
+
+  /**
+   * Remplace le site par la page d'erreur de Lasco (plantage, réseau, certificat). L'adresse du
+   * site reste celle de l'onglet : Actualiser (⌘R) et le bouton de la page la rechargent.
+   */
+  function showErrorPage(tabId, errorPage) {
+    const entry = tabs.get(tabId);
+    if (!entry) return;
+    const wc = entry.view.webContents;
+    if (wc.isDestroyed()) return;
+    let host = '';
+    try {
+      host = new URL(errorPage.url || entry.url).host;
+    } catch (_) {
+      host = '';
+    }
+    const page = {
+      ...errorPage,
+      url: errorPage.url || entry.url,
+      title: errorPage.kind === 'crashed' ? entry.title || host : host || entry.title,
+    };
+    entry.errorPage = page;
+    if (page.url) entry.url = page.url;
+    entry.abortedBlank = false;
+    if (entry.htmlFullscreen) leavePageFullscreen(tabId);
+    pushState(tabId);
+    setImmediate(async () => {
+      if (wc.isDestroyed() || entry.errorPage !== page) return;
+      try {
+        await wc.loadFile(ERROR_PAGE, { query: errorPageQuery(page) });
+      } catch (_) {
+        // remplacé par une autre navigation
+      }
+      // Après un plantage, le débogueur qui porte l'identité Chrome est détaché : le rattacher
+      // pour que le rechargement reste vu comme Chrome (connexion Google).
+      if (page.kind === 'crashed' && !wc.isDestroyed()) {
+        await withTimeout(applyChromeIdentity(wc, userAgent), IDENTITY_STEP_TIMEOUT_MS);
+      }
+      if (viewsVisible && activeTabId === tabId) applyBounds(entry.view);
+      pushState(tabId);
+    });
+  }
+
+  /** Page bloquée (« ne répond pas ») : Attendre ou Quitter la page, comme Chrome. */
+  function promptUnresponsive(tabId) {
+    const entry = tabs.get(tabId);
+    const win = getMainWindow();
+    if (!entry || entry.hangDialog || !win || win.isDestroyed()) return;
+    const wc = entry.view.webContents;
+    const controller = new AbortController();
+    entry.hangDialog = controller;
+    let host = '';
+    try {
+      host = new URL(entry.url).host;
+    } catch (_) {
+      host = entry.title || '';
+    }
+    dialog
+      .showMessageBox(win, {
+        type: 'warning',
+        message: host ? `La page ${host} ne répond pas` : 'La page ne répond pas',
+        detail: "Vous pouvez attendre qu'elle réponde ou la quitter.",
+        buttons: ['Attendre', 'Quitter la page'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        signal: controller.signal,
+      })
+      .then(({ response }) => {
+        // L'arrêt du processus affiche ensuite « Cet onglet a planté » (render-process-gone).
+        if (response === 1 && !wc.isDestroyed()) wc.forcefullyCrashRenderer();
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (entry.hangDialog === controller) entry.hangDialog = null;
+      });
+  }
+
   function wireWebContents(tabId, view) {
     const wc = view.webContents;
     const webContentsId = wc.id;
     tabIdsByWebContents.set(webContentsId, tabId);
+    tabWindowGetters.set(webContentsId, getMainWindow);
 
     const launchExternalApp = (url) =>
       externalApps.launch({ url, pageUrl: wc.getURL(), key: `tab:${tabId}` });
@@ -496,6 +724,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     wc.on('did-start-loading', () => pushState(tabId));
     wc.on('did-stop-loading', () => pushState(tabId));
     wc.on('did-navigate', (_event, url) => {
+      const entry = tabs.get(tabId);
+      // Un vrai site s'affiche de nouveau : la page d'erreur est terminée.
+      if (entry && entry.errorPage && sanitizeBrowserUrl(url)) entry.errorPage = null;
       passwords.onNavigate(tabId, url);
       historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
@@ -504,12 +735,38 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       if (isMainFrame) historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
     });
-    wc.on('did-fail-load', (_event, errorCode, _errorDescription, _validatedURL, isMainFrame) => {
+    wc.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return;
+      const failure = classifyLoadFailure({ errorCode, errorDescription, validatedURL, isMainFrame });
+      if (failure && isCurrentTabView(tabs, tabId, view)) {
+        showErrorPage(tabId, failure);
+        return;
+      }
       pushState(tabId);
+    });
+    wc.on('render-process-gone', (_event, details) => {
+      if (!isCurrentTabView(tabs, tabId, view) || !isTabCrash(details)) return;
+      const entry = tabs.get(tabId);
+      const url = (entry.errorPage ? entry.url : sanitizeBrowserUrl(wc.getURL())) || entry.url;
+      showErrorPage(tabId, { kind: 'crashed', url, reason: details.reason });
+    });
+    wc.on('unresponsive', () => {
+      if (isCurrentTabView(tabs, tabId, view)) promptUnresponsive(tabId);
+    });
+    wc.on('responsive', () => {
+      const entry = tabs.get(tabId);
+      if (entry && entry.view === view && entry.hangDialog) entry.hangDialog.abort();
+    });
+    // Vidéo en plein écran : la page couvre toute la fenêtre, passée en plein écran.
+    wc.on('enter-html-full-screen', () => {
+      if (isCurrentTabView(tabs, tabId, view)) enterPageFullscreen(tabId);
+    });
+    wc.on('leave-html-full-screen', () => {
+      if (isCurrentTabView(tabs, tabId, view)) leavePageFullscreen(tabId);
     });
     wc.on('destroyed', () => {
       tabIdsByWebContents.delete(webContentsId);
+      tabWindowGetters.delete(webContentsId);
       // `create` on a live tab id (shell reloaded, e.g. workspace switch) closes the old
       // view and registers the new one at once; the old view's `destroyed` comes later
       // and must not drop the new entry (tab stuck loading, stop / reload ignored).
@@ -538,6 +795,11 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     // reloading the whole portal on ⌘R).
     wc.on('before-input-event', (event, input) => {
       if (input.type !== 'keyDown' || input.alt) return;
+      // Échap quitte le plein écran d'une vidéo, comme dans Chrome.
+      if (input.key === 'Escape' && tabs.get(tabId)?.htmlFullscreen) {
+        exitPageFullscreen(tabs.get(tabId));
+        return;
+      }
       const mod = process.platform === 'darwin' ? input.meta : input.control;
       if (!mod) return;
       const key = String(input.key || '').toLowerCase();
@@ -585,18 +847,58 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         if (safe) emitToRenderer(OPEN_REQUEST_CHANNEL, { url: safe, openerTabId: tabId });
       };
 
+      // Téléchargement géré par Lasco (docs/downloads.md) : dossier choisi dans les Réglages.
+      const download = (url) => {
+        if (/^(https?|data|blob):/i.test(String(url || ''))) wc.downloadURL(url);
+      };
+
+      // Correcteur orthographique : suggestions en tête, comme Chrome.
+      if (params.isEditable && params.misspelledWord) {
+        const suggestions = (params.dictionarySuggestions || []).slice(0, 5);
+        if (suggestions.length) {
+          for (const suggestion of suggestions) {
+            template.push({ label: suggestion, click: () => wc.replaceMisspelling(suggestion) });
+          }
+        } else {
+          template.push({ label: 'Aucune suggestion', enabled: false });
+        }
+        template.push(
+          {
+            label: 'Ajouter au dictionnaire',
+            click: () => wc.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+          },
+          separator,
+        );
+      }
       if (params.linkURL && sanitizeBrowserUrl(params.linkURL)) {
         template.push(
           { label: 'Ouvrir le lien dans un nouvel onglet', click: () => openInNewTab(params.linkURL) },
           { label: "Copier l'adresse du lien", click: () => void clipboard.writeText(params.linkURL) },
+          { label: 'Télécharger le fichier lié', click: () => download(params.linkURL) },
           separator,
         );
       }
       if (params.mediaType === 'image' && params.srcURL) {
         template.push(
           { label: "Ouvrir l'image dans un nouvel onglet", click: () => openInNewTab(params.srcURL) },
+          { label: "Enregistrer l'image…", click: () => download(params.srcURL) },
           { label: "Copier l'image", click: () => wc.copyImageAt(params.x, params.y) },
           { label: "Copier l'adresse de l'image", click: () => void clipboard.writeText(params.srcURL) },
+          separator,
+        );
+      }
+      if ((params.mediaType === 'video' || params.mediaType === 'audio') && sanitizeBrowserUrl(params.srcURL)) {
+        const video = params.mediaType === 'video';
+        template.push(
+          {
+            label: video ? 'Ouvrir la vidéo dans un nouvel onglet' : "Ouvrir l'audio dans un nouvel onglet",
+            click: () => openInNewTab(params.srcURL),
+          },
+          { label: video ? 'Enregistrer la vidéo…' : "Enregistrer l'audio…", click: () => download(params.srcURL) },
+          {
+            label: video ? "Copier l'adresse de la vidéo" : "Copier l'adresse de l'audio",
+            click: () => void clipboard.writeText(params.srcURL),
+          },
           separator,
         );
       }
@@ -668,6 +970,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         // page): untrusted web content never reaches Electron APIs.
         preload: PASSWORD_PRELOAD,
         allowRunningInsecureContent: false,
+        spellcheck: true,
       },
     });
     view.setBackgroundColor('#ffffff');
@@ -738,6 +1041,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     }
     entry.url = safe;
     entry.abortedBlank = false;
+    entry.errorPage = null;
     if (!entry.identityPending) void entry.view.webContents.loadURL(safe);
     if (viewsVisible && activeTabId === tabId) {
       entry.view.setVisible(!overlayActive);
@@ -761,6 +1065,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         entry.view.setVisible(true);
         applyBounds(entry.view);
       } else {
+        exitPageFullscreen(entry);
         entry.view.setVisible(false);
         detachView(entry.view);
       }
@@ -774,6 +1079,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     viewsVisible = false;
     activeTabId = null;
     for (const entry of tabs.values()) {
+      exitPageFullscreen(entry);
       entry.view.setVisible(false);
       detachView(entry.view);
     }
@@ -822,6 +1128,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     const wc = entry.view.webContents;
     const current = wc.getURL();
     entry.abortedBlank = false;
+    // Page d'erreur de Lasco : recharger le site, pas la page d'erreur.
+    if (entry.errorPage && entry.url) return navigate({ tabId, url: entry.url });
     // After a stopped first load the view may sit on about:blank — re-navigate
     // to the remembered URL instead of reloading a blank document.
     if ((!current || current === 'about:blank' || !sanitizeBrowserUrl(current)) && entry.url) {
@@ -1038,7 +1346,48 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     await browserSession.clearCache();
     historyStore.clear();
     externalAppPermissions.clear();
+    sitePermissions.clear();
     return { ok: true };
+  }
+
+  /** Site affiché par l'onglet (son adresse, même derrière une page d'erreur). */
+  function tabOrigin(tabId) {
+    const entry = liveEntry(tabId);
+    if (!entry) return null;
+    const url = entry.errorPage ? entry.url : sanitizeBrowserUrl(entry.view.webContents.getURL()) || entry.url;
+    return siteOrigin(url);
+  }
+
+  /** Informations du site (icône à gauche de l'adresse) : sécurité et autorisations retenues. */
+  function siteInfo({ tabId } = {}) {
+    const state = buildState(tabId);
+    const origin = tabOrigin(tabId);
+    if (!state || !origin) return { ok: false, error: 'unknown-tab' };
+    return {
+      ok: true,
+      origin,
+      host: siteHost(origin),
+      security: state.security,
+      permissions: describeSitePermissions(sitePermissions, origin),
+    };
+  }
+
+  /** `decision` : 'allow' | 'block' | null (redemander). */
+  function setSitePermission({ tabId, permission, decision } = {}) {
+    const origin = tabOrigin(tabId);
+    if (!origin) return { ok: false, error: 'unknown-tab' };
+    if (permissionPolicy(permission) !== 'ask') return { ok: false, error: 'invalid-permission' };
+    if (!sitePermissions.set(origin, permission, decision === undefined ? null : decision)) {
+      return { ok: false, error: 'invalid-decision' };
+    }
+    return siteInfo({ tabId });
+  }
+
+  function resetSitePermissions({ tabId } = {}) {
+    const origin = tabOrigin(tabId);
+    if (!origin) return { ok: false, error: 'unknown-tab' };
+    sitePermissions.clearOrigin(origin);
+    return siteInfo({ tabId });
   }
 
   function historySuggest({ query, limit } = {}) {
@@ -1064,7 +1413,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     if (!viewsVisible || !activeTabId) return { ok: true };
     const entry = tabs.get(activeTabId);
     if (!entry) return { ok: true };
-    if (overlayActive) {
+    if (overlayActive && !entry.htmlFullscreen) {
       entry.view.setVisible(false);
     } else {
       applyBounds(entry.view);
@@ -1258,6 +1607,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     openExternal,
     openDevTools,
     clearBrowsingData,
+    siteInfo,
+    setSitePermission,
+    resetSitePermissions,
     historySuggest,
     historyList,
     historyRemove,
