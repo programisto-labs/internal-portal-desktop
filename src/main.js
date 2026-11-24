@@ -10,6 +10,7 @@ const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME
 const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
 const { createHistoryStore } = require('./browser-tabs/history');
 const { PASSWORD_PAGE_CHANNELS } = require('./browser-tabs/passwords');
+const { createVaultAuth } = require('./vault-auth');
 const {
   sanitizeTabDescriptor,
   encodeTabWindowArg,
@@ -2401,6 +2402,17 @@ function registerWindowIPC() {
       return manager[method](payload || {});
     });
   }
+
+  // Identity check before the portal shows a saved password (docs/passwords.md). Portal windows only.
+  const vaultAuth = createVaultAuth({ systemPreferences });
+  ipcMain.handle('lasco-vault-verify-user', (event, payload) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return vaultAuth.verifyUser(payload || {});
+  });
+  ipcMain.handle('lasco-vault-verify-reset', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return vaultAuth.reset();
+  });
 
   // Messages of the password runtime of the web pages (password-preload.js). The sender is a
   // web view: it is routed to the tab manager that owns it, never to a portal handler.

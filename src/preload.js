@@ -260,6 +260,11 @@ const desktopBridge = {
     onOpenTarget: onOpenPortalTab
   },
   browserTabs: browserTabsBridge,
+  /** Coffre : vérification d'identité de l'OS avant d'afficher un mot de passe (docs/passwords.md). */
+  vault: {
+    verifyUser: (payload) => ipcRenderer.invoke('lasco-vault-verify-user', payload),
+    resetVerification: () => ipcRenderer.invoke('lasco-vault-verify-reset'),
+  },
   tabWindows: tabWindowsBridge,
   /**
    * « Fenêtre » menu of the menu bar: same options as the burger menu of the internal browser.

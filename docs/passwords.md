@@ -51,3 +51,20 @@ Only a portal window can call it (same `tabManagerFor` check as the other browse
   the origin is read from `event.senderFrame.url`, never from the page's payload.
 - The native menu and the save prompt are drawn by Desktop / the portal, never by the page.
 - Tests: `scripts/test-browser-passwords.js`.
+
+## Show a password (`lascoDesktop.vault`)
+
+Before the portal shows a saved password in the Vault, it asks Desktop to check that the person at the
+computer is the account owner, like Chrome's password manager (`src/vault-auth.js`):
+
+- `vault.verifyUser({ reason })` → `{ ok: true }` or `{ ok: false, error: 'denied' | 'unavailable' | 'unsupported' | 'failed' }`.
+  - macOS: Touch ID through Electron `promptTouchID` (dialog attributed to Lasco); without Touch ID, the
+    LocalAuthentication sheet that accepts the session password (`osascript -l JavaScript`, policy
+    `DeviceOwnerAuthentication`).
+  - Windows: Windows Hello (`UserConsentVerifier`, PIN / face / fingerprint) through PowerShell; the reason
+    is passed in an environment variable, never in the script. Without Hello: `unavailable`.
+  - Linux: `unsupported`.
+- A success is remembered for 60 s; concurrent calls share one prompt. `vault.resetVerification()` forgets it.
+- Portal windows only. This gates what the computer shows; the server still checks ownership and logs
+  each view (`vault.view`).
+- Tests: `scripts/test-vault-auth.js`.
