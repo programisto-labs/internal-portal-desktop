@@ -8,6 +8,7 @@ const { createHistoryStore } = require('./history');
 const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
 const { createPasswordController } = require('./passwords');
 const { createPasswordPopover } = require('./password-popover');
+const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const path = require('path');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
@@ -169,9 +170,29 @@ function waitForLoadStop(wc, maxMs) {
  * Views are attached to the main BrowserWindow contentView and sized by the
  * renderer via setBounds IPC.
  */
+/** « Always allow » choices for app links, shared by every window (one file). */
+let externalAppPermissionStore = null;
+function sharedExternalAppPermissions() {
+  if (!externalAppPermissionStore) {
+    externalAppPermissionStore = createExternalAppPermissionStore({
+      filePath: path.join(app.getPath('userData'), 'browser-external-apps.json'),
+    });
+  }
+  return externalAppPermissionStore;
+}
+
 function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
   const historyStore =
     history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
+  // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
+  const externalAppPermissions = sharedExternalAppPermissions();
+  const externalApps = createExternalAppLauncher({
+    shell,
+    showMessageBox: (...args) => dialog.showMessageBox(...args),
+    getApplicationNameForProtocol: (url) => app.getApplicationNameForProtocol(url),
+    getParentWindow: () => getMainWindow(),
+    permissions: externalAppPermissions,
+  });
   const userAgent = buildChromiumUserAgent();
   let sessionConfigured = false;
 
@@ -425,7 +446,11 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     const webContentsId = wc.id;
     tabIdsByWebContents.set(webContentsId, tabId);
 
+    const launchExternalApp = (url) =>
+      externalApps.launch({ url, pageUrl: wc.getURL(), key: `tab:${tabId}` });
+
     wc.setWindowOpenHandler(({ url }) => {
+      if (launchExternalApp(url)) return { action: 'deny' };
       const safe = sanitizeBrowserUrl(url);
       if (safe && typeof interceptLink === 'function' && interceptLink(safe)) {
         return { action: 'deny' };
@@ -440,6 +465,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       const safe = sanitizeBrowserUrl(url);
       if (!safe) {
         event.preventDefault();
+        launchExternalApp(url);
       }
     });
 
@@ -447,6 +473,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       const safe = sanitizeBrowserUrl(url);
       if (!safe) {
         event.preventDefault();
+        launchExternalApp(url);
       }
     });
 
@@ -992,6 +1019,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     await browserSession.clearStorageData();
     await browserSession.clearCache();
     historyStore.clear();
+    externalAppPermissions.clear();
     return { ok: true };
   }
 
