@@ -2,8 +2,8 @@
 
 /**
  * Icône Lasco (barre des menus macOS, zone de notification Windows, barre système Linux) et son popover.
- * - Icône avec un point quand quelque chose attend ; macOS : image « template » et nombre à valider
- *   à côté (`setTitle`) ; Windows / Linux : flamme en couleur.
+ * - Nombre « à valider + non lus » : macOS l'écrit à côté de l'image « template » (`setTitle`) ;
+ *   Windows / Linux le dessinent dans une pastille sur la flamme en couleur (`tray-badge.js`).
  * - Clic : popover à côté de l'icône (fenêtre sans cadre, `file:` isolée, fermée quand elle perd le focus).
  * - Windows : clic droit = menu natif. Linux : menu natif attaché (le clic n'arrive pas toujours à l'app).
  * Voir docs/tray.md.
@@ -11,7 +11,7 @@
 const path = require('path');
 const {
   buildTrayView,
-  trayPendingCount,
+  trayBadgeCount,
   trayIconVariant,
   trayTooltip,
   resolveTrayAction,
@@ -23,6 +23,8 @@ const {
   computePopoverBounds,
   buildTrayMenuItems,
 } = require('./tray-platform');
+const { trayBadgeText, drawTrayBadge } = require('./tray-badge');
+const { pngFromRgba } = require('../badge-overlay');
 
 const WIDTH = 360;
 const MIN_HEIGHT = 180;
@@ -48,6 +50,44 @@ function createTrayController({
     dot: nativeImage.createFromPath(path.join(iconDir, files.dot)),
   };
   if (files.template) for (const image of Object.values(icons)) image.setTemplateImage(true);
+
+  /** Flamme en couleur + pastille du nombre, à 1x et 2x ; `null` si l'image ne peut pas être lue. */
+  const badgeCache = new Map();
+  function badgedIcon(count) {
+    const key = `${trayBadgeText(count, 1)}|${trayBadgeText(count, 2)}`;
+    if (badgeCache.has(key)) return badgeCache.get(key);
+    let out = null;
+    try {
+      out = nativeImage.createEmpty();
+      for (const scaleFactor of [1, 2]) {
+        // getSize() est en points : la taille en pixels de cette version est points × facteur.
+        const dip = icons.plain.getSize();
+        const size = { width: dip.width * scaleFactor, height: dip.height * scaleFactor };
+        const bitmap = icons.plain.toBitmap({ scaleFactor });
+        if (!size.width || bitmap.length !== size.width * size.height * 4) continue;
+        const rgba = Buffer.alloc(bitmap.length);
+        // Skia rend du BGRA prémultiplié : retour au RGBA direct du PNG.
+        for (let i = 0; i < bitmap.length; i += 4) {
+          const a = bitmap[i + 3];
+          const k = a ? 255 / a : 0;
+          rgba[i] = Math.min(255, Math.round(bitmap[i + 2] * k));
+          rgba[i + 1] = Math.min(255, Math.round(bitmap[i + 1] * k));
+          rgba[i + 2] = Math.min(255, Math.round(bitmap[i] * k));
+          rgba[i + 3] = a;
+        }
+        // 2x : la pastille garde la même place visuelle, chiffres à l'échelle de l'image.
+        const scale = Math.max(1, Math.round(size.width / 16));
+        drawTrayBadge(rgba, { ...size, text: trayBadgeText(count, scale), scale });
+        out.addRepresentation({ scaleFactor, width: size.width, height: size.height, buffer: pngFromRgba(size.width, size.height, rgba) });
+      }
+      if (out.isEmpty()) out = null;
+    } catch (_) {
+      out = null;
+    }
+    if (badgeCache.size > 40) badgeCache.clear();
+    badgeCache.set(key, out);
+    return out;
+  }
 
   const tray = new Tray(icons.plain);
   tray.setToolTip('Lasco');
@@ -89,10 +129,15 @@ function createTrayController({
   /** Icône, compteur et info-bulle ; le popover ouvert se redessine. */
   function refresh() {
     const next = currentView();
-    const variant = trayIconVariant(next);
-    tray.setImage(icons[variant]);
-    const pending = trayPendingCount(next);
-    if (supportsTrayTitle(platform)) tray.setTitle(pending ? String(pending) : '', { fontType: 'monospacedDigit' });
+    const count = trayBadgeCount(next);
+    if (supportsTrayTitle(platform)) {
+      // macOS (comme Cursor) : le nombre à côté de la flamme ; plus besoin du point.
+      tray.setImage(count ? icons.plain : icons[trayIconVariant(next)]);
+      tray.setTitle(count ? String(count) : '', { fontType: 'monospacedDigit' });
+    } else {
+      // Windows / Linux : pastille avec le nombre ; le point en secours si l'image n'a pas pu être dessinée.
+      tray.setImage((count && badgedIcon(count)) || icons[trayIconVariant(next)]);
+    }
     tray.setToolTip(trayTooltip(next));
     // Linux : le menu attaché suit l'état (compteurs, « Demander à Lasco »).
     if (usesAttachedMenu(platform)) tray.setContextMenu(buildMenu(next));

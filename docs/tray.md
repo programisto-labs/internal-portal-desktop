@@ -2,9 +2,9 @@
 
 | Plateforme | Icône | Clic | Clic droit |
 |---|---|---|---|
-| macOS | flamme « template » (teintée par le système), nombre à valider à côté | popover sous l'icône | popover |
-| Windows | flamme en couleur (`tray.png`), point rouge si quelque chose attend | popover au-dessus de la barre des tâches (ou à côté si elle est sur un bord) | menu natif |
-| Linux | flamme en couleur, menu natif attaché (StatusNotifier / AppIndicator : le clic n'arrive pas toujours à l'app) | popover si l'environnement envoie le clic, sinon le menu | menu natif |
+| macOS | flamme « template » (teintée par le système), nombre à côté (comme Cursor) | popover sous l'icône | popover |
+| Windows | flamme en couleur (`tray.png`), pastille rouge avec le nombre | popover au-dessus de la barre des tâches (ou à côté si elle est sur un bord) | menu natif |
+| Linux | flamme en couleur, pastille avec le nombre, menu natif attaché (StatusNotifier / AppIndicator : le clic n'arrive pas toujours à l'app) | popover si l'environnement envoie le clic, sinon le menu | menu natif |
 
 Le menu natif (`buildTrayMenuItems`, `src/tray/tray-platform.js`) reprend « Ouvrir Lasco », « Demander à Lasco… », les compteurs (à valider, en cours, non lus : ils ouvrent Lasco), « Suspendre les opérations », « Réglages… », « Quitter Lasco ». Chaque entrée repasse par `resolveTrayAction` ; aucune décision depuis le menu. Position du popover : `computePopoverBounds` (côté de la barre déduit de la zone utile de l'écran ; icône sans position sous Linux → au pointeur). Linux sans barre système : pas d'icône (création tolérante), pas de mode arrière-plan.
 
@@ -17,7 +17,7 @@ Un clic ouvre un popover à côté de l'icône :
 
 Fermer la fenêtre de Lasco la masque : l'icône reste à jour. Raccourcis globaux et ouverture de session : [background.md](./background.md).
 
-À côté de l'icône : le nombre d'éléments à valider. Un point sur l'icône : quelque chose attend ou n'est pas lu.
+Nombre de l'icône = à valider (confirmations « Cet ordinateur » + validations d'actions) + réponses d'agents non lues (`trayBadgeCount`, même total de non-lus que le badge du Dock). Le travail en cours n'est pas compté. macOS l'écrit à côté de la flamme (`setTitle`). Windows et Linux ne peuvent pas écrire de texte à côté de l'icône : la pastille est dessinée sur la flamme (`src/tray/tray-badge.js`, un chiffre à 16 px, « + » au-delà de 9 ; deux chiffres à 32 px, « + » au-delà de 99) ; le nombre exact est dans l'info-bulle. Si l'image ne peut pas être dessinée, le point rouge (`trayDot.png`) reste.
 
 ## Sources
 

@@ -145,6 +145,14 @@ function trayPendingCount(view) {
   return view.hostConfirms.length + view.approvals.length;
 }
 
+/**
+ * Nombre affiché sur l'icône (comme Cursor) : à valider + non lus. Même total que le badge
+ * du Dock pour les non-lus, plus ce qui attend une réponse de la personne.
+ */
+function trayBadgeCount(view) {
+  return trayPendingCount(view) + view.unreadTotal;
+}
+
 /** Variante d'icône : point quand quelque chose attend ou n'est pas lu. */
 function trayIconVariant(view) {
   return trayPendingCount(view) > 0 || view.unreadTotal > 0 ? 'dot' : 'plain';
@@ -211,6 +219,7 @@ module.exports = {
   normalizePortalTrayState,
   buildTrayView,
   trayPendingCount,
+  trayBadgeCount,
   trayIconVariant,
   trayTooltip,
   resolveTrayAction,
