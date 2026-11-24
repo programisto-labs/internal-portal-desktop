@@ -123,6 +123,8 @@ function renderBadgePng(count) {
 }
 
 module.exports = {
+  FONT,
+  pngFromRgba,
   badgeLabel,
   normalizeBadgeCount,
   renderBadgePng,
