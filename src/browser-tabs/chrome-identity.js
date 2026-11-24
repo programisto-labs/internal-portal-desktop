@@ -99,6 +99,42 @@ const CHROME_OBJECT_SCRIPT = `(() => {
   } catch (_) {}
 })();`;
 
+/**
+ * Electron has no passkey UI (Chrome's account picker, phone QR code, security
+ * key prompt) and no access to iCloud Keychain passkeys: a WebAuthn request
+ * waits forever with nothing on screen. Answer like a browser without any
+ * authenticator so sites (Google « Verifying it's you… ») switch to another
+ * method at once. Conditional (autofill) requests stay pending until aborted.
+ */
+const PASSKEY_FALLBACK_SCRIPT = `(() => {
+  try {
+    const creds = navigator.credentials;
+    if (!creds || creds.__lascoPasskeyFallback) return;
+    const notAllowed = () =>
+      new DOMException('The operation either timed out or was not allowed.', 'NotAllowedError');
+    const wrap = (original) =>
+      function (options) {
+        if (!options || !options.publicKey) return original.apply(this, arguments);
+        if (options.mediation === 'conditional') {
+          return new Promise((_resolve, reject) => {
+            const signal = options.signal;
+            if (signal) signal.addEventListener('abort', () => reject(signal.reason || notAllowed()), { once: true });
+          });
+        }
+        return Promise.reject(notAllowed());
+      };
+    const get = creds.get, create = creds.create;
+    Object.defineProperty(creds, 'get', { value: wrap(get), configurable: true, writable: true });
+    Object.defineProperty(creds, 'create', { value: wrap(create), configurable: true, writable: true });
+    Object.defineProperty(creds, '__lascoPasskeyFallback', { value: true });
+    const PKC = window.PublicKeyCredential;
+    if (PKC) {
+      PKC.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+      PKC.isConditionalMediationAvailable = () => Promise.resolve(false);
+    }
+  } catch (_) {}
+})();`;
+
 /** Adds `Sec-CH-UA*` to every HTTPS request of the browser session (Chrome never sends them over plain HTTP). */
 function installClientHintHeaders(browserSession) {
   const headers = buildClientHintHeaders();
@@ -130,6 +166,7 @@ async function applyChromeIdentity(webContents, userAgent) {
     });
     await dbg.sendCommand('Page.enable');
     await dbg.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: CHROME_OBJECT_SCRIPT });
+    await dbg.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: PASSKEY_FALLBACK_SCRIPT });
     return true;
   } catch (error) {
     console.warn('[browser-tabs] chrome identity unavailable:', error && error.message);
@@ -145,4 +182,5 @@ module.exports = {
   installClientHintHeaders,
   applyChromeIdentity,
   CHROME_OBJECT_SCRIPT,
+  PASSKEY_FALLBACK_SCRIPT,
 };

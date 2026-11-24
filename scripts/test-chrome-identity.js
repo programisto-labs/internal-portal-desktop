@@ -7,6 +7,7 @@ const {
   buildUserAgentMetadata,
   buildClientHintHeaders,
   CHROME_OBJECT_SCRIPT,
+  PASSKEY_FALLBACK_SCRIPT,
 } = require('../src/browser-tabs/chrome-identity');
 
 describe('browser tab Chrome identity', () => {
@@ -41,5 +42,20 @@ describe('browser tab Chrome identity', () => {
     assert.equal(typeof window.chrome.csi, 'function');
     assert.equal(typeof window.chrome.loadTimes, 'function');
     assert.equal(window.chrome.app.isInstalled, false);
+  });
+
+  it('refuses passkey requests at once instead of hanging', async () => {
+    const calls = [];
+    const navigator = { credentials: { get: (o) => { calls.push(o); return Promise.resolve('password'); }, create: () => Promise.resolve('x') } };
+    const window = { PublicKeyCredential: function PublicKeyCredential() {} };
+    class DOMException extends Error {
+      constructor(message, name) { super(message); this.name = name; }
+    }
+    new Function('navigator', 'window', 'DOMException', PASSKEY_FALLBACK_SCRIPT)(navigator, window, DOMException);
+    await assert.rejects(navigator.credentials.get({ publicKey: {} }), { name: 'NotAllowedError' });
+    await assert.rejects(navigator.credentials.create({ publicKey: {} }), { name: 'NotAllowedError' });
+    assert.equal(await navigator.credentials.get({ password: true }), 'password');
+    assert.equal(calls.length, 1);
+    assert.equal(await window.PublicKeyCredential.isConditionalMediationAvailable(), false);
   });
 });
