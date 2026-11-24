@@ -6,6 +6,8 @@ Electron wrapper for the [Lasco web app](https://my.programisto.fr) — macOS, W
 
 **Password manager** (web tabs save and fill sign-ins with the Lasco Vault): see [docs/passwords.md](docs/passwords.md).
 
+**Links to desktop apps** (web tabs, like Chrome): a link, redirect or `window.open` to an app scheme (`unityhub://`, `zoommtg://`, `vscode://`, `mailto:`…) opens the app registered with the OS after « Ouvrir <app> ? », with « Toujours autoriser <site> à ouvrir les liens de ce type » (per site and scheme, `userData/browser-external-apps.json`, cleared by « Effacer les données de navigation »). Ignored when no app handles the scheme; never for local files, network shares, OS settings or `lasco://` (`src/browser-tabs/external-apps.js`). Lets sign-ins that hand back to an app (Unity Hub, Figma, Slack, Zoom) go through Lasco.
+
 **Background, login item, global shortcuts** (macOS, Windows, Linux): closing the main window keeps Lasco in the menu bar / notification area / system tray; « Ouvrir à l’ouverture de session » and editable global shortcuts (⌥⇧L, ⌥⇧Space) are in Réglages > Général. See [docs/background.md](docs/background.md).
 
 Looking for the **mobile app** (iOS & Android)? See [`mobile/`](mobile/README.md).
