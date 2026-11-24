@@ -13,7 +13,7 @@
 
 const crypto = require('crypto');
 const { spawn: spawnDefault, execFile } = require('child_process');
-const { HARNESSES, parseHarnessLine } = require('./harnesses');
+const { HARNESSES, parseHarnessLine, loginMessageFromStderr } = require('./harnesses');
 const { checkAuth: checkAuthDefault, startLogin: startLoginDefault } = require('./auth');
 const { pruneRuns } = require('./history');
 const { resolveHarnessCommand, execHarness, helpFlags } = require('./command');
@@ -379,6 +379,11 @@ function createHarnessRunner({
         if (buffer.trim()) for (const event of parseHarnessLine(harness, buffer.trim())) handle(event);
         const files = await listFiles(project.root, env).catch(() => []);
         const stopped = run.status === 'stopped' || run.status === 'timeout';
+        // Clé ou connexion refusée écrite seulement sur stderr (Vibe, Cursor) : « non connecté », pas une erreur brute.
+        if (!stopped && code !== 0 && !run.loginRequired) {
+          const loginMessage = loginMessageFromStderr(stderr);
+          if (loginMessage) run.loginRequired = loginMessage;
+        }
         let ok = !stopped && code === 0 && !resultError && !run.loginRequired;
         // Certains harnais (Cursor) renvoient tous leurs messages collés : le dernier suffit.
         const finalText = resultText && run.lastText && resultText !== run.lastText && resultText.endsWith(run.lastText) ? run.lastText : resultText;

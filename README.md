@@ -4,6 +4,8 @@ Electron wrapper for the [Lasco web app](https://my.programisto.fr) — macOS, W
 
 **Lasco Code** (IDE tab of the portal: local git projects, editor, terminals, agents): see [docs/code-workspace.md](docs/code-workspace.md).
 
+**Password manager** (web tabs save and fill sign-ins with the Lasco Vault): see [docs/passwords.md](docs/passwords.md).
+
 **Background, login item, global shortcuts** (macOS, Windows, Linux): closing the main window keeps Lasco in the menu bar / notification area / system tray; « Ouvrir à l’ouverture de session » and editable global shortcuts (⌥⇧L, ⌥⇧Space) are in Réglages > Général. See [docs/background.md](docs/background.md).
 
 Looking for the **mobile app** (iOS & Android)? See [`mobile/`](mobile/README.md).

@@ -6,7 +6,7 @@ const { EventEmitter } = require('node:events');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { HARNESSES, parseHarnessLine } = require('../src/code-harness/harnesses');
+const { HARNESSES, parseHarnessLine, loginMessageFromStderr } = require('../src/code-harness/harnesses');
 const { createHarnessRunner } = require('../src/code-harness/runner');
 const { createRunHistory } = require('../src/code-harness/history');
 const { resolveHarnessCommand } = require('../src/code-harness/command');
@@ -37,6 +37,12 @@ function fakeChild() {
 }
 
 describe('harnais de code : lecture des événements', () => {
+  it('message « non connecté » lu sur stderr : clés Mistral, Cursor, rien pour une autre erreur', () => {
+    assert.match(loginMessageFromStderr('Error: Missing MISTRAL_API_KEY environment variable for mistral provider'), /MISTRAL_API_KEY/);
+    assert.match(loginMessageFromStderr("Error: Authentication required. Please run 'agent login' first"), /Authentication required/);
+    assert.equal(loginMessageFromStderr('Error: ENOENT: no such file or directory'), null);
+  });
+
   it('Claude Code / Cursor : session, texte, outil, résultat (format réel stream-json)', () => {
     const lines = [
       { type: 'system', subtype: 'init', session_id: 's-1', cwd: '/p' },
@@ -240,6 +246,29 @@ describe('harnais de code : exécutions', () => {
     assert.equal(res.ok, false);
     assert.equal(res.status, 'login_required');
     assert.match(res.error.message, /cursor-agent login/);
+  });
+
+  it('clé refusée écrite sur stderr (Vibe) : login_required, pas une erreur brute', async () => {
+    const runner = mk();
+    const pending = runner.start(request({ harness: 'vibe' }));
+    await tick();
+    child.feed({ role: 'user', content: 'Ajoute un test' });
+    child.stderr.emit('data', Buffer.from('Error: API error from mistral (model: mistral-vibe-cli-latest): Invalid API key. Please check your API key and try again.\n'));
+    child.end(1);
+    const res = await pending;
+    assert.equal(res.ok, false);
+    assert.equal(res.status, 'login_required');
+    assert.match(res.error.message, /vibe --setup/);
+  });
+
+  it('erreur sur stderr sans rapport avec la connexion : reste une erreur', async () => {
+    const runner = mk();
+    const pending = runner.start(request({ harness: 'vibe' }));
+    await tick();
+    child.stderr.emit('data', Buffer.from('Error: ENOENT: no such file or directory\n'));
+    child.end(1);
+    const res = await pending;
+    assert.equal(res.status, 'error');
   });
 
   it('environnement du shell de connexion (promesse) : PATH transmis à la vérification et au lancement', async () => {
