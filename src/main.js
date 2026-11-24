@@ -2483,6 +2483,12 @@ function registerWindowIPC() {
       }
     });
   }
+  // Autofill popover (Desktop's own `file:` view): routed to the tab manager that drew it.
+  ipcMain.on('lasco-pw-popover', (event, payload) => {
+    for (const entry of portalWindows.values()) {
+      if (entry.tabManager && entry.tabManager.handlePasswordPopoverMessage(event, payload)) return;
+    }
+  });
 }
 
 if (!app.requestSingleInstanceLock()) {
