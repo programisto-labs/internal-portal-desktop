@@ -11,23 +11,30 @@ const THEME_SOURCES = Object.freeze(['system', 'light', 'dark']);
  * `keepInBackground`: closing the main window hides it, Lasco stays in the menu bar (macOS).
  * `backgroundHintShown`: the « Lasco reste ouvert » notification was shown once.
  * `shortcuts`: global shortcuts (see background-mode.js). Docs: docs/background.md.
+ * `downloadsDirectory`: folder of the downloads (null = the OS Downloads folder), `downloadsAskWhere`:
+ * « Enregistrer sous » for each file. Docs: docs/downloads.md.
  */
 const DEFAULT_SETTINGS = Object.freeze({
   openLinksInApp: true,
   themeSource: 'system',
   keepInBackground: true,
   backgroundHintShown: false,
+  downloadsDirectory: null,
+  downloadsAskWhere: false,
 });
 
 /** Keep only known keys with valid types; unknown / invalid values fall back to defaults. */
 function normalizeSettings(raw) {
   const out = { ...DEFAULT_SETTINGS };
   const obj = raw && typeof raw === 'object' ? raw : {};
-  for (const key of ['openLinksInApp', 'keepInBackground', 'backgroundHintShown']) {
+  for (const key of ['openLinksInApp', 'keepInBackground', 'backgroundHintShown', 'downloadsAskWhere']) {
     if (typeof obj[key] === 'boolean') out[key] = obj[key];
   }
   if (THEME_SOURCES.includes(obj.themeSource)) {
     out.themeSource = obj.themeSource;
+  }
+  if (typeof obj.downloadsDirectory === 'string' && path.isAbsolute(obj.downloadsDirectory)) {
+    out.downloadsDirectory = obj.downloadsDirectory;
   }
   out.shortcuts = normalizeShortcuts(obj.shortcuts);
   return out;

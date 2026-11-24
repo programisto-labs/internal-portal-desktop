@@ -4,7 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeSettings, createSettingsStore, extractPortalTarget } = require('../src/link-handling');
 const { DEFAULT_SHORTCUTS } = require('../src/background-mode');
-const BASE = { keepInBackground: true, backgroundHintShown: false, shortcuts: { ...DEFAULT_SHORTCUTS } };
+const BASE = { keepInBackground: true, backgroundHintShown: false, downloadsDirectory: null, downloadsAskWhere: false, shortcuts: { ...DEFAULT_SHORTCUTS } };
 
 const isPortal = (u) => new URL(u).hostname === 'app.lascoapp.com';
 
@@ -29,6 +29,11 @@ describe('link handling', () => {
     assert.deepEqual(normalizeSettings({ openLinksInApp: false }), { openLinksInApp: false, themeSource: 'system', ...BASE });
     assert.deepEqual(normalizeSettings({ themeSource: 'dark' }), { openLinksInApp: true, themeSource: 'dark', ...BASE });
     assert.deepEqual(normalizeSettings({ themeSource: 'sepia' }), { openLinksInApp: true, themeSource: 'system', ...BASE });
+    // Téléchargements : chemin absolu seulement, booléen pour « Enregistrer sous ».
+    assert.equal(normalizeSettings({ downloadsDirectory: '/Users/me/Dl' }).downloadsDirectory, '/Users/me/Dl');
+    assert.equal(normalizeSettings({ downloadsDirectory: 'relative/dir' }).downloadsDirectory, null);
+    assert.equal(normalizeSettings({ downloadsAskWhere: true }).downloadsAskWhere, true);
+    assert.equal(normalizeSettings({ downloadsAskWhere: 'yes' }).downloadsAskWhere, false);
   });
 
   it('persists settings through the store', () => {

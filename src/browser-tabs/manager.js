@@ -515,6 +515,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         g: () => forward(input.shift ? 'find-previous' : 'find-next'),
         l: () => forward('focus-address'),
         t: () => forward('new-tab'),
+        // Téléchargements : ⌘⇧J (macOS), Ctrl+J (Windows / Linux), comme Chrome.
+        j: () => forward('downloads'),
         p: () => print({ tabId }),
         r: () => reload({ tabId }),
         '=': () => zoom({ tabId, direction: 'in' }),
@@ -525,7 +527,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         ']': () => goForward({ tabId }),
       };
       const handler = handlers[key];
-      if (!handler || (input.shift && !['g', '=', '+'].includes(key))) return;
+      if (!handler || (input.shift && !['g', 'j', '=', '+'].includes(key))) return;
       event.preventDefault();
       handler();
     });
