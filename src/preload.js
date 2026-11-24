@@ -227,6 +227,8 @@ const tabWindowsBridge = {
   closeWindow: () => ipcRenderer.invoke('tab-window-close'),
   /** Load the spare window ahead of a detach (`{ href }`: the portal's new-tab path). */
   prewarm: (payload) => ipcRenderer.invoke('tab-window-prewarm', payload),
+  /** ⌘N: open a new window on the new-tab page (`{ href }`: the portal's new-tab path). */
+  openWindow: (payload) => ipcRenderer.invoke('tab-window-open', payload),
 };
 
 /**

@@ -8,6 +8,7 @@
 /** Commands Desktop may send to the page. Anything else is ignored on both sides. */
 const APP_MENU_COMMANDS = Object.freeze([
   'new-tab',
+  'new-window',
   'search-module',
   'toggle-assistant',
   'toggle-sidebar',
@@ -20,6 +21,7 @@ function normalizeAppMenuState(input) {
   if (!input || typeof input !== 'object') return null;
   return {
     canCreateTab: input.canCreateTab === true,
+    canOpenWindow: input.canOpenWindow === true,
     assistantEnabled: input.assistantEnabled === true,
     assistantOpen: input.assistantOpen === true,
     sidebarVisible: input.sidebarVisible !== false,
@@ -113,6 +115,15 @@ function buildApplicationMenuTemplate({ isMac, state, closeTab, closeWindow, ope
     {
       label: 'Fichier',
       submenu: [
+        // ⌘N / Ctrl+N : vrai raccourci natif (la page ne gère pas ⌘N). La page ouvre la fenêtre
+        // sur son nouvel onglet (`tabWindows.openWindow`), comme un détachement.
+        {
+          label: 'Nouvelle fenêtre',
+          accelerator: 'CmdOrCtrl+N',
+          enabled: Boolean(state && state.canOpenWindow),
+          click: () => send('new-window'),
+        },
+        { type: 'separator' },
         { label: "Fermer l'onglet", accelerator: 'CmdOrCtrl+W', click: (_item, win) => closeTab(win) },
         { label: 'Fermer la fenêtre', accelerator: 'CmdOrCtrl+Shift+W', click: (_item, win) => closeWindow(win) },
         // macOS : Lasco > Réglages… (⌘,). Ailleurs : Fichier > Réglages… (Ctrl+,).

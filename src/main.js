@@ -30,6 +30,7 @@ const {
   followPosition,
   isPortalPath,
   isSpareWindowUsable,
+  buildNewWindowBounds,
 } = require('./tab-windows');
 const { APP_MENU_COMMANDS, normalizeAppMenuState, buildApplicationMenuTemplate } = require('./app-menu');
 const {
@@ -1089,8 +1090,11 @@ function scheduleSpareReplenish(href) {
 /**
  * Take the spare window for a detached tab: placed at `bounds`, shown (without focus when
  * `inactive`, for a tab being dragged), tab delivered. Null when there is no usable spare.
+ * `tab` null (⌘N, new window): the spare keeps its « Nouvel onglet ». `expectedHref`: only a spare
+ * loaded on that path is taken.
  */
-function takeSpareTabWindow(tab, { bounds, inactive = false }) {
+function takeSpareTabWindow(tab, { bounds, inactive = false, expectedHref = null }) {
+  if (expectedHref && spareTabWindow && spareTabWindow.href !== expectedHref) return null;
   const spare = spareTabWindow;
   spareTabWindow = null;
   if (!spare || spare.win.isDestroyed()) return null;
@@ -1103,7 +1107,7 @@ function takeSpareTabWindow(tab, { bounds, inactive = false }) {
   if (entry) entry.spare = false;
   if (bounds) win.setBounds(bounds);
   // The page replaces its untouched « Nouvel onglet » with the delivered tab.
-  tabAdoptQueue.deliver(win.id, { ...tab, replaceBlank: true });
+  if (tab) tabAdoptQueue.deliver(win.id, { ...tab, replaceBlank: true });
   if (inactive) {
     win.showInactive();
   } else {
@@ -1111,6 +1115,25 @@ function takeSpareTabWindow(tab, { bounds, inactive = false }) {
     win.focus();
     if (process.platform === 'darwin') win.moveTop();
   }
+  scheduleSpareReplenish(href);
+  return win;
+}
+
+/**
+ * ⌘N / Ctrl+N (« Nouvelle fenêtre ») : a detached window on the portal's new-tab page `href`,
+ * cascaded from `sourceWindow`. Takes the spare when it is loaded on `href` (instant), else a fresh
+ * window. A spare is then prepared for the next ⌘N, as after a detach.
+ */
+function openNewTabWindow(href, sourceWindow) {
+  if (!isPortalPath(href)) return null;
+  const source = sourceWindow && !sourceWindow.isDestroyed() ? sourceWindow : null;
+  const sourceBounds = source ? source.getBounds() : null;
+  const at = sourceBounds ? { x: sourceBounds.x, y: sourceBounds.y } : screen.getCursorScreenPoint();
+  const workArea = screen.getDisplayNearestPoint(at).workArea;
+  const bounds = buildNewWindowBounds({ sourceBounds, workArea });
+  const spare = takeSpareTabWindow(null, { bounds, expectedHref: href });
+  if (spare) return spare;
+  const win = createWindow({ role: 'detached', startHref: href, bounds });
   scheduleSpareReplenish(href);
   return win;
 }
@@ -1229,6 +1252,8 @@ function createWindow({
   inactive = false,
   hidden = false,
   spareHref = null,
+  /** Portal path loaded by a visible detached window without a tab to adopt (⌘N). */
+  startHref = null,
 } = {}) {
   let iconPath;
   try {
@@ -1435,8 +1460,8 @@ function createWindow({
     }
   });
 
-  if (spareHref) {
-    loadMainPortalUrl(win, PORTAL_ORIGIN + spareHref);
+  if (spareHref || startHref) {
+    loadMainPortalUrl(win, PORTAL_ORIGIN + (spareHref || startHref));
   } else if (role === 'detached' && initialTab) {
     loadMainPortalUrl(win, PORTAL_ORIGIN + initialTab.locationHref);
   } else {
@@ -2063,6 +2088,14 @@ function registerWindowIPC() {
     const href = payload && typeof payload === 'object' ? payload.href : null;
     if (!isPortalPath(href)) return { ok: false, error: 'invalid-href' };
     return { ok: prewarmSpareTabWindow(href) };
+  });
+  // ⌘N / Ctrl+N: a new window on the new-tab page (`href`: the portal's new-tab path).
+  ipcMain.handle('tab-window-open', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    const href = payload && typeof payload === 'object' ? payload.href : null;
+    if (!isPortalPath(href)) return { ok: false, error: 'invalid-href' };
+    return { ok: Boolean(openNewTabWindow(href, entry.win)) };
   });
   ipcMain.handle('tab-window-detach', (event, payload) => {
     const entry = tabWindowSender(event);

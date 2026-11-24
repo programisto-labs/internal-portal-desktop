@@ -2,6 +2,7 @@
 
 N'importe quel onglet du navigateur interne (page du portail, page web, Lasco Code) peut quitter sa fenêtre et y revenir :
 
+- **Nouvelle fenêtre** (⌘N / Ctrl+N, Fichier > Nouvelle fenêtre) : une fenêtre détachée sur un nouvel onglet. Le menu relaie `new-window` à la page, qui appelle `openWindow({ href })` ; l'élément n'est actif que si la page envoie `canOpenWindow: true` dans l'état du menu.
 - **Menu de l'onglet** (clic droit) : « Détacher dans une nouvelle fenêtre » et, dans une fenêtre détachée, « Rattacher à la fenêtre principale ».
 - **Glisser-déposer** (comme Chrome) : dès que l'onglet sort de la fenêtre (ou s'éloigne de la barre), sa nouvelle fenêtre apparaît et suit le curseur. Au lâcher : sur une autre fenêtre Lasco, l'onglet s'y rattache (la fenêtre qui suivait se ferme) ; ailleurs, la fenêtre reste ; revenu sur la barre d'origine avant de lâcher, rien ne change. Seul onglet d'une fenêtre : c'est la fenêtre qui suit le curseur.
 
@@ -28,6 +29,7 @@ Appels acceptés seulement depuis le cadre principal d'une fenêtre du portail, 
 | `dragEnd({ screenX, screenY })` | Lâcher. `action` : `attached` (autre fenêtre sous le point), `detached` (la nouvelle fenêtre reste), `cancelled` (lâché sur la fenêtre d'origine), `moved` (seul onglet). La page retire l'onglet pour `attached` et `detached`. |
 | `onDragHover(cb)` | Un onglet glissé depuis une autre fenêtre survole celle-ci : `{ tab: { id, kind, title, favicon }, screenX, screenY }`, puis `null` quand il la quitte. La page montre l'onglet dans sa barre à cet endroit (aperçu en direct) ; la fenêtre qui suivait le curseur devient transparente. Au lâcher, `onAdopt` reçoit `dropScreenX` : l'onglet est inséré là. |
 | `closeWindow()` | Fenêtre détachée sans onglet : Desktop la ferme. |
+| `openWindow({ href })` | ⌘N / Ctrl+N (Fichier > Nouvelle fenêtre) : Desktop ouvre une fenêtre `detached` sur `href` (chemin du nouvel onglet), décalée de 28 px de la fenêtre d'origine, même taille. Prend la réserve si elle est chargée sur `href`, sinon une fenêtre neuve ; une nouvelle réserve est préparée 3 s plus tard. Refusé depuis la réserve. |
 | `prewarm({ href })` | Intention de détacher (menu de l'onglet ouvert, onglet saisi avec au moins deux onglets) : Desktop précharge la fenêtre de réserve sur `href` (chemin du nouvel onglet). Refusé depuis la réserve elle-même. |
 
 Descripteur `tab` (`sanitizeTabDescriptor`, `src/tab-windows.js`) : `id`, `kind` (`internal` | `external`), `href` (chemin du portail, ou URL http(s) d'un onglet web), `locationHref` (chemin chargé par la fenêtre : `href` pour une page du portail, `…/new-tab` pour un onglet web), `title`, `favicon` (http(s)), `blank`.
