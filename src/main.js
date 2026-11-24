@@ -9,6 +9,8 @@ const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
 const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
 const { createHistoryStore } = require('./browser-tabs/history');
+const { PASSWORD_PAGE_CHANNELS } = require('./browser-tabs/passwords');
+const { createVaultAuth } = require('./vault-auth');
 const {
   sanitizeTabDescriptor,
   encodeTabWindowArg,
@@ -2386,12 +2388,39 @@ function registerWindowIPC() {
     'browser-history-clear': 'historyClear',
     'browser-tab-set-overlay': 'setOverlay',
     'browser-tab-agent-action': 'agentAction',
+    // Password manager (docs/passwords.md): only the portal window drives it.
+    'browser-password-set-enabled': 'passwordSetEnabled',
+    'browser-password-set-suggestions': 'passwordSetSuggestions',
+    'browser-password-take-capture': 'passwordTakeCapture',
+    'browser-password-dismiss-capture': 'passwordDismissCapture',
+    'browser-password-fill': 'passwordFill',
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {
       const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
       if (!manager) return { ok: false, error: 'forbidden' };
       return manager[method](payload || {});
+    });
+  }
+
+  // Identity check before the portal shows a saved password (docs/passwords.md). Portal windows only.
+  const vaultAuth = createVaultAuth({ systemPreferences });
+  ipcMain.handle('lasco-vault-verify-user', (event, payload) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return vaultAuth.verifyUser(payload || {});
+  });
+  ipcMain.handle('lasco-vault-verify-reset', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return vaultAuth.reset();
+  });
+
+  // Messages of the password runtime of the web pages (password-preload.js). The sender is a
+  // web view: it is routed to the tab manager that owns it, never to a portal handler.
+  for (const channel of PASSWORD_PAGE_CHANNELS) {
+    ipcMain.on(channel, (event, payload) => {
+      for (const entry of portalWindows.values()) {
+        if (entry.tabManager && entry.tabManager.handlePasswordMessage(event, channel, payload)) return;
+      }
     });
   }
 }
