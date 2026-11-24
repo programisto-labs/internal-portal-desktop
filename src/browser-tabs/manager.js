@@ -5,6 +5,7 @@ const { sanitizeBrowserUrl } = require('./url');
 const { installBrowserTabMediaPermissions } = require('../media-permissions');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
+const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
 const path = require('path');
 
 const BROWSER_PARTITION = 'persist:browser-tabs';
@@ -163,6 +164,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     if (!sessionConfigured) {
       sessionConfigured = true;
       browserSession.setUserAgent(userAgent, buildAcceptLanguages(app.getPreferredSystemLanguages()));
+      // Electron sends no Sec-CH-UA headers: Google sign-in then refuses the browser.
+      installClientHintHeaders(browserSession);
       // Pages web externes : jamais le micro ni la caméra de l'app.
       installBrowserTabMediaPermissions(browserSession);
     }
@@ -489,8 +492,28 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     wireWebContents(tabId, view);
 
     view.webContents.setUserAgent(userAgent);
-    void view.webContents.loadURL(initialUrl);
+    entry.identityPending = true;
+    void loadWithChromeIdentity(entry);
     return entry;
+  }
+
+  /**
+   * The Chrome identity (brands, window.chrome) is attached through CDP, which
+   * needs a live renderer: load about:blank, attach, then open the tab's URL
+   * (the latest one if `navigate` ran meanwhile).
+   */
+  async function loadWithChromeIdentity(entry) {
+    const wc = entry.view.webContents;
+    try {
+      await wc.loadURL('about:blank');
+    } catch (_) {
+      // ignore: the identity is attached to the WebContents, not the document
+    }
+    if (wc.isDestroyed()) return;
+    await applyChromeIdentity(wc, userAgent);
+    entry.identityPending = false;
+    if (wc.isDestroyed() || entry.abortedBlank) return;
+    void wc.loadURL(entry.url);
   }
 
   function create({ tabId, url }) {
@@ -516,7 +539,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     }
     entry.url = safe;
     entry.abortedBlank = false;
-    void entry.view.webContents.loadURL(safe);
+    if (!entry.identityPending) void entry.view.webContents.loadURL(safe);
     if (viewsVisible && activeTabId === tabId) {
       entry.view.setVisible(!overlayActive);
       applyBounds(entry.view);
