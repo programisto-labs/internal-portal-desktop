@@ -8,9 +8,10 @@ const { ipcRenderer } = require('electron');
 const params = new URLSearchParams(globalThis.location ? globalThis.location.search : '');
 const STANDALONE = params.get('standalone') === '1';
 const AGENTS = params.get('agents') !== '0';
-const SECTIONS = ['general', 'drive', 'computer', 'permissions', 'journal', 'updates'];
+const SECTIONS = ['general', 'downloads', 'drive', 'computer', 'permissions', 'journal', 'updates'];
 const TITLES = {
   general: 'Général',
+  downloads: 'Téléchargements',
   drive: 'My Drive',
   computer: 'Cet ordinateur',
   permissions: 'Autorisations',
@@ -245,6 +246,18 @@ async function driveAction(channel, arg) {
   render();
 }
 
+/** Erreur du choix du dossier des téléchargements, affichée jusqu'au prochain changement. */
+let downloadsError = null;
+
+function renderDownloads(d) {
+  if (!d) return;
+  $('downloadsFolder').textContent = d.directory || '';
+  $('downloadsReset').hidden = d.isDefault;
+  $('downloadsAskWhere').checked = d.askWhere;
+  $('downloadsError').hidden = !downloadsError;
+  $('downloadsError').textContent = downloadsError || '';
+}
+
 function renderUpdate(u) {
   $('version').textContent = u.currentVersion || '';
   let text = UPDATE_LABELS[u.status] || '';
@@ -288,6 +301,7 @@ async function render() {
   if (!recording) renderShortcuts(g.shortcuts || []);
   renderUpdate(s.update);
   renderDrive(s.driveSync);
+  renderDownloads(s.downloads);
 
   if (!s.hostOps) return;
   const h = s.hostOps;
@@ -370,6 +384,18 @@ window.addEventListener('DOMContentLoaded', () => {
   bindSwitch('keepInBackground', 'settings-modal-set-keep-in-background');
   bindSwitch('openAtLogin', 'settings-modal-set-open-at-login');
   $('openLoginItems').onclick = () => ipcRenderer.invoke('settings-modal-open-login-items');
+  $('downloadsChoose').onclick = async () => {
+    const res = await ipcRenderer.invoke('settings-modal-downloads-choose');
+    downloadsError = res && res.error === 'not-writable' ? 'Lasco ne peut pas écrire dans ce dossier. Choisissez-en un autre.' : null;
+    render();
+  };
+  $('downloadsReset').onclick = async () => {
+    downloadsError = null;
+    await ipcRenderer.invoke('settings-modal-downloads-reset');
+    render();
+  };
+  $('downloadsOpen').onclick = () => ipcRenderer.invoke('settings-modal-downloads-open');
+  bindSwitch('downloadsAskWhere', 'settings-modal-downloads-set-ask');
   $('driveEnabled').onchange = () => driveAction('settings-modal-drive-set-enabled', $('driveEnabled').checked);
   $('driveChooseFolder').onclick = () => driveAction('settings-modal-drive-choose-folder');
   $('driveOpenFolder').onclick = () => ipcRenderer.invoke('settings-modal-drive-open-folder');

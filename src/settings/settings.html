@@ -149,6 +149,10 @@
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
         Général
       </button>
+      <button data-section="downloads">
+        <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+        Téléchargements
+      </button>
       <button data-section="drive">
         <svg viewBox="0 0 24 24"><path d="M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01"/></svg>
         My Drive
@@ -227,6 +231,29 @@
         <h2>Raccourcis clavier</h2>
         <p class="intro" id="shortcutsIntro" style="margin: 0 0 8px 2px; font-size: 12px;">Disponibles partout, même quand Lasco est masqué. Cliquez sur un raccourci puis tapez la nouvelle combinaison (avec ⌘, ⌃ ou ⌥). Échap annule.</p>
         <div class="group" id="shortcuts"></div>
+      </section>
+
+      <section data-panel="downloads" hidden>
+        <p class="intro">Fichiers téléchargés depuis les onglets web et depuis Lasco (exports CSV, PDF…). La liste est dans le menu ☰ du navigateur &gt; Téléchargements.</p>
+        <div class="group">
+          <div class="row">
+            <div class="text">
+              <div class="label">Emplacement</div>
+              <div class="hint mono" id="downloadsFolder"></div>
+              <div class="hint error" id="downloadsError" hidden></div>
+            </div>
+            <button class="link" id="downloadsOpen">Afficher</button>
+            <button class="link" id="downloadsReset" hidden>Rétablir</button>
+            <button class="btn" id="downloadsChoose">Modifier…</button>
+          </div>
+          <div class="row">
+            <div class="text">
+              <div class="label">Demander où enregistrer chaque fichier</div>
+              <div class="hint">Affiche « Enregistrer sous » avant chaque téléchargement.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="downloadsAskWhere" aria-label="Demander où enregistrer chaque fichier"><span></span></label>
+          </div>
+        </div>
       </section>
 
       <section data-panel="drive" hidden>

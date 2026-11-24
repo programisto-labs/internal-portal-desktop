@@ -1,10 +1,11 @@
 const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, globalShortcut, session, systemPreferences } = require('electron');
 const { installPortalMediaPermissions } = require('./media-permissions');
+const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
 const { autoUpdater } = require('electron-updater');
-const { createBrowserTabManager } = require('./browser-tabs/manager');
+const { createBrowserTabManager, BROWSER_PARTITION } = require('./browser-tabs/manager');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
 const {
@@ -15,6 +16,8 @@ const {
 } = require('./default-browser');
 const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
 const { createHistoryStore } = require('./browser-tabs/history');
+const { createDownloadsStore } = require('./downloads/store');
+const { createDownloadService } = require('./downloads/service');
 const { PASSWORD_PAGE_CHANNELS } = require('./browser-tabs/passwords');
 const { createVaultAuth } = require('./vault-auth');
 const {
@@ -941,6 +944,66 @@ function getBrowserHistoryStore() {
   return browserHistoryStore;
 }
 
+/**
+ * Téléchargements des onglets web et des pages du portail (docs/downloads.md). Un seul service
+ * pour toutes les fenêtres ; chaque fenêtre du portail reçoit les changements.
+ */
+let downloadService = null;
+
+/** Dossier des téléchargements : celui des Réglages s'il existe encore, sinon celui du système. */
+function downloadsDirectory() {
+  const chosen = getSettings().downloadsDirectory;
+  if (chosen) {
+    try {
+      if (fs.statSync(chosen).isDirectory()) return chosen;
+    } catch (_) {
+      // Dossier déplacé ou disque débranché : dossier du système.
+    }
+  }
+  return app.getPath('downloads');
+}
+
+function getDownloadService() {
+  if (downloadService) return downloadService;
+  downloadService = createDownloadService({
+    store: createDownloadsStore({ filePath: path.join(app.getPath('userData'), 'downloads.json') }),
+    getDirectory: downloadsDirectory,
+    shouldAsk: () => getSettings().downloadsAskWhere === true,
+    fileExists: (p) => {
+      try {
+        return fs.statSync(p).isFile();
+      } catch (_) {
+        return false;
+      }
+    },
+    ensureDir: (dir) => {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+    openPath: (p) => void shell.openPath(p),
+    showItemInFolder: (p) => shell.showItemInFolder(p),
+    openFolder: (p) => void shell.openPath(p),
+    emit: (event) => {
+      for (const entry of portalWindows.values()) {
+        if (!entry.win.isDestroyed()) entry.win.webContents.send('downloads-changed', event);
+      }
+    },
+    getSession: (source) => session.fromPartition(source === 'portal' ? 'persist:portal' : BROWSER_PARTITION),
+    onFinished: (p) => {
+      if (process.platform === 'darwin' && app.dock) app.dock.downloadFinished(p);
+    },
+    setProgress: (fraction) => {
+      const win = mainPortalWindow();
+      if (win && !win.isDestroyed()) win.setProgressBar(fraction);
+    },
+  });
+  return downloadService;
+}
+
 function portalWindowEntry(win) {
   if (!win || win.isDestroyed()) return null;
   return portalWindows.get(win.id) || null;
@@ -1749,6 +1812,41 @@ function registerWindowIPC() {
     installApplicationMenu();
   });
 
+  // --- Téléchargements (docs/downloads.md) : toute fenêtre du portail, cadre principal, origine du portail ---
+  const downloadsSender = (event) => {
+    const frame = event.senderFrame;
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return false;
+    if (!frame || frame !== event.sender.mainFrame) return false;
+    try {
+      return new URL(frame.url).origin === PORTAL_ORIGIN;
+    } catch {
+      return false;
+    }
+  };
+  const downloadActions = {
+    'downloads-list': 'list',
+    'downloads-pause': 'pause',
+    'downloads-resume': 'resume',
+    'downloads-cancel': 'cancel',
+    'downloads-retry': 'retry',
+    'downloads-open': 'open',
+    'downloads-show': 'show',
+    'downloads-remove': 'remove',
+    'downloads-clear': 'clear',
+    'downloads-open-directory': 'openDirectory',
+  };
+  for (const [channel, method] of Object.entries(downloadActions)) {
+    ipcMain.handle(channel, (event, payload) => {
+      if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+      return getDownloadService()[method](payload && typeof payload === 'object' ? payload : {});
+    });
+  }
+  ipcMain.handle('downloads-open-settings', (event) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    openSettings('downloads');
+    return { ok: true };
+  });
+
   // --- Host operations: bridge for the web app (strictly validated natively) ---
   /** Cadre principal de la fenêtre principale, chargé depuis l'origine exacte du portail. */
   const trustedPortalSender = (event) => {
@@ -2163,6 +2261,11 @@ function registerWindowIPC() {
       },
       update: buildUpdateSnapshot(),
       driveSync: driveSyncSettingsState(getDriveSyncStore()),
+      downloads: {
+        directory: downloadsDirectory(),
+        isDefault: !settings.downloadsDirectory || downloadsDirectory() !== settings.downloadsDirectory,
+        askWhere: settings.downloadsAskWhere === true,
+      },
       hostOps,
     };
   });
@@ -2241,6 +2344,42 @@ function registerWindowIPC() {
     applyGlobalShortcuts();
     if (shortcutStatus[id] === 'unavailable') return { ok: false, error: 'unavailable', saved: true };
     return { ok: true };
+  });
+  // Réglages > Téléchargements (docs/downloads.md) : le dossier ne se choisit jamais depuis la page.
+  ipcMain.handle('settings-modal-downloads-choose', async (event) => {
+    if (!fromSettings(event)) return { ok: false };
+    const win = settingsSurface && settingsSurface.window ? settingsSurface.window : mainPortalWindow();
+    const options = {
+      title: 'Dossier des téléchargements',
+      buttonLabel: 'Choisir',
+      defaultPath: downloadsDirectory(),
+      properties: ['openDirectory', 'createDirectory', 'promptToCreate'],
+    };
+    const res = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+    const picked = res.canceled || !res.filePaths ? null : res.filePaths[0];
+    if (!picked) return { ok: false, cancelled: true };
+    try {
+      fs.accessSync(picked, fs.constants.W_OK);
+    } catch (_) {
+      return { ok: false, error: 'not-writable' };
+    }
+    getSettingsStore().set({ downloadsDirectory: picked === app.getPath('downloads') ? null : picked });
+    return { ok: true };
+  });
+  ipcMain.handle('settings-modal-downloads-reset', (event) => {
+    if (!fromSettings(event)) return false;
+    getSettingsStore().set({ downloadsDirectory: null });
+    return true;
+  });
+  ipcMain.handle('settings-modal-downloads-open', (event) => {
+    if (!fromSettings(event)) return false;
+    void shell.openPath(downloadsDirectory());
+    return true;
+  });
+  ipcMain.handle('settings-modal-downloads-set-ask', (event, value) => {
+    if (!fromSettings(event) || typeof value !== 'boolean') return false;
+    getSettingsStore().set({ downloadsAskWhere: value });
+    return true;
   });
   ipcMain.handle('settings-modal-update-check', async (event) => {
     if (!fromSettings(event)) return null;
@@ -2521,6 +2660,9 @@ if (!app.requestSingleInstanceLock()) {
       isPortalUrl: isPortalNavigationUrl,
       systemPreferences,
     });
+    // Téléchargements : pages web des onglets et pages du portail (exports CSV, PDF…).
+    getDownloadService().attach(session.fromPartition(BROWSER_PARTITION), 'web');
+    getDownloadService().attach(session.fromPartition('persist:portal'), 'portal');
     registerWindowIPC();
     setupAutoUpdater();
     nativeTheme.on('updated', updateAllIcons);
@@ -2559,6 +2701,7 @@ if (!app.requestSingleInstanceLock()) {
       codeCore.watchers.stopAll();
     }
     destroyAllBrowserViews();
+    if (downloadService) downloadService.flush();
     if (updateCheckIntervalId) {
       clearInterval(updateCheckIntervalId);
       updateCheckIntervalId = null;

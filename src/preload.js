@@ -249,6 +249,25 @@ const driveSyncBridge = {
   writeFile: (payload) => ipcRenderer.invoke('drive-sync-write-file', payload),
 };
 
+/**
+ * Téléchargements des onglets web et des pages du portail (docs/downloads.md). La page agit par
+ * identifiant, jamais par chemin ; le dossier se choisit dans les Réglages de Desktop.
+ */
+const downloadsBridge = {
+  list: (payload) => ipcRenderer.invoke('downloads-list', payload),
+  pause: (id) => ipcRenderer.invoke('downloads-pause', { id }),
+  resume: (id) => ipcRenderer.invoke('downloads-resume', { id }),
+  cancel: (id) => ipcRenderer.invoke('downloads-cancel', { id }),
+  retry: (id) => ipcRenderer.invoke('downloads-retry', { id }),
+  open: (id) => ipcRenderer.invoke('downloads-open', { id }),
+  show: (id) => ipcRenderer.invoke('downloads-show', { id }),
+  remove: (id) => ipcRenderer.invoke('downloads-remove', { id }),
+  clear: () => ipcRenderer.invoke('downloads-clear'),
+  openDirectory: () => ipcRenderer.invoke('downloads-open-directory'),
+  openSettings: () => ipcRenderer.invoke('downloads-open-settings'),
+  onChanged: (callback) => subscribe('downloads-changed', callback),
+};
+
 const desktopBridge = {
   platform: process.platform,
   version: appVersion,
@@ -297,6 +316,7 @@ const desktopBridge = {
   },
   ...(noAgents && { noAgents: true }),
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
+  ...(exposePortalBridges && { downloads: downloadsBridge }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
