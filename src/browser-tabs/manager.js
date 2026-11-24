@@ -126,6 +126,25 @@ function sendClick(wc, x, y, clickCount = 1) {
   }
 }
 
+const IDENTITY_STEP_TIMEOUT_MS = 3000;
+
+/** Resolves with the promise's value, or `false` once `ms` have passed. */
+function withTimeout(promise, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(false);
+      },
+    );
+  });
+}
+
 function waitForLoadStop(wc, maxMs) {
   if (!wc.isLoading()) return Promise.resolve();
   return new Promise((resolve) => {
@@ -504,16 +523,25 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
    */
   async function loadWithChromeIdentity(entry) {
     const wc = entry.view.webContents;
+    const startedAt = Date.now();
     try {
-      await wc.loadURL('about:blank');
-    } catch (_) {
-      // ignore: the identity is attached to the WebContents, not the document
+      // Never let the identity step hold the tab: past the limit, the page
+      // still opens (plain Chrome user agent only).
+      const blank = await withTimeout(
+        wc.loadURL('about:blank').then(
+          () => true,
+          () => true,
+        ),
+        IDENTITY_STEP_TIMEOUT_MS,
+      );
+      if (!blank) console.warn('[browser-tabs] about:blank did not finish loading');
+      if (wc.isDestroyed()) return;
+      const applied = await withTimeout(applyChromeIdentity(wc, userAgent), IDENTITY_STEP_TIMEOUT_MS);
+      if (!applied) console.warn(`[browser-tabs] chrome identity not applied after ${Date.now() - startedAt} ms`);
+    } finally {
+      entry.identityPending = false;
+      if (!wc.isDestroyed() && !entry.abortedBlank) void wc.loadURL(entry.url);
     }
-    if (wc.isDestroyed()) return;
-    await applyChromeIdentity(wc, userAgent);
-    entry.identityPending = false;
-    if (wc.isDestroyed() || entry.abortedBlank) return;
-    void wc.loadURL(entry.url);
   }
 
   function create({ tabId, url }) {
