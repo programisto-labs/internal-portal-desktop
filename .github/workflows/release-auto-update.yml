@@ -88,11 +88,16 @@ jobs:
       - name: Verify the published app is signed and notarized
         run: |
           set -euo pipefail
-          app="dist/mac-arm64/Lasco.app"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          codesign -dv "$app" 2>&1 | grep -q "TeamIdentifier=${{ secrets.APPLE_TEAM_ID }}"
-          spctl --assess --type execute --verbose=2 "$app"
-          xcrun stapler validate "$app"
+          # Apple Silicon (dist/mac-arm64) and Intel (dist/mac) builds.
+          for app in "dist/mac-arm64/Lasco.app" "dist/mac/Lasco.app"; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv "$app" 2>&1 | grep -q "TeamIdentifier=${{ secrets.APPLE_TEAM_ID }}"
+            spctl --assess --type execute --verbose=2 "$app"
+            xcrun stapler validate "$app"
+          done
+          # Running apps pick their architecture's zip from latest-mac.yml: both must be listed.
+          grep -q -- "-arm64-mac.zip" dist/latest-mac.yml
+          grep -E -q -- "-[0-9.]+-mac.zip" dist/latest-mac.yml
 
       - name: Delete signing keychain
         if: always()
