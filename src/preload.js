@@ -95,6 +95,10 @@ const browserTabsBridge = {
   openExternal: (payload) => invokeBrowserTab('browser-tab-open-external', payload),
   openDevTools: (payload) => invokeBrowserTab('browser-tab-open-devtools', payload),
   clearBrowsingData: () => invokeBrowserTab('browser-tab-clear-data'),
+  // Informations du site (docs/site-permissions.md) : sécurité et autorisations retenues.
+  siteInfo: (payload) => invokeBrowserTab('browser-tab-site-info', payload),
+  setSitePermission: (payload) => invokeBrowserTab('browser-tab-set-site-permission', payload),
+  resetSitePermissions: (payload) => invokeBrowserTab('browser-tab-reset-site-permissions', payload),
   historySuggest: (payload) => invokeBrowserTab('browser-history-suggest', payload),
   historyList: (payload) => invokeBrowserTab('browser-history-list', payload),
   historyRemove: (payload) => invokeBrowserTab('browser-history-remove', payload),

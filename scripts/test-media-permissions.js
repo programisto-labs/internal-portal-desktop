@@ -7,7 +7,6 @@ const {
   portalMediaCheckAllowed,
   ensureSystemMicrophoneAccess,
   installPortalMediaPermissions,
-  installBrowserTabMediaPermissions,
 } = require('../src/media-permissions');
 
 const isPortal = (u) => {
@@ -64,13 +63,5 @@ describe('media permissions', () => {
     assert.equal(await ask(s.handlers.request, wc, 'media', { mediaTypes: ['audio'] }), true);
     assert.equal(await ask(s.handlers.request, wc, 'media', { mediaTypes: ['video'] }), false);
     assert.equal(s.handlers.check(wc, 'clipboard-read', 'https://app.lascoapp.com', {}), true);
-  });
-
-  it('onglets web : ni micro ni caméra', async () => {
-    const s = fakeSession();
-    installBrowserTabMediaPermissions(s);
-    assert.equal(await ask(s.handlers.request, {}, 'media', { mediaTypes: ['audio'] }), false);
-    assert.equal(await ask(s.handlers.request, {}, 'fullscreen', {}), true);
-    assert.equal(s.handlers.check({}, 'media', 'https://example.com', {}), false);
   });
 });
