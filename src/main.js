@@ -7,6 +7,12 @@ const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager } = require('./browser-tabs/manager');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
+const {
+  classifyIncomingUrl,
+  defaultBrowserSnapshot,
+  setAsDefaultBrowser,
+  createPendingWebUrls,
+} = require('./default-browser');
 const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
 const { createHistoryStore } = require('./browser-tabs/history');
 const {
@@ -1084,6 +1090,48 @@ function handleLascoDeepLink(urlString) {
   }
 }
 
+/** Web links received before the portal could show them (cold start). */
+const pendingWebUrls = createPendingWebUrls();
+
+function flushPendingWebUrls() {
+  const win = mainPortalWindow();
+  if (!win || win.isDestroyed()) return;
+  for (const url of pendingWebUrls.drain()) openExternalAsBrowserTab(url, win);
+}
+
+/**
+ * An http(s) link handed over by the OS (Lasco is the default browser, or the
+ * user chose « Ouvrir avec Lasco »). Portal links open as portal tabs, any
+ * other site in a web tab. Never sent back to the default browser: Lasco may
+ * be it, which would loop.
+ */
+function handleIncomingWebUrl(urlString) {
+  const target = parseLascoOpenTarget(urlString);
+  const win = app.isReady() ? mainPortalWindow() : null;
+  if (target) {
+    if (win) {
+      win.webContents.send('open-portal-tab', target);
+      showMainWindow();
+    } else {
+      pendingInitialPortalFullUrl = PORTAL_URL.replace(/\/$/, '') + target;
+    }
+    return;
+  }
+  if (win && !win.webContents.isLoading()) {
+    openExternalAsBrowserTab(urlString, win);
+  } else {
+    pendingWebUrls.push(urlString);
+  }
+  if (app.isReady()) showMainWindow();
+}
+
+/** Any URL the OS opens with Lasco (lasco://, http, https). */
+function handleIncomingUrl(urlString) {
+  const kind = classifyIncomingUrl(urlString, LASCO_PROTOCOL);
+  if (kind === 'lasco') handleLascoDeepLink(urlString);
+  else if (kind === 'web') handleIncomingWebUrl(urlString);
+}
+
 function registerLascoProtocolClient() {
   try {
     if (!getSettings().openLinksInApp) {
@@ -1214,7 +1262,9 @@ function createWindow({
   const winId = win.id;
   // `spare`: hidden, pre-loaded detached window (never a drop target nor the next main window).
   portalWindows.set(winId, { win, role, tabManager: null, spare: Boolean(spareHref) });
-  if (role === 'main') mainWindowRef = win;
+  if (role === 'main') {
+    mainWindowRef = win;
+  }
   // A full page load (login, reload): moved tabs wait until the new page asks for them.
   win.webContents.on('did-navigate', () => tabAdoptQueue.reset(winId));
   // « Fenêtre » menu: a full page load (login, reload) drops the state until the portal reports it again.
@@ -2102,6 +2152,7 @@ function registerWindowIPC() {
       general: {
         themeSource: settings.themeSource,
         openLinksInApp: settings.openLinksInApp,
+        defaultBrowser: defaultBrowserSnapshot(app),
         // Background mode needs the menu bar icon (macOS).
         backgroundAvailable: Boolean(trayController),
         keepInBackground: settings.keepInBackground,
@@ -2127,6 +2178,10 @@ function registerWindowIPC() {
       if (!w.isDestroyed()) w.webContents.send('settings-changed', next);
     }
     return true;
+  });
+  ipcMain.handle('settings-modal-set-default-browser', (event) => {
+    if (!fromSettings(event)) return false;
+    return setAsDefaultBrowser(app);
   });
   ipcMain.handle('settings-modal-set-keep-in-background', (event, enabled) => {
     if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
@@ -2282,6 +2337,11 @@ function registerWindowIPC() {
     return { ok: true };
   });
 
+  // The tab strip subscribed to open requests: deliver web links received while
+  // the portal was starting (cold start as default browser, page reload).
+  ipcMain.on('browser-tab-open-ready', (event) => {
+    if (BrowserWindow.fromWebContents(event.sender) === mainPortalWindow()) flushPendingWebUrls();
+  });
   ipcMain.handle('browser-tab-create', (event, payload) => {
     const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
     if (!manager) return { ok: false, error: 'forbidden' };
@@ -2400,14 +2460,14 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', (_event, argv) => {
-    const url = argv.find((s) => typeof s === 'string' && s.startsWith(`${LASCO_PROTOCOL}:`));
+    const url = argv.find((s) => classifyIncomingUrl(s, LASCO_PROTOCOL) === 'lasco');
     if (url) handleLascoDeepLink(url);
     else showMainWindow();
   });
 
   app.on('open-url', (event, url) => {
     event.preventDefault();
-    handleLascoDeepLink(url);
+    handleIncomingUrl(url);
   });
 
   app.whenReady().then(() => {
