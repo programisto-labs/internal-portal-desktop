@@ -160,6 +160,15 @@ function trayTooltip(view) {
 }
 
 /**
+ * Fenêtre principale masquée : Chromium ralentit ses minuteurs et arrête ses images (économie de CPU,
+ * de GPU et de batterie), sauf tant qu'un agent travaille ou attend une réponse. Le tour, son flux et
+ * le résumé de l'icône gardent alors leur rythme.
+ */
+function mainWindowNeedsFullPace(view) {
+  return view.working.length + view.harnessRuns.length + trayPendingCount(view) > 0;
+}
+
+/**
  * Action choisie dans le popover, revérifiée contre la vue affichée : on ne relaie au portail
  * qu'un identifiant présent dans la vue (pas d'identifiant inventé par la page du popover).
  * @returns {{ kind: 'portal', command: string, payload: object } | { kind: 'native', action: string, id?: string } | null}
@@ -205,4 +214,5 @@ module.exports = {
   trayIconVariant,
   trayTooltip,
   resolveTrayAction,
+  mainWindowNeedsFullPace,
 };
