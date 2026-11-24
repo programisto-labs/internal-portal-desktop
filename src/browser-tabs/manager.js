@@ -510,10 +510,18 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       // never runs when focus is inside a native browser view.
       if (key === 'w' && !input.shift) return;
       const forward = (action) => emitToRenderer(SHORTCUT_CHANNEL, { tabId, action });
+      // The find bar and the address bar live in the portal page: hand it the
+      // keyboard focus first, otherwise the field is focused in the DOM but the
+      // keys keep going to this view.
+      const forwardToPortalField = (action) => {
+        const win = getMainWindow();
+        if (win && !win.isDestroyed()) win.webContents.focus();
+        forward(action);
+      };
       const handlers = {
-        f: () => forward('find'),
+        f: () => forwardToPortalField('find'),
         g: () => forward(input.shift ? 'find-previous' : 'find-next'),
-        l: () => forward('focus-address'),
+        l: () => forwardToPortalField('focus-address'),
         t: () => forward('new-tab'),
         p: () => print({ tabId }),
         r: () => reload({ tabId }),
