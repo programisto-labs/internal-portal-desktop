@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   parseKeyCombo,
   nextZoomFactor,
+  isCurrentTabView,
   buildChromiumUserAgent,
   buildAcceptLanguages,
 } = require('../src/browser-tabs/manager');
@@ -18,6 +19,15 @@ describe('desktop browser manager helpers', () => {
     assert.equal(parseKeyCombo('Hyper+x'), null);
     assert.equal(parseKeyCombo('NotAKey'), null);
     assert.equal(parseKeyCombo(''), null);
+  });
+
+  it('ignores the late destroy of a view replaced by create on the same tab id', () => {
+    const oldView = {};
+    const newView = {};
+    const tabs = new Map([['tab-1', { view: newView }]]);
+    assert.equal(isCurrentTabView(tabs, 'tab-1', oldView), false);
+    assert.equal(isCurrentTabView(tabs, 'tab-1', newView), true);
+    assert.equal(isCurrentTabView(tabs, 'tab-2', newView), false);
   });
 
   it('walks the Chrome zoom ladder', () => {

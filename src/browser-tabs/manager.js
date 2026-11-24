@@ -95,6 +95,12 @@ function nextZoomFactor(current, direction) {
   return [...ZOOM_LEVELS].reverse().find((level) => level < current - 0.001) ?? ZOOM_LEVELS[0];
 }
 
+/** True while `view` is still the registered view of `tabId` (not replaced by a later `create`). */
+function isCurrentTabView(tabs, tabId, view) {
+  const entry = tabs.get(tabId);
+  return Boolean(entry) && entry.view === view;
+}
+
 /** "Enter", "Control+a", "Mod+Shift+K" → Electron keyCode + modifiers. */
 function parseKeyCombo(combo) {
   const parts = String(combo || '')
@@ -504,11 +510,13 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     });
     wc.on('destroyed', () => {
       tabIdsByWebContents.delete(webContentsId);
+      // `create` on a live tab id (shell reloaded, e.g. workspace switch) closes the old
+      // view and registers the new one at once; the old view's `destroyed` comes later
+      // and must not drop the new entry (tab stuck loading, stop / reload ignored).
+      if (!isCurrentTabView(tabs, tabId, view)) return;
       passwords.forgetTab(tabId);
-      if (tabs.has(tabId)) {
-        tabs.delete(tabId);
-        if (activeTabId === tabId) activeTabId = null;
-      }
+      tabs.delete(tabId);
+      if (activeTabId === tabId) activeTabId = null;
     });
 
     wc.on('zoom-changed', (_event, direction) => {
@@ -1279,6 +1287,7 @@ module.exports = {
   BROWSER_PARTITION,
   parseKeyCombo,
   nextZoomFactor,
+  isCurrentTabView,
   buildChromiumUserAgent,
   buildAcceptLanguages,
 };
