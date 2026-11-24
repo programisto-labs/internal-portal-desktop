@@ -9,6 +9,7 @@ const {
   trayIconVariant,
   trayTooltip,
   resolveTrayAction,
+  mainWindowNeedsFullPace,
 } = require('../src/tray/tray-state');
 
 const A = 'a'.repeat(24);
@@ -126,5 +127,22 @@ describe('tray actions', () => {
   it('ignores unknown actions', () => {
     assert.equal(resolveTrayAction(view, { type: 'eval' }), null);
     assert.equal(resolveTrayAction(view, null), null);
+  });
+});
+
+describe('mainWindowNeedsFullPace', () => {
+  it('lets Chromium throttle the hidden main window when nothing is going on', () => {
+    assert.equal(mainWindowNeedsFullPace(buildTrayView({ portal: null })), false);
+    const idle = normalizePortalTrayState({ unread: [{ conversationId: B, count: 3 }], unreadTotal: 3 });
+    assert.equal(mainWindowNeedsFullPace(buildTrayView({ portal: idle })), false);
+  });
+  it('keeps full pace while an agent works, a harness runs or an answer is awaited', () => {
+    const working = normalizePortalTrayState({ working: [{ conversationId: C, agentId: B, status: 'writing' }] });
+    assert.equal(mainWindowNeedsFullPace(buildTrayView({ portal: working })), true);
+    const approval = normalizePortalTrayState({ approvals: [{ conversationId: A, callId: 'call_1', agentId: B }] });
+    assert.equal(mainWindowNeedsFullPace(buildTrayView({ portal: approval })), true);
+    assert.equal(mainWindowNeedsFullPace(buildTrayView({ portal: null, harnessRuns: [{ runId: 'r1', status: 'running' }] })), true);
+    assert.equal(mainWindowNeedsFullPace(buildTrayView({ portal: null, harnessRuns: [{ runId: 'r1', status: 'done' }] })), false);
+    assert.equal(mainWindowNeedsFullPace(buildTrayView({ portal: null, hostConfirms: [{ id: 'h1' }] })), true);
   });
 });

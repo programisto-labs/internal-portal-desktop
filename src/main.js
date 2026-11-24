@@ -62,7 +62,7 @@ const { createDriveSyncStore } = require('./drive-sync/store');
 const { createDriveSyncFsOps } = require('./drive-sync/fs-ops');
 const { registerDriveSyncIpc, driveSyncSettingsState } = require('./drive-sync/ipc');
 const { createTrayController } = require('./tray/tray');
-const { normalizePortalTrayState, TRAY_PORTAL_COMMANDS } = require('./tray/tray-state');
+const { normalizePortalTrayState, TRAY_PORTAL_COMMANDS, buildTrayView, mainWindowNeedsFullPace } = require('./tray/tray-state');
 const { SHORTCUT_IDS, DEFAULT_SHORTCUTS, formatAccelerator, updateShortcut, acceleratorFromKeyEvent } = require('./background-mode');
 const { trayPlaceLabel } = require('./tray/tray-platform');
 const {
@@ -1273,8 +1273,8 @@ function createWindow({
       sandbox: true,
       webSecurity: true,
       partition: 'persist:portal',
-      // Main window hidden in the background: agent turns, chat stream and tray summary keep their pace.
-      backgroundThrottling: role !== 'main',
+      // Main window hidden: throttled like any browser tab, except while an agent works (syncMainWindowPace).
+      backgroundThrottling: true,
       additionalArguments: [
         `${APP_VERSION_ARG_PREFIX}${app.getVersion()}`,
         `${PORTAL_ORIGIN_ARG_PREFIX}${PORTAL_ORIGIN}`,
@@ -1330,6 +1330,8 @@ function createWindow({
   portalWindows.set(winId, { win, role, tabManager: null, spare: Boolean(spareHref) });
   if (role === 'main') {
     mainWindowRef = win;
+    mainWindowFullPace = false;
+    scheduleTrayRefresh();
   }
   // A full page load (login, reload): moved tabs wait until the new page asks for them.
   win.webContents.on('did-navigate', () => tabAdoptQueue.reset(winId));
@@ -1492,7 +1494,22 @@ let trayController = null;
 let trayPortalState = null;
 let trayRefreshTimer = null;
 
+/**
+ * Rythme de la fenêtre principale masquée (docs/background.md) : ralentie comme un onglet de navigateur,
+ * sauf pendant un tour d'agent, un harnais ou une validation en attente.
+ */
+let mainWindowFullPace = false;
+function syncMainWindowPace() {
+  const win = mainWindowRef;
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  const fullPace = mainWindowNeedsFullPace(buildTrayView(traySources()));
+  if (fullPace === mainWindowFullPace) return;
+  mainWindowFullPace = fullPace;
+  win.webContents.setBackgroundThrottling(!fullPace);
+}
+
 function scheduleTrayRefresh() {
+  syncMainWindowPace();
   if (!trayController || trayRefreshTimer) return;
   trayRefreshTimer = setTimeout(() => {
     trayRefreshTimer = null;
