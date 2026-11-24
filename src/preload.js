@@ -39,13 +39,26 @@ function onBrowserTabState(callback) {
   return () => ipcRenderer.removeListener('browser-tab-state', handler);
 }
 
+// Links opened while the portal is still starting (Lasco launched as the default
+// browser) arrive before the tab strip subscribes: keep them until it does.
+const openRequestSubscribers = new Set();
+const pendingOpenRequests = [];
+ipcRenderer.on('browser-tab-open-request', (_event, payload) => {
+  if (openRequestSubscribers.size === 0) {
+    if (pendingOpenRequests.length < 20) pendingOpenRequests.push(payload);
+    return;
+  }
+  for (const callback of openRequestSubscribers) callback(payload);
+});
+
 function onBrowserTabOpenRequest(callback) {
   if (typeof callback !== 'function') {
     throw new TypeError('onBrowserTabOpenRequest requires a function callback.');
   }
-  const handler = (_event, payload) => callback(payload);
-  ipcRenderer.on('browser-tab-open-request', handler);
-  return () => ipcRenderer.removeListener('browser-tab-open-request', handler);
+  openRequestSubscribers.add(callback);
+  for (const payload of pendingOpenRequests.splice(0, pendingOpenRequests.length)) callback(payload);
+  ipcRenderer.send('browser-tab-open-ready');
+  return () => openRequestSubscribers.delete(callback);
 }
 
 function subscribe(channel, callback) {

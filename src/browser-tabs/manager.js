@@ -5,6 +5,7 @@ const { sanitizeBrowserUrl } = require('./url');
 const { installBrowserTabMediaPermissions } = require('../media-permissions');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
+const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
 const { createPasswordController } = require('./passwords');
 const path = require('path');
 
@@ -128,6 +129,25 @@ function sendClick(wc, x, y, clickCount = 1) {
   }
 }
 
+const IDENTITY_STEP_TIMEOUT_MS = 3000;
+
+/** Resolves with the promise's value, or `false` once `ms` have passed. */
+function withTimeout(promise, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(false);
+      },
+    );
+  });
+}
+
 function waitForLoadStop(wc, maxMs) {
   if (!wc.isLoading()) return Promise.resolve();
   return new Promise((resolve) => {
@@ -184,6 +204,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     if (!sessionConfigured) {
       sessionConfigured = true;
       browserSession.setUserAgent(userAgent, buildAcceptLanguages(app.getPreferredSystemLanguages()));
+      // Electron sends no Sec-CH-UA headers: Google sign-in then refuses the browser.
+      installClientHintHeaders(browserSession);
       // Pages web externes : jamais le micro ni la caméra de l'app.
       installBrowserTabMediaPermissions(browserSession);
     }
@@ -518,8 +540,37 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     wireWebContents(tabId, view);
 
     view.webContents.setUserAgent(userAgent);
-    void view.webContents.loadURL(initialUrl);
+    entry.identityPending = true;
+    void loadWithChromeIdentity(entry);
     return entry;
+  }
+
+  /**
+   * The Chrome identity (brands, window.chrome) is attached through CDP, which
+   * needs a live renderer: load about:blank, attach, then open the tab's URL
+   * (the latest one if `navigate` ran meanwhile).
+   */
+  async function loadWithChromeIdentity(entry) {
+    const wc = entry.view.webContents;
+    const startedAt = Date.now();
+    try {
+      // Never let the identity step hold the tab: past the limit, the page
+      // still opens (plain Chrome user agent only).
+      const blank = await withTimeout(
+        wc.loadURL('about:blank').then(
+          () => true,
+          () => true,
+        ),
+        IDENTITY_STEP_TIMEOUT_MS,
+      );
+      if (!blank) console.warn('[browser-tabs] about:blank did not finish loading');
+      if (wc.isDestroyed()) return;
+      const applied = await withTimeout(applyChromeIdentity(wc, userAgent), IDENTITY_STEP_TIMEOUT_MS);
+      if (!applied) console.warn(`[browser-tabs] chrome identity not applied after ${Date.now() - startedAt} ms`);
+    } finally {
+      entry.identityPending = false;
+      if (!wc.isDestroyed() && !entry.abortedBlank) void wc.loadURL(entry.url);
+    }
   }
 
   function create({ tabId, url }) {
@@ -545,7 +596,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     }
     entry.url = safe;
     entry.abortedBlank = false;
-    void entry.view.webContents.loadURL(safe);
+    if (!entry.identityPending) void entry.view.webContents.loadURL(safe);
     if (viewsVisible && activeTabId === tabId) {
       entry.view.setVisible(!overlayActive);
       applyBounds(entry.view);

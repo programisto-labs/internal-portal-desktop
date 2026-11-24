@@ -264,6 +264,12 @@ async function render() {
     b.setAttribute('aria-pressed', String(b.dataset.value === s.general.themeSource));
   }
   $('openLinksInApp').checked = s.general.openLinksInApp;
+  const browser = s.general.defaultBrowser || { available: false };
+  $('defaultBrowserRow').hidden = !browser.available;
+  $('defaultBrowserSet').hidden = browser.isDefault === true;
+  $('defaultBrowserHint').textContent = browser.isDefault
+    ? 'Lasco est votre navigateur par défaut : les liens web s’ouvrent dans un onglet de Lasco.'
+    : 'Les liens web ouverts ailleurs (e-mails, autres apps) s’ouvriront dans un onglet de Lasco.';
   const g = s.general;
   $('keepInBackgroundRow').hidden = !g.backgroundAvailable;
   $('keepInBackground').checked = g.keepInBackground;
@@ -355,6 +361,12 @@ window.addEventListener('DOMContentLoaded', () => {
     };
   }
   bindSwitch('openLinksInApp', 'settings-modal-set-open-links');
+  $('defaultBrowserSet').onclick = async () => {
+    // macOS asks for confirmation; its answer is only known once the window regains focus.
+    await ipcRenderer.invoke('settings-modal-set-default-browser');
+    render();
+    window.addEventListener('focus', () => render(), { once: true });
+  };
   bindSwitch('keepInBackground', 'settings-modal-set-keep-in-background');
   bindSwitch('openAtLogin', 'settings-modal-set-open-at-login');
   $('openLoginItems').onclick = () => ipcRenderer.invoke('settings-modal-open-login-items');
