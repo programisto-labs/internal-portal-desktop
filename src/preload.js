@@ -90,6 +90,17 @@ const browserTabsBridge = {
   showTabContextMenu: (payload) => invokeBrowserTab('browser-tab-show-context-menu', payload),
   onTabContextMenuAction: (callback) => subscribe('browser-tab-context-menu-action', callback),
   agentAction: (payload) => invokeBrowserTab('browser-tab-agent-action', payload),
+  // Password manager of the web tabs (docs/passwords.md). Captures arrive without the password.
+  passwords: {
+    setEnabled: (payload) => invokeBrowserTab('browser-password-set-enabled', payload),
+    setSuggestions: (payload) => invokeBrowserTab('browser-password-set-suggestions', payload),
+    takeCapture: (payload) => invokeBrowserTab('browser-password-take-capture', payload),
+    dismissCapture: (payload) => invokeBrowserTab('browser-password-dismiss-capture', payload),
+    fill: (payload) => invokeBrowserTab('browser-password-fill', payload),
+    onCapture: (callback) => subscribe('browser-tab-password-capture', callback),
+    onFillRequest: (callback) => subscribe('browser-tab-password-fill-request', callback),
+    onAction: (callback) => subscribe('browser-tab-password-action', callback),
+  },
   onState: onBrowserTabState,
   onOpenRequest: onBrowserTabOpenRequest,
   onFindResult: (callback) => subscribe('browser-tab-find-result', callback),

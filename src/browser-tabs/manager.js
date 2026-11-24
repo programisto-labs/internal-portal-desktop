@@ -5,7 +5,10 @@ const { sanitizeBrowserUrl } = require('./url');
 const { installBrowserTabMediaPermissions } = require('../media-permissions');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
+const { createPasswordController } = require('./passwords');
 const path = require('path');
+
+const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
 
 const BROWSER_PARTITION = 'persist:browser-tabs';
 const STATE_CHANNEL = 'browser-tab-state';
@@ -157,6 +160,24 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
   let viewsVisible = false;
   /** Portal HTML overlay (menu, dialog) is open above the viewport: keep the native view hidden. */
   let overlayActive = false;
+  /** webContents id → tab id, to route the password messages of a page to its tab. */
+  const tabIdsByWebContents = new Map();
+
+  const passwords = createPasswordController({
+    emit: (channel, payload) => emitToRenderer(channel, payload),
+    getTabUrl: (tabId) => {
+      const entry = tabs.get(tabId);
+      if (!entry || entry.view.webContents.isDestroyed()) return '';
+      return entry.view.webContents.getURL();
+    },
+    sendToTab: (tabId, channel, payload) => {
+      const entry = tabs.get(tabId);
+      if (!entry || entry.view.webContents.isDestroyed()) return false;
+      entry.view.webContents.send(channel, payload);
+      return true;
+    },
+    popupMenu: (tabId, point, items, onChoose) => showPasswordMenu(tabId, point, items, onChoose),
+  });
 
   function getBrowserSession() {
     const browserSession = session.fromPartition(BROWSER_PARTITION);
@@ -257,6 +278,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     const entry = tabs.get(tabId);
     if (!entry) return;
     tabs.delete(tabId);
+    passwords.forgetTab(tabId);
     if (activeTabId === tabId) activeTabId = null;
     const { view } = entry;
     detachView(view);
@@ -281,6 +303,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
 
   function wireWebContents(tabId, view) {
     const wc = view.webContents;
+    const webContentsId = wc.id;
+    tabIdsByWebContents.set(webContentsId, tabId);
 
     wc.setWindowOpenHandler(({ url }) => {
       const safe = sanitizeBrowserUrl(url);
@@ -320,6 +344,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     wc.on('did-start-loading', () => pushState(tabId));
     wc.on('did-stop-loading', () => pushState(tabId));
     wc.on('did-navigate', (_event, url) => {
+      passwords.onNavigate(tabId, url);
       historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
     });
@@ -332,6 +357,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       pushState(tabId);
     });
     wc.on('destroyed', () => {
+      tabIdsByWebContents.delete(webContentsId);
+      passwords.forgetTab(tabId);
       if (tabs.has(tabId)) {
         tabs.delete(tabId);
         if (activeTabId === tabId) activeTabId = null;
@@ -473,7 +500,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
-        // No preload — untrusted web content must not reach Electron APIs.
+        // Password manager runtime (main frame only, isolated world, exposes nothing to the
+        // page): untrusted web content never reaches Electron APIs.
+        preload: PASSWORD_PRELOAD,
         allowRunningInsecureContent: false,
       },
     });
@@ -979,6 +1008,40 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     }
   }
 
+  /** Native suggestions menu under a login field (docs/passwords.md). The page cannot draw over it. */
+  function showPasswordMenu(tabId, point, items, onChoose) {
+    const win = getMainWindow();
+    const entry = tabs.get(tabId);
+    if (!win || win.isDestroyed() || !entry || activeTabId !== tabId || !lastBounds) return;
+    const zoomFactor = entry.view.webContents.getZoomFactor() || 1;
+    const template = [
+      { label: 'Coffre Lasco', enabled: false },
+      ...items.map((item) => ({
+        label: item.label || item.username || 'Identifiant',
+        click: () => onChoose({ type: 'fill', id: item.id }),
+      })),
+      { type: 'separator' },
+      { label: 'Autre identifiant du Coffre…', click: () => onChoose({ type: 'pick' }) },
+      { label: 'Gérer les mots de passe…', click: () => onChoose({ type: 'manage' }) },
+    ];
+    Menu.buildFromTemplate(template).popup({
+      window: win,
+      x: Math.round(lastBounds.x + point.x * zoomFactor),
+      y: Math.round(lastBounds.y + point.y * zoomFactor + 4),
+    });
+  }
+
+  /** Message sent by password-preload.js; accepted only from the main frame of one of our tabs. */
+  function handlePasswordMessage(event, channel, payload) {
+    const sender = event && event.sender;
+    const tabId = sender ? tabIdsByWebContents.get(sender.id) : undefined;
+    if (!tabId || !tabs.has(tabId)) return false;
+    const frame = event.senderFrame;
+    if (!frame || frame !== sender.mainFrame) return true;
+    passwords.onMessage(tabId, frame.url, channel, payload);
+    return true;
+  }
+
   return {
     create,
     navigate,
@@ -1006,6 +1069,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     historyClear,
     setOverlay,
     agentAction,
+    passwordSetEnabled: (payload) => passwords.setEnabled(payload),
+    passwordSetSuggestions: (payload) => passwords.setSuggestions(payload),
+    passwordTakeCapture: (payload) => passwords.takeCapture(payload),
+    passwordDismissCapture: (payload) => passwords.dismissCapture(payload),
+    passwordFill: (payload) => passwords.fill(payload),
+    handlePasswordMessage,
     destroyAll,
     has(tabId) {
       return tabs.has(tabId);
