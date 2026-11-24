@@ -16,6 +16,13 @@
     --btn-hover: rgba(0, 0, 0, 0.11);
     --primary: #111;
     --primary-fg: #fff;
+    --term-bg: #1e1f22;
+    --term-edge: rgba(0, 0, 0, 0.12);
+    --term-fg: #e6e6e6;
+    --term-muted: rgba(255, 255, 255, 0.45);
+    --term-program: #7aa2f7;
+    --term-arg: #9ece6a;
+    --term-flag: #e0af68;
   }
   :root[data-theme='dark'] {
     --bg: rgba(30, 30, 30, 0.94);
@@ -27,6 +34,8 @@
     --btn-hover: rgba(255, 255, 255, 0.14);
     --primary: #f2f2f2;
     --primary-fg: #111;
+    --term-bg: #141414;
+    --term-edge: rgba(255, 255, 255, 0.1);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: transparent; }
@@ -59,6 +68,32 @@
     display: block; margin: 4px 0; padding: 6px 8px; border-radius: 10px; background: var(--code);
     color: var(--fg); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
   }
+  .body.structured { white-space: normal; color: var(--fg); }
+  .meta {
+    display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; margin: 0 0 8px;
+    font-size: 12px;
+  }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .term {
+    border: 1px solid var(--term-edge); border-radius: 12px; background: var(--term-bg);
+    -webkit-user-select: text; user-select: text;
+  }
+  .term pre {
+    margin: 0; padding: 10px 12px; overflow-x: auto; overflow-y: auto; max-height: 220px;
+    white-space: pre; color: var(--term-fg); outline: none;
+    font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .term pre::-webkit-scrollbar { height: 6px; width: 6px; }
+  .term pre::-webkit-scrollbar-thumb { background: transparent; border-radius: 3px; }
+  .term:hover pre::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.22); }
+  .term .prompt { color: var(--term-muted); -webkit-user-select: none; user-select: none; }
+  .t-program { color: var(--term-program); }
+  .t-word { color: var(--term-arg); }
+  .t-flag { color: var(--term-flag); }
+  .t-op { color: var(--term-fg); }
+  .note { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
+  .note + .note { margin-top: 4px; }
   .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 10px; }
   button {
     font: inherit; font-size: 12px; font-weight: 500; color: var(--fg);

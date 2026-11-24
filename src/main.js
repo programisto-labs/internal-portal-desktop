@@ -354,6 +354,7 @@ function createConfirmCardView(id, { onDecide, onSize }) {
         message: spec.message,
         buttons: spec.buttons,
         decisions: spec.decisions,
+        card: spec.card || null,
         dark: nativeTheme.shouldUseDarkColors,
       };
       if (ready) send('confirm-card-render', pendingSpec);
