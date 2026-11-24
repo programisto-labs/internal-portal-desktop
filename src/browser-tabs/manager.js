@@ -1,15 +1,18 @@
 'use strict';
 
-const { app, WebContentsView, session, clipboard, ClipboardItem, shell, dialog, Menu } = require('electron');
+const { app, WebContentsView, session, clipboard, ClipboardItem, shell, dialog, Menu, nativeTheme } = require('electron');
 const { sanitizeBrowserUrl } = require('./url');
 const { installBrowserTabMediaPermissions } = require('../media-permissions');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
 const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
 const { createPasswordController } = require('./passwords');
+const { createPasswordPopover } = require('./password-popover');
 const path = require('path');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
+const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.js');
+const PASSWORD_POPOVER_PAGE = path.join(__dirname, 'password-popover.html');
 
 const BROWSER_PARTITION = 'persist:browser-tabs';
 const STATE_CHANNEL = 'browser-tab-state';
@@ -196,8 +199,101 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       entry.view.webContents.send(channel, payload);
       return true;
     },
-    popupMenu: (tabId, point, items, onChoose) => showPasswordMenu(tabId, point, items, onChoose),
+    popover: {
+      show: (tabId, rect, model, onChoose) => passwordPopover.show(tabId, rect, model, onChoose),
+      hide: () => passwordPopover.hide(),
+      key: (name) => passwordPopover.key(name),
+      isFocused: () => passwordPopover.isFocused(),
+    },
   });
+
+  /** Autofill popover under login fields (docs/passwords.md): Desktop's own view over the tab view. */
+  const passwordPopover = createPasswordPopover({
+    createView: createPasswordPopoverView,
+    anchorOf: (tabId) => {
+      const entry = tabs.get(tabId);
+      if (!entry || activeTabId !== tabId || !viewsVisible || overlayActive || !lastBounds) return null;
+      if (entry.view.webContents.isDestroyed()) return null;
+      return { view: lastBounds, zoom: entry.view.webContents.getZoomFactor() || 1 };
+    },
+    isDark: () => nativeTheme.shouldUseDarkColors,
+    focusTab: (tabId) => {
+      const entry = tabs.get(tabId);
+      if (entry && !entry.view.webContents.isDestroyed()) entry.view.webContents.focus();
+    },
+    focusPortal: () => {
+      const win = getMainWindow();
+      if (win && !win.isDestroyed()) win.webContents.focus();
+    },
+  });
+
+  function createPasswordPopoverView() {
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: PASSWORD_POPOVER_PRELOAD,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: false,
+      },
+    });
+    view.setBackgroundColor('#00000000');
+    if (typeof view.setBorderRadius === 'function') view.setBorderRadius(14);
+    view.setVisible(false);
+    const wc = view.webContents;
+    wc.on('will-navigate', (event) => event.preventDefault());
+    wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+    let ready = false;
+    const queue = [];
+    wc.once('did-finish-load', () => {
+      ready = true;
+      for (const [channel, payload] of queue.splice(0)) wc.send(channel, payload);
+    });
+    const onTheme = () => {
+      if (!wc.isDestroyed() && ready) wc.send('lasco-pw-popover:theme', nativeTheme.shouldUseDarkColors);
+    };
+    nativeTheme.on('updated', onTheme);
+    let attached = false;
+    return {
+      load: () => wc.loadFile(PASSWORD_POPOVER_PAGE),
+      send(channel, payload) {
+        if (wc.isDestroyed()) return;
+        if (!ready) {
+          // Only the latest render matters.
+          if (channel === 'lasco-pw-popover:render') {
+            const index = queue.findIndex(([queued]) => queued === channel);
+            if (index >= 0) queue.splice(index, 1);
+          }
+          queue.push([channel, payload]);
+          return;
+        }
+        wc.send(channel, payload);
+      },
+      setBounds: (bounds) => view.setBounds(bounds),
+      setVisible: (on) => view.setVisible(Boolean(on)),
+      raise() {
+        const win = getMainWindow();
+        if (!win || win.isDestroyed()) return;
+        // Re-adding puts the popover above the tab views.
+        win.contentView.addChildView(view);
+        attached = true;
+      },
+      isFocused: () => !wc.isDestroyed() && wc.isFocused(),
+      isSender: (id) => !wc.isDestroyed() && wc.id === id,
+      destroy() {
+        nativeTheme.removeListener('updated', onTheme);
+        const win = getMainWindow();
+        if (attached && win && !win.isDestroyed()) {
+          try {
+            win.contentView.removeChildView(view);
+          } catch (_) {
+            // already detached
+          }
+        }
+        if (!wc.isDestroyed()) wc.close();
+      },
+    };
+  }
 
   function getBrowserSession() {
     const browserSession = session.fromPartition(BROWSER_PARTITION);
@@ -320,6 +416,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     }
     activeTabId = null;
     viewsVisible = false;
+    passwordPopover.destroy();
     historyStore.flush();
   }
 
@@ -608,6 +705,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     if (typeof tabId !== 'string' || !tabs.has(tabId)) {
       return { ok: false, error: 'unknown-tab' };
     }
+    if (activeTabId !== tabId) passwords.hidePopover();
     activeTabId = tabId;
     viewsVisible = true;
     overlayActive = false;
@@ -627,6 +725,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
   }
 
   function hide() {
+    passwords.hidePopover();
     viewsVisible = false;
     activeTabId = null;
     for (const entry of tabs.values()) {
@@ -742,12 +841,23 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     ) {
       return { ok: false, error: 'invalid-bounds' };
     }
-    lastBounds = {
+    const nextBounds = {
       x: Math.round(bounds.x),
       y: Math.round(bounds.y),
       width: Math.max(0, Math.round(bounds.width)),
       height: Math.max(0, Math.round(bounds.height)),
     };
+    // The tab view moved or was resized: the popover would float away from its field.
+    if (
+      !lastBounds ||
+      lastBounds.x !== nextBounds.x ||
+      lastBounds.y !== nextBounds.y ||
+      lastBounds.width !== nextBounds.width ||
+      lastBounds.height !== nextBounds.height
+    ) {
+      passwords.hidePopover();
+    }
+    lastBounds = nextBounds;
     if (viewsVisible && activeTabId) {
       const entry = tabs.get(activeTabId);
       if (entry) applyBounds(entry.view);
@@ -904,6 +1014,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
 
   function setOverlay({ active }) {
     overlayActive = Boolean(active);
+    if (overlayActive) passwords.hidePopover();
     if (!viewsVisible || !activeTabId) return { ok: true };
     const entry = tabs.get(activeTabId);
     if (!entry) return { ok: true };
@@ -1059,27 +1170,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     }
   }
 
-  /** Native suggestions menu under a login field (docs/passwords.md). The page cannot draw over it. */
-  function showPasswordMenu(tabId, point, items, onChoose) {
-    const win = getMainWindow();
-    const entry = tabs.get(tabId);
-    if (!win || win.isDestroyed() || !entry || activeTabId !== tabId || !lastBounds) return;
-    const zoomFactor = entry.view.webContents.getZoomFactor() || 1;
-    const template = [
-      { label: 'Coffre Lasco', enabled: false },
-      ...items.map((item) => ({
-        label: item.label || item.username || 'Identifiant',
-        click: () => onChoose({ type: 'fill', id: item.id }),
-      })),
-      { type: 'separator' },
-      { label: 'Autre identifiant du Coffre…', click: () => onChoose({ type: 'pick' }) },
-      { label: 'Gérer les mots de passe…', click: () => onChoose({ type: 'manage' }) },
-    ];
-    Menu.buildFromTemplate(template).popup({
-      window: win,
-      x: Math.round(lastBounds.x + point.x * zoomFactor),
-      y: Math.round(lastBounds.y + point.y * zoomFactor + 4),
-    });
+  /** Message of the autofill popover page; accepted only from its own `file:` web contents. */
+  function handlePasswordPopoverMessage(event, payload) {
+    const sender = event && event.sender;
+    if (!sender || !passwordPopover.isSender(sender.id)) return false;
+    const frame = event.senderFrame;
+    if (!frame || frame !== sender.mainFrame || !String(frame.url).startsWith('file:')) return true;
+    passwordPopover.onMessage(payload);
+    return true;
   }
 
   /** Message sent by password-preload.js; accepted only from the main frame of one of our tabs. */
@@ -1126,6 +1224,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     passwordDismissCapture: (payload) => passwords.dismissCapture(payload),
     passwordFill: (payload) => passwords.fill(payload),
     handlePasswordMessage,
+    handlePasswordPopoverMessage,
     destroyAll,
     has(tabId) {
       return tabs.has(tabId);

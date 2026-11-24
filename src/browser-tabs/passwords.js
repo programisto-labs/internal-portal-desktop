@@ -10,7 +10,9 @@ const crypto = require('crypto');
  * - a sign-in captured in a page is kept in memory (5 min, one per tab) and announced to the
  *   portal WITHOUT the password; the portal takes it (once) if the user chooses to save it;
  * - the portal pushes, per tab, the Vault credentials of the page's site (ids and usernames
- *   only); a click on a login field opens a native menu with them;
+ *   only); focusing a login field opens Desktop's autofill popover under it (like Chrome): the
+ *   site's credentials, « choose another Vault credential », « manage passwords ». Without any
+ *   credential for the site, the popover opens on a click only, never on focus;
  * - a fill is accepted only for the host the tab currently shows, over https (or a local host).
  *
  * Nothing is kept when the portal has not enabled the password manager (Vault off).
@@ -21,6 +23,26 @@ const USERNAME_TTL_MS = 5 * 60 * 1000;
 const FILL_RESULT_TIMEOUT_MS = 3000;
 const MAX_SUGGESTIONS = 8;
 const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\]|.+\.localhost|.+\.test)$/i;
+/** A field that loses focus closes the popover, unless the person is clicking in it. */
+const BLUR_GRACE_MS = 150;
+const POPOVER_KEYS = new Set(['ArrowDown', 'ArrowUp', 'Enter', 'Escape']);
+const DEFAULT_LABELS = {
+  title: 'Coffre Lasco',
+  empty: 'Aucun identifiant enregistré pour ce site',
+  other: 'Choisir un identifiant du Coffre…',
+  manage: 'Gérer les mots de passe',
+};
+
+function cleanLabels(labels) {
+  const out = { ...DEFAULT_LABELS };
+  if (labels && typeof labels === 'object') {
+    for (const key of Object.keys(DEFAULT_LABELS)) {
+      const value = cleanText(labels[key], 120);
+      if (value && value.trim()) out[key] = value.trim();
+    }
+  }
+  return out;
+}
 
 /** Host as the Vault stores it: lower case, no `www.`, no port. Null for non-web or plain http pages. */
 function passwordHostOf(url) {
@@ -40,7 +62,19 @@ function cleanText(value, max) {
   return typeof value === 'string' && value.length <= max ? value : null;
 }
 
-function createPasswordController({ emit, getTabUrl, sendToTab, popupMenu, now = Date.now }) {
+/**
+ * `popover` draws the autofill popover (manager.js): `show(tabId, rect, model, onChoose)` (rect in page
+ * CSS pixels), `hide()`, `key(name)` → whether the key was used, `isFocused()`.
+ */
+function createPasswordController({
+  emit,
+  getTabUrl,
+  sendToTab,
+  popover,
+  now = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+}) {
   let enabled = false;
   /** @type {Map<string, { id: string, host: string, username: string, password: string, at: number }>} */
   const captures = new Map();
@@ -50,6 +84,19 @@ function createPasswordController({ emit, getTabUrl, sendToTab, popupMenu, now =
   const suggestions = new Map();
   /** @type {Map<string, { resolve: (value: object) => void, timer: NodeJS.Timeout }>} */
   const pendingFills = new Map();
+  /** Tab whose login field shows the popover. */
+  let popoverTab = null;
+  let blurTimer = null;
+
+  function hidePopover(tabId) {
+    if (!popoverTab || (tabId && tabId !== popoverTab)) return;
+    const tab = popoverTab;
+    popoverTab = null;
+    clearTimer(blurTimer);
+    blurTimer = null;
+    popover.hide();
+    sendToTab(tab, 'lasco-pw:popover', { open: false });
+  }
 
   function prune() {
     const at = now();
@@ -60,6 +107,7 @@ function createPasswordController({ emit, getTabUrl, sendToTab, popupMenu, now =
   function setEnabled({ enabled: next } = {}) {
     enabled = next === true;
     if (!enabled) {
+      hidePopover();
       captures.clear();
       usernames.clear();
       suggestions.clear();
@@ -107,8 +155,11 @@ function createPasswordController({ emit, getTabUrl, sendToTab, popupMenu, now =
     return { ok: true };
   }
 
-  /** Portal: Vault credentials of the tab's site (metadata only). */
-  function setSuggestions({ tabId, host, items } = {}) {
+  /**
+   * Portal: Vault credentials of the tab's site (metadata only), and the popover texts in the person's
+   * language. An empty list is kept: the popover still offers another Vault credential on a click.
+   */
+  function setSuggestions({ tabId, host, items, labels } = {}) {
     if (typeof tabId !== 'string' || !tabId) return { ok: false, error: 'invalid-tab-id' };
     const list = (Array.isArray(items) ? items : [])
       .filter((item) => item && typeof item.id === 'string' && item.id)
@@ -118,22 +169,63 @@ function createPasswordController({ emit, getTabUrl, sendToTab, popupMenu, now =
         username: cleanText(item.username, 320) || '',
         label: cleanText(item.label, 200) || cleanText(item.username, 320) || '',
       }));
-    if (!enabled || typeof host !== 'string' || list.length === 0) suggestions.delete(tabId);
-    else suggestions.set(tabId, { host, items: list });
+    const siteHost = typeof host === 'string' ? host.toLowerCase().replace(/^www\./, '') : '';
+    if (!enabled || !siteHost) suggestions.delete(tabId);
+    else suggestions.set(tabId, { host: siteHost, items: list, labels: cleanLabels(labels) });
+    if (popoverTab === tabId) hidePopover(tabId);
     return { ok: true };
   }
 
-  /** From the page: a login field was clicked. Shows the native menu when the Vault has credentials. */
+  /**
+   * From the page: a login field got the focus (`trigger: 'focus'`) or was clicked (`'click'`).
+   * Opens the popover under it for the tab's site.
+   */
   function onField(tabId, frameUrl, payload) {
     const host = passwordHostOf(frameUrl);
     const entry = suggestions.get(tabId);
     if (!enabled || !host || !entry || entry.host !== host) return;
     const rect = payload && payload.rect;
     if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return;
-    popupMenu(tabId, { x: rect.x, y: rect.y + rect.height }, entry.items, (choice) => {
-      if (choice.type === 'fill') emit('browser-tab-password-fill-request', { tabId, host, secretId: choice.id });
-      else emit('browser-tab-password-action', { tabId, host, action: choice.type });
+    const trigger = payload.trigger === 'focus' ? 'focus' : 'click';
+    if (entry.items.length === 0 && trigger === 'focus') return;
+    clearTimer(blurTimer);
+    blurTimer = null;
+    const model = { host, items: entry.items.map(({ id, username, label }) => ({ id, username, label })), labels: entry.labels };
+    popoverTab = tabId;
+    popover.show(tabId, rect, model, (choice) => {
+      hidePopover(tabId);
+      if (!choice) return;
+      if (choice.type === 'fill' && entry.items.some((item) => item.id === choice.id)) {
+        emit('browser-tab-password-fill-request', { tabId, host, secretId: choice.id });
+      } else if (choice.type === 'pick' || choice.type === 'manage') {
+        emit('browser-tab-password-action', { tabId, host, action: choice.type });
+      }
     });
+    // Not shown (field out of the view): the callback already closed it.
+    if (popoverTab === tabId) sendToTab(tabId, 'lasco-pw:popover', { open: true });
+  }
+
+  /** From the page: the field lost the focus, the person typed or scrolled. */
+  function onFieldLeave(tabId, payload) {
+    if (popoverTab !== tabId) return;
+    if (!payload || payload.reason !== 'blur') {
+      hidePopover(tabId);
+      return;
+    }
+    // The page's field loses the focus when the person clicks the popover itself: wait and look.
+    clearTimer(blurTimer);
+    blurTimer = setTimer(() => {
+      blurTimer = null;
+      if (popoverTab === tabId && !popover.isFocused()) hidePopover(tabId);
+    }, BLUR_GRACE_MS);
+  }
+
+  /** From the page: arrows, Enter and Escape typed in the field while the popover is open. */
+  function onKey(tabId, payload) {
+    const key = payload && payload.key;
+    if (popoverTab !== tabId || !POPOVER_KEYS.has(key)) return;
+    if (key === 'Escape') hidePopover(tabId);
+    else popover.key(key);
   }
 
   /** Portal: write a credential into the page, only on the host the tab shows right now. */
@@ -174,12 +266,14 @@ function createPasswordController({ emit, getTabUrl, sendToTab, popupMenu, now =
 
   /** Tab closed or navigated to another site. */
   function forgetTab(tabId) {
+    hidePopover(tabId);
     captures.delete(tabId);
     usernames.delete(tabId);
     suggestions.delete(tabId);
   }
 
   function onNavigate(tabId, url) {
+    hidePopover(tabId);
     const host = passwordHostOf(url);
     const entry = suggestions.get(tabId);
     if (entry && entry.host !== host) suggestions.delete(tabId);
@@ -196,15 +290,27 @@ function createPasswordController({ emit, getTabUrl, sendToTab, popupMenu, now =
     fill,
     forgetTab,
     onNavigate,
+    /** The tab view moved, was hidden or covered: the popover would float over the wrong place. */
+    hidePopover: () => hidePopover(),
+    popoverTabId: () => popoverTab,
     onMessage(tabId, frameUrl, channel, payload) {
       if (channel === 'lasco-pw:capture') onCapture(tabId, frameUrl, payload);
       else if (channel === 'lasco-pw:username') onUsername(tabId, frameUrl, payload);
       else if (channel === 'lasco-pw:field') onField(tabId, frameUrl, payload);
+      else if (channel === 'lasco-pw:field-leave') onFieldLeave(tabId, payload);
+      else if (channel === 'lasco-pw:key') onKey(tabId, payload);
       else if (channel === 'lasco-pw:fill-result') onFillResult(tabId, payload);
     },
   };
 }
 
-const PASSWORD_PAGE_CHANNELS = ['lasco-pw:capture', 'lasco-pw:username', 'lasco-pw:field', 'lasco-pw:fill-result'];
+const PASSWORD_PAGE_CHANNELS = [
+  'lasco-pw:capture',
+  'lasco-pw:username',
+  'lasco-pw:field',
+  'lasco-pw:field-leave',
+  'lasco-pw:key',
+  'lasco-pw:fill-result',
+];
 
 module.exports = { createPasswordController, passwordHostOf, PASSWORD_PAGE_CHANNELS };
