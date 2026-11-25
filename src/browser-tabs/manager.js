@@ -11,6 +11,7 @@ const {
   dialog,
   Menu,
   nativeTheme,
+  net,
 } = require('electron');
 const { sanitizeBrowserUrl } = require('./url');
 const {
@@ -35,6 +36,13 @@ const { createPasswordController } = require('./passwords');
 const { createPasswordPopover } = require('./password-popover');
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
+const {
+  BUILTIN_ENGINES,
+  MAX_DESCRIPTION_BYTES,
+  OPENSEARCH_LINK_SCRIPT,
+  buildSearchUrl,
+  discoverSiteSearchEngine,
+} = require('./search-engines');
 const path = require('path');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
@@ -50,6 +58,30 @@ const SHORTCUT_CHANNEL = 'browser-tab-shortcut';
 /** Chrome's zoom ladder. */
 const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5];
 const AGENT_WORLD_ID = 1001;
+/** Monde isolé où Desktop lit la description OpenSearch d'une page (docs/search-engines.md). */
+const SEARCH_WORLD_ID = 1003;
+const SEARCH_DESCRIPTION_TIMEOUT_MS = 5000;
+const FALLBACK_SEARCH_ENGINE = BUILTIN_ENGINES[0];
+
+/** Description OpenSearch d'un site : GET sans cookies, 5 s et 64 Ko au plus. */
+async function fetchSearchDescription(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEARCH_DESCRIPTION_TIMEOUT_MS);
+  try {
+    const res = await net.fetch(url, { signal: controller.signal, credentials: 'omit' });
+    // Une redirection ne doit pas faire sortir la description du site.
+    const host = (u) => new URL(u).hostname.toLowerCase().replace(/^www\./, '');
+    if (!res.ok || (res.url && host(res.url) !== host(url))) return '';
+    const length = Number(res.headers.get('content-length'));
+    if (Number.isFinite(length) && length > MAX_DESCRIPTION_BYTES) return '';
+    const text = await res.text();
+    return text.length > MAX_DESCRIPTION_BYTES ? '' : text;
+  } catch (_) {
+    return '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const AGENT_SCRIPT_TIMEOUT_MS = 10_000;
 const AGENT_SETTLE_MAX_MS = 8_000;
 const AGENT_MAX_WAIT_MS = 10_000;
@@ -245,7 +277,7 @@ async function askSitePermission({ origin, label, webContents }) {
   return ['allow', 'block', 'dismiss'][response] || 'dismiss';
 }
 
-function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
+function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines }) {
   const historyStore =
     history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
@@ -724,6 +756,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     });
     wc.on('did-start-loading', () => pushState(tabId));
     wc.on('did-stop-loading', () => pushState(tabId));
+    wc.on('did-finish-load', () => {
+      if (isCurrentTabView(tabs, tabId, view)) void discoverSearchEngine(tabId, wc);
+    });
     wc.on('did-navigate', (_event, url) => {
       const entry = tabs.get(tabId);
       // Un vrai site s'affiche de nouveau : la page d'erreur est terminée.
@@ -935,8 +970,11 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         template.push(
           { label: 'Copier', click: () => wc.copy() },
           {
-            label: `Rechercher « ${preview} » sur Google`,
-            click: () => openInNewTab(`https://www.google.com/search?q=${encodeURIComponent(selection)}`),
+            label: `Rechercher « ${preview} » sur ${defaultSearchEngine().name}`,
+            click: () => {
+              const target = buildSearchUrl(defaultSearchEngine(), selection);
+              if (target) openInNewTab(target);
+            },
           },
           separator,
         );
@@ -1404,6 +1442,38 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     if (!origin) return { ok: false, error: 'unknown-tab' };
     sitePermissions.clearOrigin(origin);
     return siteInfo({ tabId });
+  }
+
+  function defaultSearchEngine() {
+    return (searchEngines && searchEngines.getDefault()) || FALLBACK_SEARCH_ENGINE;
+  }
+
+  /** Sites déjà lus pendant cette session, qu'ils aient un moteur ou non (une lecture par site). */
+  const searchDiscoveryHosts = new Set();
+
+  /** Moteur déclaré par la page (OpenSearch), ajouté aux raccourcis de la barre d'adresse. */
+  async function discoverSearchEngine(tabId, wc) {
+    if (!searchEngines || wc.isDestroyed()) return;
+    const entry = tabs.get(tabId);
+    const pageUrl = sanitizeBrowserUrl(wc.getURL());
+    if (!pageUrl || (entry && entry.errorPage)) return;
+    const host = new URL(pageUrl).hostname.toLowerCase();
+    if (searchDiscoveryHosts.has(host)) return;
+    searchDiscoveryHosts.add(host);
+    try {
+      await discoverSiteSearchEngine({
+        store: searchEngines,
+        pageUrl,
+        readLink: () =>
+          wc.isDestroyed()
+            ? null
+            : wc.executeJavaScriptInIsolatedWorld(SEARCH_WORLD_ID, [{ code: OPENSEARCH_LINK_SCRIPT }], false),
+        fetchText: fetchSearchDescription,
+        favicon: entry && entry.favicon ? entry.favicon : undefined,
+      });
+    } catch (_) {
+      // Au mieux : une page qui ne répond pas n'ajoute rien.
+    }
   }
 
   function historySuggest({ query, limit } = {}) {

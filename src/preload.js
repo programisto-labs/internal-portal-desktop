@@ -103,6 +103,13 @@ const browserTabsBridge = {
   historyList: (payload) => invokeBrowserTab('browser-history-list', payload),
   historyRemove: (payload) => invokeBrowserTab('browser-history-remove', payload),
   historyClear: () => invokeBrowserTab('browser-history-clear'),
+  // Search engine of the address bar and site search shortcuts (docs/search-engines.md).
+  searchEngines: {
+    get: () => invokeBrowserTab('browser-search-engines-get'),
+    markUsed: (payload) => invokeBrowserTab('browser-search-engines-mark-used', payload),
+    manage: () => invokeBrowserTab('browser-search-engines-manage'),
+    onChange: (callback) => subscribe('browser-search-engines-changed', callback),
+  },
   setOverlay: (payload) => invokeBrowserTab('browser-tab-set-overlay', payload),
   showTabContextMenu: (payload) => invokeBrowserTab('browser-tab-show-context-menu', payload),
   onTabContextMenuAction: (callback) => subscribe('browser-tab-context-menu-action', callback),

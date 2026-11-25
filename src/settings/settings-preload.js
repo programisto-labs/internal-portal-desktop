@@ -8,9 +8,10 @@ const { ipcRenderer } = require('electron');
 const params = new URLSearchParams(globalThis.location ? globalThis.location.search : '');
 const STANDALONE = params.get('standalone') === '1';
 const AGENTS = params.get('agents') !== '0';
-const SECTIONS = ['general', 'downloads', 'drive', 'computer', 'permissions', 'journal', 'updates'];
+const SECTIONS = ['general', 'search', 'downloads', 'drive', 'computer', 'permissions', 'journal', 'updates'];
 const TITLES = {
   general: 'Général',
+  search: 'Moteur de recherche',
   downloads: 'Téléchargements',
   drive: 'My Drive',
   computer: 'Cet ordinateur',
@@ -249,6 +250,174 @@ async function driveAction(channel, arg) {
 /** Erreur du choix du dossier des téléchargements, affichée jusqu'au prochain changement. */
 let downloadsError = null;
 
+const SEARCH_ERRORS = {
+  'name-required': 'Donnez un nom au moteur.',
+  'name-too-long': 'Nom trop long (60 caractères au plus).',
+  'keyword-required': 'Choisissez un raccourci.',
+  'keyword-spaces': 'Le raccourci ne peut pas contenir d’espace.',
+  'keyword-too-long': 'Raccourci trop long (60 caractères au plus).',
+  'keyword-taken': 'Ce raccourci est déjà utilisé par un autre moteur.',
+  'invalid-template': 'Adresse invalide : une URL http(s) avec %s à la place de la recherche.',
+  'too-many': 'Trop de moteurs ajoutés : supprimez-en un d’abord.',
+  'unknown-engine': 'Ce moteur n’existe plus.',
+};
+/** Formulaire ouvert : `{ id: null }` pour un ajout, `{ id }` pour une modification ; erreur affichée dedans. */
+let searchForm = null;
+
+function engineForm(engine) {
+  const form = el('div', 'engine-form');
+  const fields = [
+    ['name', 'Nom', 'Wikipédia', engine ? engine.name : ''],
+    ['keyword', 'Raccourci', 'wiki', engine ? engine.keyword : ''],
+    ['template', 'URL avec %s', 'https://fr.wikipedia.org/w/index.php?search=%s', engine ? engine.template : ''],
+  ];
+  const inputs = {};
+  for (const [key, label, placeholder, value] of fields) {
+    const row = el('div', 'field');
+    const id = `searchField-${key}`;
+    const l = el('label', '', label);
+    l.htmlFor = id;
+    const input = document.createElement('input');
+    input.id = id;
+    input.type = key === 'template' ? 'url' : 'text';
+    input.placeholder = placeholder;
+    input.value = value;
+    input.spellcheck = false;
+    input.autocapitalize = 'off';
+    if (key === 'template') input.className = 'mono';
+    inputs[key] = input;
+    row.append(l, input);
+    form.append(row);
+  }
+  const actions = el('div', 'actions');
+  const error = el('div', searchForm && searchForm.error ? 'hint error' : 'hint', searchForm && searchForm.error ? SEARCH_ERRORS[searchForm.error] || 'Enregistrement impossible.' : '%s est remplacé par le texte recherché.');
+  const cancel = el('button', 'link', 'Annuler');
+  cancel.onclick = () => {
+    searchForm = null;
+    document.activeElement.blur();
+    render();
+  };
+  const save = el('button', 'btn', engine ? 'Enregistrer' : 'Ajouter');
+  const submit = async () => {
+    const value = { name: inputs.name.value, keyword: inputs.keyword.value, template: inputs.template.value };
+    const res = engine
+      ? await ipcRenderer.invoke('settings-modal-search-update', engine.id, value)
+      : await ipcRenderer.invoke('settings-modal-search-add', value);
+    // Sorti du formulaire : `renderSearch` ne redessine pas sous un champ qui a le focus.
+    if (document.activeElement) document.activeElement.blur();
+    if (res && res.ok) searchForm = null;
+    else searchForm = { id: engine ? engine.id : null, error: (res && res.error) || 'invalid', draft: value };
+    render();
+  };
+  save.onclick = submit;
+  for (const input of Object.values(inputs)) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        void submit();
+      }
+    });
+  }
+  if (searchForm && searchForm.draft) {
+    for (const key of Object.keys(inputs)) inputs[key].value = searchForm.draft[key] || '';
+  }
+  actions.append(error, cancel, save);
+  form.append(actions);
+  requestAnimationFrame(() => inputs.name.focus());
+  return form;
+}
+
+function engineRow(engine, defaultId) {
+  const row = el('div', engine.active ? 'row' : 'row disabled');
+  const text = el('div', 'text');
+  text.append(el('div', 'label', engine.name), el('div', 'hint mono', `${engine.keyword} · ${engine.template}`));
+  row.append(text);
+  if (engine.id === defaultId) row.append(el('span', 'badge', 'Par défaut'));
+  if (engine.kind === 'site') {
+    const toggle = el('button', 'link', engine.active ? 'Désactiver' : 'Activer');
+    toggle.onclick = async () => {
+      await ipcRenderer.invoke('settings-modal-search-set-active', engine.id, !engine.active);
+      render();
+    };
+    row.append(toggle);
+  }
+  const edit = el('button', 'link', 'Modifier');
+  edit.onclick = () => {
+    searchForm = { id: engine.id };
+    render();
+  };
+  const remove = el('button', 'btn danger', 'Supprimer');
+  remove.setAttribute('aria-label', `Supprimer ${engine.name}`);
+  remove.onclick = async () => {
+    await ipcRenderer.invoke('settings-modal-search-remove', engine.id);
+    if (searchForm && searchForm.id === engine.id) searchForm = null;
+    render();
+  };
+  row.append(edit, remove);
+  return row;
+}
+
+function renderSearch(s) {
+  if (!s) return;
+  const select = $('searchDefault');
+  // Pas de redessin pendant le choix : la liste se refermerait.
+  if (document.activeElement !== select) {
+    select.replaceChildren();
+    const groups = [
+      ['Moteurs de recherche', s.engines.filter((e) => e.kind === 'builtin')],
+      ['Moteurs ajoutés', s.engines.filter((e) => e.kind === 'custom')],
+      ['Sites', s.engines.filter((e) => e.kind === 'site' && e.active)],
+    ];
+    for (const [label, engines] of groups) {
+      if (!engines.length) continue;
+      const group = document.createElement('optgroup');
+      group.label = label;
+      for (const e of engines) {
+        const option = document.createElement('option');
+        option.value = e.id;
+        option.textContent = e.name;
+        group.append(option);
+      }
+      select.append(group);
+    }
+    select.value = s.defaultId;
+  }
+  $('searchAutoDiscover').checked = s.autoDiscover;
+
+  // Un champ du formulaire a le focus : on ne le redessine pas sous les doigts.
+  const typing = document.activeElement && document.activeElement.closest && document.activeElement.closest('.engine-form');
+  const custom = $('searchCustom');
+  if (!typing || !custom.contains(document.activeElement)) {
+    custom.replaceChildren();
+    for (const e of s.engines.filter((x) => x.kind === 'custom')) {
+      custom.append(searchForm && searchForm.id === e.id ? engineForm(e) : engineRow(e, s.defaultId));
+    }
+    if (searchForm && searchForm.id === null) custom.append(engineForm(null));
+    else {
+      const row = el('div', 'row');
+      const text = el('div', 'text');
+      text.append(
+        el('div', 'label', 'Ajouter un moteur'),
+        el('div', 'hint', 'Un nom, un raccourci et l’adresse de recherche, comme dans Chrome et Brave.'),
+      );
+      const add = el('button', 'btn', 'Ajouter…');
+      add.onclick = () => {
+        searchForm = { id: null };
+        render();
+      };
+      row.append(text, add);
+      custom.append(row);
+    }
+  }
+  const sites = $('searchSites');
+  if (!typing || !sites.contains(document.activeElement)) {
+    sites.replaceChildren();
+    const list = s.engines.filter((x) => x.kind === 'site');
+    if (!list.length) sites.append(el('div', 'empty', 'Aucun site pour l’instant.'));
+    for (const e of list) sites.append(searchForm && searchForm.id === e.id ? engineForm(e) : engineRow(e, s.defaultId));
+  }
+}
+
 function renderDownloads(d) {
   if (!d) return;
   $('downloadsFolder').textContent = d.directory || '';
@@ -302,6 +471,7 @@ async function render() {
   renderUpdate(s.update);
   renderDrive(s.driveSync);
   renderDownloads(s.downloads);
+  renderSearch(s.searchEngines);
 
   if (!s.hostOps) return;
   const h = s.hostOps;
@@ -396,6 +566,12 @@ window.addEventListener('DOMContentLoaded', () => {
   };
   $('downloadsOpen').onclick = () => ipcRenderer.invoke('settings-modal-downloads-open');
   bindSwitch('downloadsAskWhere', 'settings-modal-downloads-set-ask');
+  bindSwitch('searchAutoDiscover', 'settings-modal-search-set-auto-discover');
+  $('searchDefault').onchange = async () => {
+    await ipcRenderer.invoke('settings-modal-search-set-default', $('searchDefault').value);
+    $('searchDefault').blur();
+    render();
+  };
   $('driveEnabled').onchange = () => driveAction('settings-modal-drive-set-enabled', $('driveEnabled').checked);
   $('driveChooseFolder').onclick = () => driveAction('settings-modal-drive-choose-folder');
   $('driveOpenFolder').onclick = () => ipcRenderer.invoke('settings-modal-drive-open-folder');

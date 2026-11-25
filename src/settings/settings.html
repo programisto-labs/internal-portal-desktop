@@ -137,6 +137,19 @@
   .link:focus-visible { outline: 2px solid var(--accent); border-radius: 4px; }
   .hint.error { color: var(--danger); opacity: 1; }
   .hint.warn { color: var(--danger); }
+  select, .field input {
+    font: inherit; font-size: 12px; color: var(--fg); background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 7px; padding: 5px 8px; -webkit-user-select: text; user-select: text;
+  }
+  select { flex: none; max-width: 240px; }
+  select:focus-visible, .field input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .engine-form { padding: 12px 14px; display: grid; gap: 8px; }
+  .engine-form + .row, .row + .engine-form { border-top: 1px solid var(--edge); }
+  .field { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 10px; }
+  .field label { color: var(--muted); font-size: 12px; }
+  .engine-form .actions { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
+  .engine-form .actions .hint { margin-right: auto; }
+  .badge { font-size: 11px; color: var(--muted); border: 1px solid var(--edge); border-radius: 999px; padding: 0 7px; flex: none; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -148,6 +161,10 @@
       <button data-section="general">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
         Général
+      </button>
+      <button data-section="search">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        Moteur de recherche
       </button>
       <button data-section="downloads">
         <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
@@ -231,6 +248,34 @@
         <h2>Raccourcis clavier</h2>
         <p class="intro" id="shortcutsIntro" style="margin: 0 0 8px 2px; font-size: 12px;">Disponibles partout, même quand Lasco est masqué. Cliquez sur un raccourci puis tapez la nouvelle combinaison (avec ⌘, ⌃ ou ⌥). Échap annule.</p>
         <div class="group" id="shortcuts"></div>
+      </section>
+
+      <section data-panel="search" hidden>
+        <p class="intro">Recherches tapées dans la barre d’adresse des onglets de Lasco.</p>
+        <div class="group">
+          <div class="row">
+            <div class="text">
+              <div class="label">Moteur de recherche par défaut</div>
+              <div class="hint">Utilisé quand le texte tapé n’est pas une adresse, et par « Rechercher » du clic droit.</div>
+            </div>
+            <select id="searchDefault" aria-label="Moteur de recherche par défaut"></select>
+          </div>
+        </div>
+        <h2>Recherche sur les sites</h2>
+        <p class="intro" style="margin: 0 0 8px 2px; font-size: 12px;">Tapez le raccourci d’un site dans la barre d’adresse (par exemple « wikipedia.org ») puis Tab ou Espace pour chercher directement sur ce site.</p>
+        <div class="group">
+          <div class="row">
+            <div class="text">
+              <div class="label">Ajouter les sites visités qui proposent une recherche</div>
+              <div class="hint">Comme Chrome : un site qui déclare son moteur (OpenSearch) devient un raccourci. Les sites déjà ajoutés restent.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="searchAutoDiscover" aria-label="Ajouter les sites visités qui proposent une recherche"><span></span></label>
+          </div>
+        </div>
+        <h2>Moteurs ajoutés</h2>
+        <div class="group" id="searchCustom"></div>
+        <h2>Sites repérés</h2>
+        <div class="group" id="searchSites"></div>
       </section>
 
       <section data-panel="downloads" hidden>
