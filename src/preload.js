@@ -133,6 +133,8 @@ const browserTabsBridge = {
   // Form autofill of the web tabs (docs/form-autofill.md): names, addresses, e-mail, phone.
   autofill: {
     setProfiles: (payload) => invokeBrowserTab('browser-autofill-set-profiles', payload),
+    /** Agent `browser_autofill`: fill the page's address form, on the host the tab shows now. */
+    fill: (payload) => invokeBrowserTab('browser-autofill-fill', payload),
     onCapture: (callback) => subscribe('browser-tab-autofill-capture', callback),
     onUsed: (callback) => subscribe('browser-tab-autofill-used', callback),
     onAction: (callback) => subscribe('browser-tab-autofill-action', callback),

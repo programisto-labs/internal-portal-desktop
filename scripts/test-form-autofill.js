@@ -113,6 +113,30 @@ describe('form autofill (main process)', () => {
     assert.equal(events.length, 1);
   });
 
+  it('fills for an agent only on the host the tab shows, and reports the filled fields', async () => {
+    assert.deepEqual(await controller.fill({ tabId: 't1', host: 'other.com', fields: marie.fields }), {
+      ok: false,
+      error: 'host-mismatch',
+    });
+    urls.set('t2', 'http://plain.example.com/');
+    assert.deepEqual(await controller.fill({ tabId: 't2', host: 'plain.example.com', fields: marie.fields }), {
+      ok: false,
+      error: 'unsupported-page',
+    });
+    const pending = controller.fill({ tabId: 't1', host: 'www.shop.example.com', fields: { ...marie.fields, password: 'x' } });
+    const request = sent.find((entry) => entry.channel === 'lasco-af:fill');
+    assert.equal(request.payload.agent, true);
+    assert.equal(request.payload.fields.password, undefined);
+    controller.onMessage('t1', 'https://shop.example.com/checkout', 'lasco-af:fill-result', {
+      requestId: request.payload.requestId,
+      filled: 3,
+      types: ['givenName', 'city', 'bogus'],
+    });
+    assert.deepEqual(await pending, { ok: true, filled: 3, types: ['givenName', 'city'] });
+    // An agent fill is recorded by the portal itself (with the agent), not as a popover use.
+    assert.equal(events.some((entry) => entry.channel === 'browser-tab-autofill-used'), false);
+  });
+
   it('manage goes to the portal', () => {
     controller.setProfiles({ enabled: true, profiles: [marie] });
     controller.onMessage('t1', 'https://shop.example.com/checkout', 'lasco-af:field', { fieldType: 'givenName', rect });

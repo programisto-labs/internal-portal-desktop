@@ -88,6 +88,8 @@ function pageAgentRuntime(command) {
     ].map((role) => `[role="${role}"]`),
   ].join(',');
 
+  const AUTOFILLED_VALUE = '(filled by Lasco from a saved address)';
+
   const describe = (el, ref) => {
     const rect = el.getBoundingClientRect();
     const tag = el.tagName.toLowerCase();
@@ -107,6 +109,12 @@ function pageAgentRuntime(command) {
     if (tag === 'select') {
       entry.value = collapse(el.options[el.selectedIndex]?.text || '', 80);
       entry.options = Array.from(el.options).slice(0, 25).map((option) => collapse(option.text, 60));
+    }
+    // Filled from a saved address for the agent (browser_autofill, docs/form-autofill.md): the value
+    // never reaches the model, only that the field is filled. Typing in it gives the value back.
+    if (el.hasAttribute && el.hasAttribute('data-lasco-autofill') && entry.value) {
+      entry.value = AUTOFILLED_VALUE;
+      entry.autofilled = true;
     }
     if (el.type === 'checkbox' || el.type === 'radio') entry.checked = Boolean(el.checked);
     const ariaChecked = el.getAttribute('aria-checked');
@@ -178,6 +186,7 @@ function pageAgentRuntime(command) {
     if (!el) return { ok: false, error: 'stale-ref' };
     el.focus();
     if (clear) {
+      el.removeAttribute('data-lasco-autofill');
       if (typeof el.select === 'function') {
         el.select();
       } else if (el.isContentEditable) {
@@ -200,6 +209,7 @@ function pageAgentRuntime(command) {
       (opt) => opt.value.toLowerCase() === wanted || collapse(opt.text).toLowerCase() === wanted,
     ) || Array.from(el.options).find((opt) => collapse(opt.text).toLowerCase().includes(wanted));
     if (!option) return { ok: false, error: 'option-not-found' };
+    el.removeAttribute('data-lasco-autofill');
     el.value = option.value;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));

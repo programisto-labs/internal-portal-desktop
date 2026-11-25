@@ -212,7 +212,7 @@ function createFormAutofillController({
   function fillTab(tabId, profile, fieldType) {
     const requestId = crypto.randomUUID();
     const timer = setTimer(() => pendingFills.delete(requestId), FILL_RESULT_TIMEOUT_MS);
-    pendingFills.set(requestId, { tabId, profileId: profile.id, timer });
+    pendingFills.set(requestId, { tabId, profileId: profile.id, resolve: null, timer });
     const sent = sendToTab(tabId, 'lasco-af:fill', { requestId, fieldType, fields: { ...profile.fields } });
     if (!sent) {
       clearTimer(timer);
@@ -280,7 +280,42 @@ function createFormAutofillController({
     clearTimer(pending.timer);
     pendingFills.delete(requestId);
     const count = Number.isInteger(payload.filled) ? payload.filled : 0;
+    const types = Array.isArray(payload.types) ? payload.types.filter((type) => FIELD_TYPES.has(type)) : [];
+    if (pending.resolve) {
+      pending.resolve(count > 0 ? { ok: true, filled: count, types } : { ok: false, error: 'no-address-form', filled: 0, types: [] });
+      return;
+    }
     if (count > 0) emit('browser-tab-autofill-used', { tabId, profileId: pending.profileId, filled: count });
+  }
+
+  /**
+   * Portal (agent tool `browser_autofill`): fill the address form of the page with these values, without
+   * popover. Refused unless `host` is the host the tab shows now, over https (or a local host). The form
+   * the person is in comes first, else the page's largest address form; filled fields are reported by type.
+   */
+  function fill({ tabId, host, fields } = {}) {
+    const currentHost = passwordHostOf(getTabUrl(tabId));
+    if (!currentHost) return Promise.resolve({ ok: false, error: 'unsupported-page' });
+    if (typeof host !== 'string' || host.toLowerCase().replace(/^www\./, '') !== currentHost) {
+      return Promise.resolve({ ok: false, error: 'host-mismatch' });
+    }
+    const values = cleanFields(fields);
+    if (Object.keys(values).length === 0) return Promise.resolve({ ok: false, error: 'empty' });
+    hidePopover(tabId);
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimer(() => {
+        pendingFills.delete(requestId);
+        resolve({ ok: false, error: 'no-response' });
+      }, FILL_RESULT_TIMEOUT_MS);
+      pendingFills.set(requestId, { tabId, profileId: null, resolve, timer });
+      const sent = sendToTab(tabId, 'lasco-af:fill', { requestId, fieldType: null, fields: values, agent: true });
+      if (!sent) {
+        clearTimer(timer);
+        pendingFills.delete(requestId);
+        resolve({ ok: false, error: 'unknown-tab' });
+      }
+    });
   }
 
   /** From the page: an address form was submitted. Offered to the portal unless already saved. */
@@ -303,6 +338,7 @@ function createFormAutofillController({
 
   return {
     setProfiles,
+    fill,
     isEnabled: () => enabled,
     forgetTab,
     onNavigate: (tabId) => hidePopover(tabId),

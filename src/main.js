@@ -2704,6 +2704,7 @@ function registerWindowIPC() {
     'browser-password-fill': 'passwordFill',
     // Form autofill (docs/form-autofill.md): the portal pushes the person's profiles.
     'browser-autofill-set-profiles': 'autofillSetProfiles',
+    'browser-autofill-fill': 'autofillFill',
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {

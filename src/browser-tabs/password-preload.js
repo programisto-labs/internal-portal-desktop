@@ -580,18 +580,26 @@ ipcRenderer.on('lasco-af:fill', (_event, payload) => {
   const requestId = payload && payload.requestId;
   const fields = payload && payload.fields && typeof payload.fields === 'object' ? payload.fields : {};
   let filled = 0;
-  const origin = afField;
+  const types = [];
+  // An agent (no popover): the form the person is in, else the page's largest address form.
+  const origin = payload && payload.agent === true ? null : afField;
   afFilling = true;
   try {
-    const form = origin && origin.isConnected ? addressFormFor(origin) : null;
+    const form = origin ? (origin.isConnected ? addressFormFor(origin) : null) : formForAgent();
     if (form) {
       for (const { el, type } of form.fields) {
         const value = valueForType(fields, type);
         if (!value) continue;
         if (el !== origin && el.value && !(el instanceof HTMLSelectElement)) continue;
-        if (setAnyValue(el, value)) filled += 1;
+        if (setAnyValue(el, value)) {
+          filled += 1;
+          if (!types.includes(type)) types.push(type);
+          // Agent fill: the page snapshot shows « filled », never the value (agent-dom.js).
+          if (!origin) el.setAttribute('data-lasco-autofill', '');
+        }
       }
-      if (origin.isConnected) origin.focus();
+      if (origin && origin.isConnected) origin.focus();
+      else if (document.activeElement instanceof HTMLElement && types.length > 0) document.activeElement.blur();
       afLastFilled = { key: fieldsKey(readAddressForm(form.fields)), at: Date.now() };
     }
   } catch (_) {
@@ -599,8 +607,24 @@ ipcRenderer.on('lasco-af:fill', (_event, payload) => {
   } finally {
     afFilling = false;
   }
-  ipcRenderer.send('lasco-af:fill-result', { requestId, filled });
+  ipcRenderer.send('lasco-af:fill-result', { requestId, filled, types });
 });
+
+/** Address form an agent fills: where the focus is, else the one with the most kinds of address fields. */
+function formForAgent() {
+  const active = document.activeElement;
+  if (active && active !== document.body) {
+    const form = addressFormFor(active);
+    if (form) return form;
+  }
+  let best = null;
+  for (const scope of [...document.forms, document]) {
+    const fields = addressFieldsOf(scope);
+    const kinds = new Set(fields.map((field) => field.type)).size;
+    if (kinds >= 2 && (!best || kinds > best.kinds)) best = { scope, fields, kinds };
+  }
+  return best ? { scope: best.scope, fields: best.fields, field: null } : null;
+}
 
 /** Values typed in an address form, as profile fields (« Nom complet » split, street on two lines). */
 function readAddressForm(fields) {
@@ -663,7 +687,10 @@ document.addEventListener(
 document.addEventListener(
   'input',
   (event) => {
-    if (event.isTrusted && event.target === afField) afLeave('input');
+    if (!event.isTrusted) return;
+    // Typed by the person (or by the agent, as keystrokes): the value is no longer the saved one.
+    if (event.target instanceof Element) event.target.removeAttribute('data-lasco-autofill');
+    if (event.target === afField) afLeave('input');
   },
   true,
 );

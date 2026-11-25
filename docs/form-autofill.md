@@ -25,6 +25,14 @@ Portal windows only (same `tabManagerFor` check as the other browser-tab channel
   `givenName`, `familyName`, `organization`, `addressLine1`, `addressLine2`, `postalCode`, `city`,
   `region`, `country`, `email`, `phone` (one-line text). Most used first. `labels: { title, manage }`
   in the person's language. `enabled: false` (setting off, logout) drops everything.
+- `fill({ tabId, host, fields })` → `{ ok, filled, types }` or `{ ok: false, error }` — agent tool
+  `browser_autofill`: fills the address form of the page without popover (the form the person is in, else
+  the page's largest address form), empty fields only, never sends it. Refused unless `host` is the host the
+  tab shows **now** (`host-mismatch`), over https or a local host (`unsupported-page`); `no-address-form`.
+  `types` lists the filled field types: the values never go back to the agent. The filled fields carry
+  `data-lasco-autofill`; the agent's page snapshot (`agent-dom.js`) then shows « filled by Lasco » instead of
+  their value. A trusted keystroke in the field (person or agent typing), `browser_select_option` or a cleared
+  field removes the mark.
 - `onCapture(cb)` → `{ tabId, captureId, host, fields }` — an address form was sent with values that no
   profile covers yet. The portal asks whether to save them.
 - `onUsed(cb)` → `{ tabId, profileId, filled }` — a form was filled with this profile (`filled` fields).

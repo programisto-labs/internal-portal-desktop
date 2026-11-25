@@ -1826,6 +1826,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     passwordDismissCapture: (payload) => passwords.dismissCapture(payload),
     passwordFill: (payload) => passwords.fill(payload),
     autofillSetProfiles: (payload) => formAutofill.setProfiles(payload),
+    autofillFill: (payload) => formAutofill.fill(payload),
     handlePasswordMessage,
     handlePasswordPopoverMessage,
     destroyAll,
