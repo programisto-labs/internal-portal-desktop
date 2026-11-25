@@ -83,6 +83,37 @@ describe('autorisations des sites', () => {
     assert.equal(store.get('https://news.example', 'clipboard-read'), null);
   });
 
+  it("Ignorer ne repose pas la question en boucle, jusqu'à une décision ou une réinitialisation", async () => {
+    const store = createSitePermissionStore({});
+    let calls = 0;
+    const handlers = createSitePermissionHandlers({
+      store,
+      ask: async () => {
+        calls += 1;
+        return 'dismiss';
+      },
+    });
+    const wc = tab('https://www.lequipe.fr/');
+    assert.equal(await request(handlers, wc, 'geolocation'), false);
+    assert.equal(await request(handlers, wc, 'geolocation'), false);
+    assert.equal(await request(handlers, wc, 'geolocation'), false);
+    assert.equal(calls, 1);
+    assert.equal(store.get('https://www.lequipe.fr', 'geolocation'), null);
+    // Une autre permission du même site pose encore sa question.
+    await request(handlers, wc, 'notifications');
+    assert.equal(calls, 2);
+    // Réinitialiser depuis les informations du site : la question revient.
+    store.clearOrigin('https://www.lequipe.fr');
+    await request(handlers, wc, 'geolocation');
+    assert.equal(calls, 3);
+    // Une décision (Autoriser depuis le cadenas) efface l'ignoré.
+    store.set('https://www.lequipe.fr', 'geolocation', 'allow');
+    assert.equal(await request(handlers, wc, 'geolocation'), true);
+    store.set('https://www.lequipe.fr', 'geolocation', null);
+    await request(handlers, wc, 'geolocation');
+    assert.equal(calls, 4);
+  });
+
   it('une seule question pour des demandes simultanées du même site', async () => {
     const store = createSitePermissionStore({});
     let calls = 0;

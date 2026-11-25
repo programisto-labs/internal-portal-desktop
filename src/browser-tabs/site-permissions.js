@@ -75,6 +75,13 @@ function permissionPolicy(permission) {
 /** Décisions retenues : `{ version: 1, origins: { "https://x": { geolocation: "allow" } } }`. */
 function createSitePermissionStore({ filePath, fsImpl = fs } = {}) {
   let origins = null;
+  /**
+   * « Ignorer » : refusé sans question jusqu'au redémarrage de Lasco (jamais écrit sur le disque).
+   * Sans lui, un site qui redemande à chaque refus (position relue en boucle) reposait la question sans fin.
+   * Effacé par toute décision ou réinitialisation depuis les informations du site.
+   */
+  const dismissed = new Set();
+  const dismissKey = (origin, permission) => `${origin}\n${permission}`;
 
   function load() {
     if (origins) return origins;
@@ -119,6 +126,7 @@ function createSitePermissionStore({ filePath, fsImpl = fs } = {}) {
     set(origin, permission, decision) {
       if (siteOrigin(origin) !== origin || permissionPolicy(permission) !== 'ask') return false;
       if (decision !== null && !DECISIONS.has(decision)) return false;
+      dismissed.delete(dismissKey(origin, permission));
       const map = load();
       if (decision === null) {
         const decisions = map.get(origin);
@@ -131,14 +139,24 @@ function createSitePermissionStore({ filePath, fsImpl = fs } = {}) {
       save();
       return true;
     },
+    dismiss(origin, permission) {
+      if (siteOrigin(origin) !== origin || permissionPolicy(permission) !== 'ask') return false;
+      dismissed.add(dismissKey(origin, permission));
+      return true;
+    },
+    isDismissed(origin, permission) {
+      return dismissed.has(dismissKey(origin, permission));
+    },
     list(origin) {
       const decisions = load().get(origin);
       return decisions ? Object.fromEntries(decisions) : {};
     },
     clearOrigin(origin) {
+      for (const key of [...dismissed]) if (key.startsWith(`${origin}\n`)) dismissed.delete(key);
       if (load().delete(origin)) save();
     },
     clear() {
+      dismissed.clear();
       load().clear();
       save();
     },
@@ -174,6 +192,7 @@ function createSitePermissionHandlers({ store, ask }) {
     if (!origin) return false;
     const stored = store.get(origin, permission);
     if (stored) return stored === 'allow';
+    if (store.isDismissed && store.isDismissed(origin, permission)) return false;
     const key = `${origin}\n${permission}`;
     let question = pending.get(key);
     if (!question) {
@@ -188,6 +207,7 @@ function createSitePermissionHandlers({ store, ask }) {
       if (!store.get(origin, permission)) store.set(origin, permission, answer);
       return answer === 'allow';
     }
+    if (store.dismiss && !store.get(origin, permission)) store.dismiss(origin, permission);
     return false;
   }
 
