@@ -684,14 +684,20 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     const launchExternalApp = (url) =>
       externalApps.launch({ url, pageUrl: wc.getURL(), key: `tab:${tabId}` });
 
-    wc.setWindowOpenHandler(({ url }) => {
+    wc.setWindowOpenHandler(({ url, disposition }) => {
       if (launchExternalApp(url)) return { action: 'deny' };
       const safe = sanitizeBrowserUrl(url);
       if (safe && typeof interceptLink === 'function' && interceptLink(safe)) {
         return { action: 'deny' };
       }
       if (safe) {
-        emitToRenderer(OPEN_REQUEST_CHANNEL, { url: safe, openerTabId: tabId });
+        // `disposition` : `background-tab` pour un clic molette ou ⌘-clic. Le portail ouvre
+        // alors l'onglet sans focus, juste à droite de `openerTabId` (comme Chrome).
+        emitToRenderer(OPEN_REQUEST_CHANNEL, {
+          url: safe,
+          openerTabId: tabId,
+          ...(typeof disposition === 'string' ? { disposition } : {}),
+        });
       }
       return { action: 'deny' };
     });
