@@ -247,8 +247,10 @@ function createHarnessRunner({
       project: project.name,
       projectRoot: project.root,
       prompt,
+      // Claude Code (relais d'autorisations) : « Lancer et tout autoriser » possible.
+      allowRun: Boolean(def.permissionPrompt && permissions),
     });
-    if (decision !== 'once' && decision !== 'always' && decision !== 'grant') {
+    if (decision !== 'once' && decision !== 'always' && decision !== 'grant' && decision !== 'run') {
       return { ok: false, status: 'denied', error: { code: 'denied', message: 'Refusé par l’utilisateur.' } };
     }
 
@@ -292,6 +294,8 @@ function createHarnessRunner({
           harnessLabel: def.label,
           projectName: project.name,
           root: project.root,
+          // « Lancer et tout autoriser » : aucune carte pendant cette exécution (sauf sudo).
+          trustRun: decision === 'run',
           onDecision: ({ command, toolName, decision }) => {
             if (decision !== 'deny') return;
             const text = `Refusé · ${clip(command || toolName, 140)}`;
