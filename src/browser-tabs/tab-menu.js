@@ -17,11 +17,16 @@ const TAB_MENU_ACTIONS = Object.freeze([
 /** Window actions, shown only when the page handles them (`windowActions: true`). */
 const TAB_WINDOW_ACTIONS = Object.freeze(['detach', 'attach']);
 
-const TAB_MENU_ACTION_SET = new Set([...TAB_MENU_ACTIONS, ...TAB_WINDOW_ACTIONS]);
+/** Son de l'onglet : seulement quand la page les demande (onglet qui joue du son ou coupé). */
+const TAB_SOUND_ACTIONS = Object.freeze(['mute', 'unmute']);
+
+const TAB_MENU_ACTION_SET = new Set([...TAB_MENU_ACTIONS, ...TAB_WINDOW_ACTIONS, ...TAB_SOUND_ACTIONS]);
 
 const DEFAULT_LABELS = Object.freeze({
   reload: 'Actualiser',
   duplicate: 'Dupliquer',
+  mute: "Couper le son de l'onglet",
+  unmute: "Réactiver le son de l'onglet",
   close: "Fermer l'onglet",
   'close-others': 'Fermer les autres onglets',
   'close-right': 'Fermer les onglets à droite',
@@ -118,6 +123,7 @@ function buildTabMenuTemplate({ tabId, actions, labels, tabCount = 1, tabIndex =
 module.exports = {
   TAB_MENU_ACTIONS,
   TAB_WINDOW_ACTIONS,
+  TAB_SOUND_ACTIONS,
   resolveWindowMenuActions,
   normalizeMenuActions,
   buildTabMenuTemplate,

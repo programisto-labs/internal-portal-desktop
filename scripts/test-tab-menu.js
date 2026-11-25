@@ -13,6 +13,13 @@ describe('tab context menu template', () => {
     assert.deepEqual(normalizeMenuActions(['close', 'close', 'bogus', 'reload']), ['close', 'reload']);
   });
 
+  it('adds mute / unmute only when the page asks for it', () => {
+    assert.equal(normalizeMenuActions().includes('mute'), false);
+    assert.deepEqual(normalizeMenuActions(['reload', 'mute', 'close']), ['reload', 'mute', 'close']);
+    const template = buildTabMenuTemplate({ tabId: 't1', actions: ['unmute', 'close'], onAction: () => {} });
+    assert.ok(byLabel(template, "Réactiver le son de l'onglet"));
+  });
+
   it('rejects an invalid tab id', () => {
     assert.deepEqual(buildTabMenuTemplate({ tabId: '' }), []);
     assert.deepEqual(buildTabMenuTemplate({ tabId: 42 }), []);

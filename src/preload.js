@@ -86,6 +86,8 @@ const browserTabsBridge = {
   goBack: (payload) => invokeBrowserTab('browser-tab-go-back', payload),
   goForward: (payload) => invokeBrowserTab('browser-tab-go-forward', payload),
   reload: (payload) => invokeBrowserTab('browser-tab-reload', payload),
+  /** `{ tabId, muted }` : couper ou réactiver le son de l'onglet web. */
+  setMuted: (payload) => invokeBrowserTab('browser-tab-set-muted', payload),
   stop: (payload) => invokeBrowserTab('browser-tab-stop', payload),
   setBounds: (payload) => invokeBrowserTab('browser-tab-set-bounds', payload),
   getState: (payload) => invokeBrowserTab('browser-tab-get-state', payload),
