@@ -10,7 +10,7 @@ disk and never talks to the API. The portal (the trusted main window) does.
 | --- | --- | --- |
 | Web page | `src/browser-tabs/password-preload.js` | Preload of every web view, main frame only, isolated world. Detects sign-ins, reports clicks on login fields, fills fields. Exposes nothing to the page (no `contextBridge`). |
 | Main process | `src/browser-tabs/passwords.js` | Per-window controller: captured sign-ins (memory, 5 min, one per tab), Vault suggestions per tab, autofill popover state, fill checks. |
-| Main process | `src/browser-tabs/password-popover.js` | Autofill popover: placement under the field (`popoverBounds`), arming, choices. |
+| Main process | `src/browser-tabs/password-popover.js` | Autofill popover: placement under the field (`popoverBounds`), arming, choices. Shared with the form autofill (`docs/form-autofill.md`): each `show` names its owner; a popover replaced by another owner is told it closed, and `hide(owner)` only hides its own. |
 | Popover page | `src/browser-tabs/password-popover.html` + `password-popover-preload.js` | Desktop's own `file:` view drawn over the tab view; text only (`textContent`). |
 | Main process | `src/browser-tabs/manager.js` | Sets the preload, routes page messages to the tab (`handlePasswordMessage`) and popover messages (`handlePasswordPopoverMessage`), owns the popover view. |
 | Portal bridge | `src/preload.js` → `lascoDesktop.browserTabs.passwords` | See below. |

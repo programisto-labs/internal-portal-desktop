@@ -20,6 +20,7 @@ const { createSearchEngineStore } = require('./browser-tabs/search-engines');
 const { createDownloadsStore } = require('./downloads/store');
 const { createDownloadService } = require('./downloads/service');
 const { PASSWORD_PAGE_CHANNELS } = require('./browser-tabs/passwords');
+const { FORM_AUTOFILL_PAGE_CHANNELS } = require('./browser-tabs/form-autofill');
 const { createVaultAuth } = require('./vault-auth');
 const {
   sanitizeTabDescriptor,
@@ -2701,6 +2702,9 @@ function registerWindowIPC() {
     'browser-password-take-capture': 'passwordTakeCapture',
     'browser-password-dismiss-capture': 'passwordDismissCapture',
     'browser-password-fill': 'passwordFill',
+    // Form autofill (docs/form-autofill.md): the portal pushes the person's profiles.
+    'browser-autofill-set-profiles': 'autofillSetProfiles',
+    'browser-autofill-fill': 'autofillFill',
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {
@@ -2738,7 +2742,7 @@ function registerWindowIPC() {
 
   // Messages of the password runtime of the web pages (password-preload.js). The sender is a
   // web view: it is routed to the tab manager that owns it, never to a portal handler.
-  for (const channel of PASSWORD_PAGE_CHANNELS) {
+  for (const channel of [...PASSWORD_PAGE_CHANNELS, ...FORM_AUTOFILL_PAGE_CHANNELS]) {
     ipcMain.on(channel, (event, payload) => {
       for (const entry of portalWindows.values()) {
         if (entry.tabManager && entry.tabManager.handlePasswordMessage(event, channel, payload)) return;

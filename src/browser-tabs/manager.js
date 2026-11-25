@@ -34,6 +34,7 @@ const { createHistoryStore } = require('./history');
 const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
 const { createPasswordController } = require('./passwords');
 const { createPasswordPopover } = require('./password-popover');
+const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-autofill');
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
 const {
@@ -323,13 +324,41 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       entry.view.webContents.send(channel, payload);
       return true;
     },
-    popover: {
-      show: (tabId, rect, model, onChoose) => passwordPopover.show(tabId, rect, model, onChoose),
-      hide: () => passwordPopover.hide(),
-      key: (name) => passwordPopover.key(name),
-      isFocused: () => passwordPopover.isFocused(),
-    },
+    popover: popoverFor('password'),
   });
+
+  /** Form autofill (docs/form-autofill.md): names, addresses, e-mail, phone. Same popover, own owner. */
+  const formAutofill = createFormAutofillController({
+    emit: (channel, payload) => emitToRenderer(channel, payload),
+    getTabUrl: (tabId) => {
+      const entry = tabs.get(tabId);
+      if (!entry || entry.view.webContents.isDestroyed()) return '';
+      return entry.view.webContents.getURL();
+    },
+    sendToTab: (tabId, channel, payload) => {
+      const entry = tabs.get(tabId);
+      if (!entry || entry.view.webContents.isDestroyed()) return false;
+      entry.view.webContents.send(channel, payload);
+      return true;
+    },
+    popover: popoverFor(FORM_AUTOFILL_OWNER),
+  });
+
+  /** The popover under a field, shared by the password manager and the form autofill. */
+  function popoverFor(owner) {
+    return {
+      show: (tabId, rect, model, onChoose) => passwordPopover.show(tabId, rect, model, onChoose, owner),
+      hide: () => passwordPopover.hide(owner),
+      key: (name) => passwordPopover.key(name, owner),
+      isFocused: () => passwordPopover.isFocused(),
+    };
+  }
+
+  /** The tab view moved, was hidden or covered: no popover may float over the wrong place. */
+  function hideFieldPopovers() {
+    passwords.hidePopover();
+    formAutofill.hidePopover();
+  }
 
   /** Autofill popover under login fields (docs/passwords.md): Desktop's own view over the tab view. */
   const passwordPopover = createPasswordPopover({
@@ -554,6 +583,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (!entry) return;
     tabs.delete(tabId);
     passwords.forgetTab(tabId);
+    formAutofill.forgetTab(tabId);
     if (activeTabId === tabId) activeTabId = null;
     if (entry.htmlFullscreen) {
       entry.htmlFullscreen = false;
@@ -618,7 +648,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const win = getMainWindow();
     if (!entry || !win || win.isDestroyed()) return;
     ensureWindowListeners();
-    passwords.hidePopover();
+    hideFieldPopovers();
     entry.htmlFullscreen = true;
     if (!fullscreenWindowState) fullscreenWindowState = { wasFullScreen: win.isFullScreen() };
     if (!win.isFullScreen()) win.setFullScreen(true);
@@ -791,6 +821,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // Un vrai site s'affiche de nouveau : la page d'erreur est terminée.
       if (entry && entry.errorPage && sanitizeBrowserUrl(url)) entry.errorPage = null;
       passwords.onNavigate(tabId, url);
+      formAutofill.onNavigate(tabId, url);
       historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
     });
@@ -838,6 +869,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // fermée (`window.close()`, fenêtre de connexion OAuth) ou qui a disparu. Le portail retire
       // l'onglet et revient à celui qui l'a ouvert, comme Chrome.
       passwords.forgetTab(tabId);
+      formAutofill.forgetTab(tabId);
       tabs.delete(tabId);
       if (activeTabId === tabId) activeTabId = null;
       emitToRenderer(CLOSED_CHANNEL, { tabId });
@@ -1182,7 +1214,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (typeof tabId !== 'string' || !tabs.has(tabId)) {
       return { ok: false, error: 'unknown-tab' };
     }
-    if (activeTabId !== tabId) passwords.hidePopover();
+    if (activeTabId !== tabId) hideFieldPopovers();
     activeTabId = tabId;
     viewsVisible = true;
     overlayActive = false;
@@ -1203,7 +1235,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function hide() {
-    passwords.hidePopover();
+    hideFieldPopovers();
     viewsVisible = false;
     activeTabId = null;
     for (const entry of tabs.values()) {
@@ -1345,7 +1377,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       lastBounds.width !== nextBounds.width ||
       lastBounds.height !== nextBounds.height
     ) {
-      passwords.hidePopover();
+      hideFieldPopovers();
     }
     lastBounds = nextBounds;
     if (viewsVisible && activeTabId) {
@@ -1578,7 +1610,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   function setOverlay({ active }) {
     overlayActive = Boolean(active);
-    if (overlayActive) passwords.hidePopover();
+    if (overlayActive) hideFieldPopovers();
     if (!viewsVisible || !activeTabId) return { ok: true };
     const entry = tabs.get(activeTabId);
     if (!entry) return { ok: true };
@@ -1751,7 +1783,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (!tabId || !tabs.has(tabId)) return false;
     const frame = event.senderFrame;
     if (!frame || frame !== sender.mainFrame) return true;
-    passwords.onMessage(tabId, frame.url, channel, payload);
+    if (channel.startsWith('lasco-af:')) formAutofill.onMessage(tabId, frame.url, channel, payload);
+    else passwords.onMessage(tabId, frame.url, channel, payload);
     return true;
   }
 
@@ -1792,6 +1825,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     passwordTakeCapture: (payload) => passwords.takeCapture(payload),
     passwordDismissCapture: (payload) => passwords.dismissCapture(payload),
     passwordFill: (payload) => passwords.fill(payload),
+    autofillSetProfiles: (payload) => formAutofill.setProfiles(payload),
+    autofillFill: (payload) => formAutofill.fill(payload),
     handlePasswordMessage,
     handlePasswordPopoverMessage,
     destroyAll,

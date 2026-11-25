@@ -242,7 +242,7 @@ describe('password autofill popover', () => {
     };
     popover.show('t1', { x: 0, y: 0, width: 200, height: 30 }, model, (choice) => choices.push(choice));
     const render = sentToView.find(([channel]) => channel === 'lasco-pw-popover:render')[1];
-    assert.deepEqual(render.items, [{ label: 'Perso', sub: 'a@x.fr' }]);
+    assert.deepEqual(render.items, [{ label: 'Perso', sub: 'a@x.fr', icon: 'key' }]);
     assert.equal(render.dark, true);
     popover.onMessage({ type: 'choose', action: 'item', index: 0 });
     assert.equal(choices.length, 0);

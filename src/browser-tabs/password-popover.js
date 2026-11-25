@@ -101,10 +101,25 @@ function createPasswordPopover({
     return true;
   }
 
-  function show(tabId, rect, model, onChoose) {
-    // A popover already open (another field) is simply replaced.
+  /** Actions under the list: the model's own, else the password manager's two. */
+  function actionsOf(model) {
+    if (Array.isArray(model.actions)) return model.actions;
+    return [
+      { icon: 'search', label: model.labels.other, action: 'pick' },
+      { icon: 'settings', label: model.labels.manage, action: 'manage' },
+    ];
+  }
+
+  /**
+   * `owner` names the controller (password manager, form autofill): a popover of another owner that is
+   * replaced is told it closed (`onChoose(null)`); one of the same owner (another field) is simply replaced.
+   */
+  function show(tabId, rect, model, onChoose, owner = 'password') {
     ensureView();
-    current = { tabId, rect, model, onChoose, height: estimateHeight(model) };
+    const previous = current;
+    const actions = actionsOf(model);
+    current = { tabId, rect, model, actions, onChoose, owner, height: estimateHeight(model) };
+    if (previous && previous.owner !== owner) previous.onChoose(null);
     clearTimer(armTimer);
     armed = false;
     native.send('lasco-pw-popover:render', {
@@ -114,13 +129,19 @@ function createPasswordPopover({
       empty: model.labels.empty,
       other: model.labels.other,
       manage: model.labels.manage,
-      items: model.items.map((item) => ({
-        label: item.label || item.username,
-        sub: item.username && item.username !== item.label ? item.username : '',
-      })),
+      items: model.items.map((item) =>
+        typeof item.sub === 'string'
+          ? { label: item.label, sub: item.sub, icon: item.icon || 'key' }
+          : {
+              label: item.label || item.username,
+              sub: item.username && item.username !== item.label ? item.username : '',
+              icon: 'key',
+            },
+      ),
+      actions: actions.map(({ icon, label, action }) => ({ icon, label, action })),
     });
     if (!place()) {
-      hide();
+      hide(owner);
       onChoose(null);
       return;
     }
@@ -130,7 +151,9 @@ function createPasswordPopover({
     }, armDelayMs);
   }
 
-  function hide() {
+  /** With an owner, only that owner's popover is hidden (another one may have replaced it). */
+  function hide(owner) {
+    if (owner && current && current.owner !== owner) return;
     clearTimer(armTimer);
     armTimer = null;
     armed = false;
@@ -142,7 +165,7 @@ function createPasswordPopover({
     if (!current || !armed) return;
     const { tabId, onChoose } = current;
     onChoose(choice);
-    if (choice && (choice.type === 'pick' || choice.type === 'manage')) focusPortal();
+    if (choice && choice.type !== 'fill') focusPortal();
     else focusTab(tabId);
   }
 
@@ -154,8 +177,8 @@ function createPasswordPopover({
       if (Math.abs(height - current.height) > 1) {
         current.height = height;
         if (!place()) {
-          const { onChoose } = current;
-          hide();
+          const { onChoose, owner } = current;
+          hide(owner);
           onChoose(null);
         }
       }
@@ -163,7 +186,7 @@ function createPasswordPopover({
       if (payload.action === 'item' && Number.isInteger(payload.index)) {
         const item = current.model.items[payload.index];
         if (item) choose({ type: 'fill', id: item.id });
-      } else if (payload.action === 'pick' || payload.action === 'manage') {
+      } else if (typeof payload.action === 'string' && current.actions.some((entry) => entry.action === payload.action)) {
         choose({ type: payload.action });
       }
     } else if (payload.type === 'dismiss') {
@@ -175,8 +198,9 @@ function createPasswordPopover({
   }
 
   /** ↑ ↓ Enter from the page's field. Enter picks the highlighted row (once armed). */
-  function key(name) {
+  function key(name, owner) {
     if (!current || !native) return;
+    if (owner && current.owner !== owner) return;
     if (name === 'Enter' && !armed) return;
     native.send('lasco-pw-popover:key', name);
   }
@@ -187,6 +211,7 @@ function createPasswordPopover({
     key,
     onMessage,
     isFocused: () => Boolean(native && native.isFocused()),
+    ownerOf: () => (current ? current.owner : null),
     isSender: (webContentsId) => Boolean(native && native.isSender(webContentsId)),
     setDark: (dark) => native && native.send('lasco-pw-popover:theme', dark === true),
     destroy() {
