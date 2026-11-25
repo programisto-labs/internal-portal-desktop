@@ -71,19 +71,10 @@ function installPortalMediaPermissions(targetSession, { isPortalUrl, systemPrefe
   });
 }
 
-/** Onglets web du navigateur intégré : ni micro ni caméra, le reste inchangé. */
-function installBrowserTabMediaPermissions(targetSession) {
-  targetSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(permission !== 'media');
-  });
-  targetSession.setPermissionCheckHandler((_webContents, permission) => permission !== 'media');
-}
-
 module.exports = {
   isAudioOnlyRequest,
   portalMediaAllowed,
   portalMediaCheckAllowed,
   ensureSystemMicrophoneAccess,
   installPortalMediaPermissions,
-  installBrowserTabMediaPermissions,
 };

@@ -1,0 +1,180 @@
+'use strict';
+
+const { describe, it } = require('node:test');
+const assert = require('node:assert/strict');
+const {
+  permissionPolicy,
+  siteOrigin,
+  createSitePermissionStore,
+  createSitePermissionHandlers,
+  installSitePermissions,
+  describeSitePermissions,
+} = require('../src/browser-tabs/site-permissions');
+
+function memoryFs(initial = {}) {
+  const files = { ...initial };
+  return {
+    files,
+    readFileSync: (p) => {
+      if (!(p in files)) throw new Error('ENOENT');
+      return files[p];
+    },
+    writeFileSync: (p, data) => (files[p] = data),
+    renameSync: (from, to) => {
+      files[to] = files[from];
+      delete files[from];
+    },
+    mkdirSync: () => {},
+  };
+}
+
+const tab = (url) => ({ id: 7, isDestroyed: () => false, getURL: () => url });
+const request = (handlers, wc, permission, details = {}) =>
+  new Promise((resolve) => handlers.request(wc, permission, resolve, details));
+
+describe('autorisations des sites', () => {
+  it('classe les permissions comme Chrome', () => {
+    assert.equal(permissionPolicy('fullscreen'), 'allow');
+    assert.equal(permissionPolicy('clipboard-sanitized-write'), 'allow');
+    assert.equal(permissionPolicy('geolocation'), 'ask');
+    assert.equal(permissionPolicy('notifications'), 'ask');
+    assert.equal(permissionPolicy('clipboard-read'), 'ask');
+    assert.equal(permissionPolicy('media'), 'deny');
+    assert.equal(permissionPolicy('openExternal'), 'deny');
+    assert.equal(permissionPolicy('hid'), 'deny');
+    assert.equal(permissionPolicy('unknown'), 'deny');
+  });
+
+  it("ne reconnaît que les origines http(s)", () => {
+    assert.equal(siteOrigin('https://maps.example.com/a?b'), 'https://maps.example.com');
+    assert.equal(siteOrigin('file:///tmp/x.html'), null);
+    assert.equal(siteOrigin(''), null);
+  });
+
+  it('pose la question une fois, retient la réponse et ne la repose pas', async () => {
+    const store = createSitePermissionStore({});
+    const asked = [];
+    const handlers = createSitePermissionHandlers({
+      store,
+      ask: async (q) => {
+        asked.push(q);
+        return 'allow';
+      },
+    });
+    const wc = tab('https://maps.example.com/route');
+    assert.equal(await request(handlers, wc, 'geolocation'), true);
+    assert.equal(await request(handlers, wc, 'geolocation'), true);
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].origin, 'https://maps.example.com');
+    assert.equal(asked[0].label, 'connaître votre position');
+    assert.equal(store.get('https://maps.example.com', 'geolocation'), 'allow');
+    assert.equal(handlers.check(wc, 'geolocation', 'https://maps.example.com', {}), true);
+  });
+
+  it('Bloquer est retenu, Ignorer refuse sans retenir', async () => {
+    const store = createSitePermissionStore({});
+    let answer = 'block';
+    const handlers = createSitePermissionHandlers({ store, ask: async () => answer });
+    const wc = tab('https://news.example/');
+    assert.equal(await request(handlers, wc, 'notifications'), false);
+    assert.equal(store.get('https://news.example', 'notifications'), 'block');
+    answer = 'dismiss';
+    assert.equal(await request(handlers, wc, 'clipboard-read'), false);
+    assert.equal(store.get('https://news.example', 'clipboard-read'), null);
+  });
+
+  it('une seule question pour des demandes simultanées du même site', async () => {
+    const store = createSitePermissionStore({});
+    let calls = 0;
+    let release;
+    const handlers = createSitePermissionHandlers({
+      store,
+      ask: () => {
+        calls += 1;
+        return new Promise((resolve) => (release = () => resolve('allow')));
+      },
+    });
+    const wc = tab('https://a.example/');
+    const first = request(handlers, wc, 'geolocation');
+    const second = request(handlers, wc, 'geolocation');
+    await new Promise((r) => setImmediate(r));
+    release();
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+    assert.equal(calls, 1);
+  });
+
+  it("refuse sans question ce qui n'est pas demandable (micro, appareils, pages non web)", async () => {
+    let calls = 0;
+    const handlers = createSitePermissionHandlers({
+      store: createSitePermissionStore({}),
+      ask: async () => {
+        calls += 1;
+        return 'allow';
+      },
+    });
+    assert.equal(await request(handlers, tab('https://meet.example/'), 'media', { mediaTypes: ['audio'] }), false);
+    assert.equal(await request(handlers, tab('https://x.example/'), 'fullscreen'), true);
+    assert.equal(await request(handlers, tab('file:///tmp/a.html'), 'geolocation'), false);
+    assert.equal(calls, 0);
+    assert.equal(handlers.check(tab('https://x.example/'), 'media', 'https://x.example', {}), false);
+    // Sans décision, la lecture synchrone répond « non » (aucune notification sans accord).
+    assert.equal(handlers.check(tab('https://x.example/'), 'notifications', 'https://x.example', {}), false);
+  });
+
+  it("rattache la décision au site affiché, pas au cadre intégré", async () => {
+    const store = createSitePermissionStore({});
+    const asked = [];
+    const handlers = createSitePermissionHandlers({
+      store,
+      ask: async (q) => {
+        asked.push(q.origin);
+        return 'allow';
+      },
+    });
+    await request(handlers, tab('https://shop.example/'), 'geolocation', {
+      requestingUrl: 'https://maps.widget.example/embed',
+    });
+    assert.deepEqual(asked, ['https://shop.example']);
+  });
+
+  it('persiste les décisions et ignore un fichier altéré', () => {
+    const fsImpl = memoryFs();
+    const store = createSitePermissionStore({ filePath: '/p.json', fsImpl });
+    store.set('https://a.example', 'geolocation', 'allow');
+    store.set('https://a.example', 'notifications', 'block');
+    assert.equal(store.set('https://a.example', 'media', 'allow'), false);
+    assert.equal(store.set('https://a.example', 'geolocation', 'maybe'), false);
+    const reloaded = createSitePermissionStore({ filePath: '/p.json', fsImpl });
+    assert.deepEqual(reloaded.list('https://a.example'), { geolocation: 'allow', notifications: 'block' });
+    assert.deepEqual(describeSitePermissions(reloaded, 'https://a.example'), [
+      { permission: 'geolocation', decision: 'allow' },
+      { permission: 'notifications', decision: 'block' },
+    ]);
+    reloaded.set('https://a.example', 'geolocation', null);
+    assert.deepEqual(reloaded.list('https://a.example'), { notifications: 'block' });
+    reloaded.clearOrigin('https://a.example');
+    assert.deepEqual(reloaded.list('https://a.example'), {});
+
+    const tampered = memoryFs({
+      '/t.json': JSON.stringify({
+        version: 1,
+        origins: { 'https://ok.example': { geolocation: 'allow', media: 'allow' }, 'javascript:x': { geolocation: 'allow' } },
+      }),
+    });
+    const fromTampered = createSitePermissionStore({ filePath: '/t.json', fsImpl: tampered });
+    assert.deepEqual(fromTampered.list('https://ok.example'), { geolocation: 'allow' });
+    assert.deepEqual(fromTampered.list('javascript:x'), {});
+  });
+
+  it('installe les gestionnaires une seule fois par session', () => {
+    const calls = [];
+    const fakeSession = {
+      setPermissionRequestHandler: () => calls.push('request'),
+      setPermissionCheckHandler: () => calls.push('check'),
+    };
+    const deps = { store: createSitePermissionStore({}), ask: async () => 'dismiss' };
+    assert.equal(installSitePermissions(fakeSession, deps), true);
+    assert.equal(installSitePermissions(fakeSession, deps), false);
+    assert.deepEqual(calls, ['request', 'check']);
+  });
+});
