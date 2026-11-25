@@ -8,10 +8,15 @@
  * MCP `permission-mcp.js`, lancé par Claude Code, y transmet chaque demande. Desktop la montre en carte dans le
  * chat (même mécanisme que `shell.run`) et répond :
  *
- * - commande (`Bash`) : Refuser / Exécuter une fois / Toujours autoriser « préfixe » dans ce projet. La règle est
- *   une règle `shell.run` ordinaire (préfixe, dossier du projet, agent, utilisateur, appareil) : jamais pour une
- *   commande composée ou sensible, révocable dans Réglages > Cet ordinateur ;
- * - autre outil (WebFetch, MCP…) : Refuser / Autoriser une fois ;
+ * - commande en lecture seule dans le projet (`git log`, `gh run view … | grep`, `cat`…, voir
+ *   `read-only-command.js`) : autorisée sans carte ;
+ * - commande (`Bash`) : Refuser / Exécuter une fois / Toujours autoriser « préfixe » dans ce projet / Tout
+ *   autoriser pour ce lancement. La règle est une règle `shell.run` ordinaire (préfixe, dossier du projet, agent,
+ *   utilisateur, appareil) : jamais pour une commande composée ou sensible, révocable dans Réglages > Cet
+ *   ordinateur ;
+ * - autre outil (WebFetch, MCP…) : Refuser / Autoriser une fois / Tout autoriser pour ce lancement ;
+ * - « Tout autoriser pour ce lancement » (`run`) : les demandes suivantes de cette exécution passent sans carte,
+ *   sauf une élévation de privilèges (sudo…). Rien n'est retenu après l'exécution ;
  * - exécution terminée ou arrêtée : demandes en attente refusées, jeton retiré.
  */
 
@@ -21,12 +26,18 @@ const os = require('os');
 const path = require('path');
 const net = require('net');
 const { TOOL_NAME, SERVER_NAME } = require('./permission-mcp');
+const { isReadOnlyCommand } = require('./read-only-command');
 
 const MAX_REQUESTS_PER_RUN = 300;
 const DEFAULT_CONFIRM_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_LINE = 256 * 1024;
 
 const PERMISSION_TOOL = `mcp__${SERVER_NAME}__${TOOL_NAME}`;
+
+/** Élévation de privilèges : jamais couverte par « Tout autoriser pour ce lancement ». */
+const PRIVILEGED_RE = /(^|[\s;&|(`])(sudo|su|doas|pkexec|runas)(\s|$)/;
+
+const ALLOWED_ANSWERS = new Set(['once', 'always', 'run']);
 
 function clip(text, max) {
   const value = String(text ?? '');
@@ -168,6 +179,15 @@ function createHarnessPermissions({
         ctx.onDecision?.({ toolName, command: plan.command, decision: 'grant' });
         return allow;
       }
+      if (isReadOnlyCommand(plan.command, { root: plan.cwd, cwd: plan.cwd, platform })) {
+        ctx.onDecision?.({ toolName, command: plan.command, decision: 'read_only' });
+        return allow;
+      }
+      const privileged = PRIVILEGED_RE.test(plan.command);
+      if (ctx.trustRun && !privileged) {
+        ctx.onDecision?.({ toolName, command: plan.command, decision: 'run' });
+        return allow;
+      }
       const allowPersistent = !plan.notRememberableReason && plan.prefix.length > 0 && path.parse(plan.cwd).root !== plan.cwd;
       const answer = await ask(ctx, {
         ...base,
@@ -175,26 +195,34 @@ function createHarnessPermissions({
         command: plan.command,
         description: typeof toolInput.description === 'string' ? clip(toolInput.description, 300) : '',
         allowPersistent,
+        allowRun: !privileged,
         notRememberableReason: plan.notRememberableReason,
         scope: { commandPrefix: plan.prefix, cwdRoots: [plan.cwd] },
       });
       ctx.onDecision?.({ toolName, command: plan.command, decision: answer });
-      if (answer !== 'once' && answer !== 'always') return refused('Refusé par l’utilisateur dans Lasco.');
+      if (!ALLOWED_ANSWERS.has(answer)) return refused('Refusé par l’utilisateur dans Lasco.');
+      if (answer === 'run' && !privileged) ctx.trustRun = true;
       if (answer === 'always' && allowPersistent) {
         addShellGrant({ ...ctx, commandPrefix: plan.prefix, cwdRoots: [plan.cwd] });
       }
       return allow;
     }
 
+    if (ctx.trustRun) {
+      ctx.onDecision?.({ toolName, decision: 'run' });
+      return allow;
+    }
     const answer = await ask(ctx, {
       ...base,
       operation: 'code.harness_tool',
       toolName: clip(toolName || 'outil', 120),
       detail: describeInput(toolInput),
       allowPersistent: false,
+      allowRun: true,
     });
     ctx.onDecision?.({ toolName, decision: answer });
-    return answer === 'once' || answer === 'always' ? allow : refused('Refusé par l’utilisateur dans Lasco.');
+    if (answer === 'run') ctx.trustRun = true;
+    return ALLOWED_ANSWERS.has(answer) ? allow : refused('Refusé par l’utilisateur dans Lasco.');
   }
 
   /**
@@ -217,6 +245,7 @@ function createHarnessPermissions({
       onDecision: run.onDecision,
       controller: new AbortController(),
       count: 0,
+      trustRun: run.trustRun === true,
     };
     contexts.set(token, ctx);
     const mcpConfig = JSON.stringify({

@@ -239,7 +239,7 @@ function ensureHarnessRunner() {
           source: req.projectRoot,
           destination: req.operation === 'code.harness_command' ? maskSecrets(req.command || '') : req.toolName,
           decision: answer,
-          outcome: answer === 'once' || answer === 'always' ? 'allowed' : 'denied',
+          outcome: answer === 'once' || answer === 'always' || answer === 'run' ? 'allowed' : 'denied',
         });
         return answer;
       },

@@ -153,8 +153,9 @@ ipcRenderer.on('confirm-card-render', (_event, spec) => {
     button.textContent = String(label);
     button.disabled = true;
     if (decisions[index] === 'once') button.className = 'primary';
-    // « Refuser » first, then « Toujours autoriser », then the primary « une fois » on the right.
-    button.style.order = decisions[index] === 'deny' ? '0' : decisions[index] === 'always' ? '1' : '2';
+    // « Refuser » first, then « Toujours autoriser » / « Tout autoriser pour ce lancement », then the primary
+    // « une fois » on the right.
+    button.style.order = decisions[index] === 'deny' ? '0' : decisions[index] === 'always' || decisions[index] === 'run' ? '1' : '2';
     button.addEventListener('click', () => {
       if (button.disabled) return;
       ipcRenderer.send('confirm-card-decide', index);

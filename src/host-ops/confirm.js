@@ -7,6 +7,13 @@ const OP_LABELS = {
   'folder.create': 'Créer un dossier',
 };
 
+/** Harnais : toutes les demandes suivantes de cette exécution passent sans carte (`run`). */
+const RUN_BUTTON = 'Tout autoriser pour ce lancement';
+
+function runNote(harnessLabel) {
+  return `« Tout autoriser pour ce lancement » : ${harnessLabel} ne demande plus rien jusqu’à la fin de cette exécution (sauf sudo). Rien n’est retenu ensuite.`;
+}
+
 /**
  * Mise en page de la carte du chat pour une commande : informations en tête, commande dans un bloc
  * façon terminal, notes courtes, puis les boutons. La boîte de dialogue native garde `message`.
@@ -111,6 +118,11 @@ function buildDelegateConfirmDialog(req) {
     decisions.push('always');
     lines.push('', `« Toujours autoriser » vaut pour cet agent, ${req.harnessLabel} et ${req.projectRoot}, sur cet appareil. Révocable dans Réglages > Cet ordinateur.`);
   }
+  if (req.allowRun) {
+    buttons.push('Lancer et tout autoriser');
+    decisions.push('run');
+    lines.push('', `« Lancer et tout autoriser » : ${req.harnessLabel} ne demande rien pendant cette exécution (commandes, outils), sauf sudo. Les commandes en lecture seule (git log, grep, cat…) ne demandent jamais.`);
+  }
   return { title: `Un agent demande à lancer ${req.harnessLabel}`, message: lines.join('\n'), buttons, decisions };
 }
 
@@ -142,6 +154,11 @@ function buildHarnessCommandConfirmDialog(req) {
   } else if (req.notRememberableReason) {
     lines.push('', req.notRememberableReason);
   }
+  if (req.allowRun) {
+    buttons.push(RUN_BUTTON);
+    decisions.push('run');
+    lines.push('', runNote(req.harnessLabel));
+  }
   return {
     title: `${req.harnessLabel} demande à exécuter une commande`,
     message: lines.join('\n'),
@@ -156,6 +173,7 @@ function buildHarnessCommandConfirmDialog(req) {
         req.allowPersistent && prefix.length
           ? `« Toujours autoriser » : commandes commençant par « ${prefix.join(' ')} », dans ce projet, pour cet agent et ses harnais sur cet appareil. Révocable dans Réglages > Cet ordinateur.`
           : req.notRememberableReason,
+        req.allowRun ? runNote(req.harnessLabel) : null,
       ],
     }),
   };
@@ -172,11 +190,18 @@ function buildHarnessToolConfirmDialog(req) {
   ];
   if (req.detail) lines.push(req.detail);
   lines.push('', `Si vous refusez, ${req.harnessLabel} continue sans cet outil.`);
+  const buttons = ['Refuser', 'Autoriser une fois'];
+  const decisions = ['deny', 'once'];
+  if (req.allowRun) {
+    buttons.push(RUN_BUTTON);
+    decisions.push('run');
+    lines.push('', runNote(req.harnessLabel));
+  }
   return {
     title: `${req.harnessLabel} demande à utiliser ${req.toolName}`,
     message: lines.join('\n'),
-    buttons: ['Refuser', 'Autoriser une fois'],
-    decisions: ['deny', 'once'],
+    buttons,
+    decisions,
   };
 }
 

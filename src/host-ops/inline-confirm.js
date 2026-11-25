@@ -157,7 +157,7 @@ function createInlineConfirm({
     scheduleArm(entry);
   }
 
-  /** Same contract as `createConfirm`: resolves to 'deny' | 'once' | 'always'. */
+  /** Same contract as `createConfirm`: resolves to 'deny' | 'once' | 'always' | 'run' (harness: whole run). */
   function confirm(req) {
     return new Promise((resolve) => {
       const spec = buildConfirmDialog(req);
@@ -168,7 +168,7 @@ function createInlineConfirm({
         id,
         req,
         spec,
-        resolve: (answer) => resolve(answer === 'once' || answer === 'always' ? answer : 'deny'),
+        resolve: (answer) => resolve(answer === 'once' || answer === 'always' || answer === 'run' ? answer : 'deny'),
         card: null,
         bounds: null,
         armed: false,

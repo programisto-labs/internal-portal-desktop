@@ -11,6 +11,7 @@ const { createHarnessRunner } = require('../src/code-harness/runner');
 const { createRunHistory } = require('../src/code-harness/history');
 const { resolveHarnessCommand } = require('../src/code-harness/command');
 const { createHarnessPermissions, PERMISSION_TOOL } = require('../src/code-harness/permissions');
+const { isReadOnlyCommand } = require('../src/code-harness/read-only-command');
 const { handleMessage, askDesktop } = require('../src/code-harness/permission-mcp');
 const { buildShellPlan, shellGrantCovers } = require('../src/host-ops/shell');
 const { buildConfirmDialog } = require('../src/host-ops/confirm');
@@ -349,11 +350,35 @@ describe('harnais de code : exécutions', () => {
     assert.equal(child.spawned.opts.env.MCP_TOOL_TIMEOUT, '1');
     assert.equal(prepared[0].root, '/tmp/demo');
     assert.equal(prepared[0].agentId, 'a1');
+    assert.equal(prepared[0].trustRun, false);
     prepared[0].onDecision({ command: 'npx create-next-app', decision: 'deny' });
     child.end(0);
     await pending;
     assert.equal(disposed, 1);
     assert.ok(events.some((e) => e.type === 'step' && e.text === 'Refusé · npx create-next-app'));
+  });
+
+  it('« Lancer et tout autoriser » : relais préparé sans carte pour cette exécution', async () => {
+    confirmAnswer = 'run';
+    const prepared = [];
+    const runner = mk({
+      permissions: {
+        prepare: async (ctx) => {
+          prepared.push(ctx);
+          return { mcpConfig: '{"mcpServers":{}}', toolName: PERMISSION_TOOL, env: {}, dispose() {} };
+        },
+      },
+    });
+    const pending = runner.start(request());
+    await tick();
+    await tick();
+    assert.equal(confirmed[0].allowRun, true);
+    const dialog = buildConfirmDialog({ ...confirmed[0], allowPersistent: true });
+    assert.deepEqual(dialog.decisions, ['deny', 'once', 'always', 'run']);
+    assert.equal(dialog.buttons[3], 'Lancer et tout autoriser');
+    assert.equal(prepared[0].trustRun, true);
+    child.end(0);
+    await pending;
   });
 
   it('autres harnais : pas de relais (ils ont leurs propres règles)', async () => {
@@ -557,7 +582,8 @@ describe('harnais de code : autorisations remontées dans le chat (Claude Code)'
     const dialog = buildConfirmDialog(asked[0]);
     assert.equal(dialog.title, 'Claude Code demande à exécuter une commande');
     assert.match(dialog.message, /npx create-next-app@latest demo --yes/);
-    assert.deepEqual(dialog.decisions, ['deny', 'once', 'always']);
+    assert.deepEqual(dialog.decisions, ['deny', 'once', 'always', 'run']);
+    assert.equal(dialog.buttons[3], 'Tout autoriser pour ce lancement');
     prepared.dispose();
   });
 
@@ -588,13 +614,54 @@ describe('harnais de code : autorisations remontées dans le chat (Claude Code)'
     assert.equal((await askVia(prepared, 'WebFetch', { url: 'https://nextjs.org/docs' })).behavior, 'allow');
     const toolReq = asked[asked.length - 1];
     assert.equal(toolReq.operation, 'code.harness_tool');
-    assert.deepEqual(buildConfirmDialog(toolReq).decisions, ['deny', 'once']);
+    assert.deepEqual(buildConfirmDialog(toolReq).decisions, ['deny', 'once', 'run']);
     const env = relayOf(prepared);
     const forged = await askDesktop({ socketPath: env.LASCO_HARNESS_PERMISSION_SOCKET, token: 'x', request: { toolName: 'Bash', input: { command: 'ls' } }, timeoutMs: 5000 });
     assert.equal(forged.behavior, 'deny');
     prepared.dispose();
     const after = await askVia(prepared, 'Bash', { command: 'ls' });
     assert.equal(after.behavior, 'deny');
+  });
+
+  it('lecture seule dans le projet : autorisée sans carte, même enchaînée', async () => {
+    answer = 'deny';
+    fs.mkdirSync(path.join(root, 'apps'));
+    const prepared = await permissions.prepare(runCtx());
+    for (const command of [
+      'gh run view 45638786739 --log-failed 2>&1 | grep -A 20 "failing"',
+      `git -C ${root} log --oneline origin/develop..HEAD`,
+      'git status && git diff --stat',
+      'grep -rn "entityId" apps | head -40',
+    ]) {
+      assert.equal((await askVia(prepared, 'Bash', { command })).behavior, 'allow', command);
+    }
+    assert.equal(asked.length, 0);
+    assert.equal((await askVia(prepared, 'Bash', { command: 'npm test' })).behavior, 'deny');
+    assert.equal(asked.length, 1);
+    prepared.dispose();
+  });
+
+  it('« Tout autoriser pour ce lancement » : plus de carte jusqu’à la fin, sauf sudo ; rien de retenu', async () => {
+    answer = 'run';
+    const prepared = await permissions.prepare(runCtx());
+    assert.equal((await askVia(prepared, 'Bash', { command: 'npm install && npm test' })).behavior, 'allow');
+    assert.equal(asked.length, 1);
+    answer = 'deny';
+    assert.equal((await askVia(prepared, 'Bash', { command: 'node -e "console.log(1)"' })).behavior, 'allow');
+    assert.equal((await askVia(prepared, 'WebFetch', { url: 'https://example.com' })).behavior, 'allow');
+    assert.equal(asked.length, 1);
+    // Élévation de privilèges : toujours une carte, sans le bouton.
+    assert.equal((await askVia(prepared, 'Bash', { command: 'sudo npm i -g x' })).behavior, 'deny');
+    assert.equal(asked.length, 2);
+    assert.equal(asked[1].allowRun, false);
+    assert.ok(!buildConfirmDialog(asked[1]).decisions.includes('run'));
+    assert.equal(grants.length, 0);
+    prepared.dispose();
+    // Nouvelle exécution : on redemande.
+    const second = await permissions.prepare(runCtx());
+    assert.equal((await askVia(second, 'Bash', { command: 'npm test' })).behavior, 'deny');
+    assert.equal(asked.length, 3);
+    second.dispose();
   });
 
   it('fin d’exécution pendant une carte ouverte : la demande est refusée', async () => {
@@ -697,5 +764,94 @@ describe('harnais de code : commande sous Windows', () => {
     const unknown = fakeFs({ 'C:\\Windows\\System32\\vibe.cmd': '@echo off\r\npython -m vibe %*' });
     assert.equal(resolveHarnessCommand('vibe', { platform: 'win32', env, fs: unknown }).error, 'unsupported_shim');
     assert.deepEqual(resolveHarnessCommand('vibe', { platform: 'win32', env, fs: fakeFs({}) }), { error: 'not_installed' });
+  });
+});
+
+describe('harnais de code : commandes en lecture seule', () => {
+  let tmp;
+  let root;
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lasco-ro-'));
+    root = fs.realpathSync(tmp);
+    fs.mkdirSync(path.join(root, '.claude', 'wt-x', 'apps'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'README.md'), 'x');
+    fs.writeFileSync(path.join(root, '.env'), 'SECRET=1');
+  });
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const ro = (command, opts = {}) => isReadOnlyCommand(command, { root, cwd: root, platform: 'darwin', ...opts });
+
+  it('reconnaît les lectures d’un diagnostic (captures réelles)', () => {
+    for (const command of [
+      'ls .claude/wt-x 2>/dev/null && echo ok',
+      'git worktree list',
+      'git -C .claude/wt-x status',
+      'gh run view 45638786739 --log-failed 2>&1 | head -200',
+      'gh run view 45638786739 --log-failed 2>&1 | grep -E "failing|passing"',
+      'grep -nP "(?<![.\\w$])entityId\\s*:\\s*null\\b" .claude/wt-x/apps',
+      'git -C .claude/wt-x log --oneline origin/develop..HEAD',
+      'git -C .claude/wt-x diff origin/develop -- apps',
+      'gh pr view 2706 --json headRefOid,commits 2>&1 | head -20',
+      'gh pr checks 2706 2>&1 | head -40',
+      'git -C .claude/wt-x show 624c88d0e --stat',
+      `git -C ${root} show HEAD -- apps`,
+      'cat README.md | wc -l',
+      "sed -n '1,200p' README.md",
+      'cd .claude/wt-x && git status',
+      'find . -name "*.ts" -not -path "*/node_modules/*"',
+      'gh api repos/o/r/pulls/1',
+      'git branch -a',
+    ]) {
+      assert.equal(ro(command), true, command);
+    }
+  });
+
+  it('laisse la carte pour tout ce qui écrit, exécute ou sort du projet', () => {
+    for (const command of [
+      'npm test',
+      'node -e "console.log(1)"',
+      'cd .claude/wt-x && node -e "1"',
+      'git commit -m x',
+      'git push',
+      'git branch new-branch',
+      'git branch -D old',
+      'git -c core.pager=evil log',
+      'git diff --output=out.txt',
+      'git stash',
+      'gh pr merge 1',
+      'gh pr view 1 --web',
+      'gh api -X POST repos/o/r/issues',
+      'gh api repos/o/r/issues -f title=x',
+      'cat README.md > copy.md',
+      'grep x README.md >> log.txt',
+      'cat < README.md',
+      'echo $(whoami)',
+      'echo "$HOME"',
+      'echo `id`',
+      'ls &',
+      'FOO=1 ls',
+      'cat /etc/passwd',
+      'cat ~/.ssh/id_rsa',
+      'cat ../outside',
+      'cat .env',
+      'grep SECRET .env',
+      'find . -delete',
+      'find . -exec rm {} +',
+      "sed -i 's/a/b/' README.md",
+      "sed -n 'w out' README.md",
+      'sort -o out README.md',
+      './script.sh',
+      'ls\nrm -rf x',
+      'ls |',
+      'cd /tmp && ls',
+    ]) {
+      assert.equal(ro(command), false, command);
+    }
+    assert.equal(ro('git status', { platform: 'win32' }), false);
+  });
+
+  it('un lien du projet vers l’extérieur n’est pas lu sans carte', () => {
+    fs.symlinkSync(os.tmpdir(), path.join(root, 'out-link'));
+    assert.equal(ro('ls out-link'), false);
+    assert.equal(ro('cd out-link'), false);
   });
 });
