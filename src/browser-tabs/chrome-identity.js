@@ -10,7 +10,8 @@
  * ("This browser or app may not be secure"). We align all three with Chrome:
  *  - brands / platform metadata through CDP `Emulation.setUserAgentOverride`
  *    (only way to change `navigator.userAgentData`, kept across navigations);
- *  - `Sec-CH-UA*` headers on HTTPS requests of the browser session;
+ *  - `Sec-CH-UA*` headers on HTTPS requests of the browser session, plus the
+ *    high-entropy hints a site asks for (`Accept-CH` / `Critical-CH`);
  *  - the `window.chrome` properties Chrome defines on every page.
  */
 
@@ -156,17 +157,148 @@ const PASSKEY_FALLBACK_SCRIPT = `(() => {
   } catch (_) {}
 })();`;
 
-/** Adds `Sec-CH-UA*` to every HTTPS request of the browser session (Chrome never sends them over plain HTTP). */
-function installClientHintHeaders(browserSession) {
-  const headers = buildClientHintHeaders();
-  browserSession.webRequest.onBeforeSendHeaders({ urls: ['https://*/*'] }, (details, callback) => {
-    const requestHeaders = { ...details.requestHeaders };
-    for (const [name, value] of Object.entries(headers)) {
-      const present = Object.keys(requestHeaders).some((key) => key.toLowerCase() === name);
-      if (!present) requestHeaders[name] = value;
+/**
+ * Indices « à haute entropie » que Chrome n'envoie qu'à un site qui les demande (`Accept-CH`),
+ * avec les mêmes valeurs que `navigator.userAgentData.getHighEntropyValues()` (CDP).
+ */
+function buildHighEntropyHintHeaders(meta = buildUserAgentMetadata()) {
+  return {
+    'sec-ch-ua-arch': `"${meta.architecture}"`,
+    'sec-ch-ua-bitness': `"${meta.bitness}"`,
+    'sec-ch-ua-full-version': `"${meta.fullVersion}"`,
+    'sec-ch-ua-full-version-list': formatBrandsHeader(meta.fullVersionList),
+    'sec-ch-ua-model': `"${meta.model}"`,
+    'sec-ch-ua-platform-version': `"${meta.platformVersion}"`,
+    'sec-ch-ua-wow64': meta.wow64 ? '?1' : '?0',
+    'sec-ch-ua-form-factors': '"Desktop"',
+  };
+}
+
+/** `Accept-CH: Sec-CH-UA-Arch, UA-Model` → `['sec-ch-ua-arch', 'ua-model']` */
+function parseHintList(value) {
+  const raw = Array.isArray(value) ? value.join(',') : String(value || '');
+  return raw
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function headerValue(headers, name) {
+  if (!headers) return undefined;
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name) return value;
+  }
+  return undefined;
+}
+
+function httpsOrigin(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    return parsed.protocol === 'https:' ? parsed.origin : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Indices du client comme Chrome. Electron n'en envoie aucun, même quand le site les exige :
+ * Cloudflare (Canva…) répond `Critical-CH: Sec-CH-UA-Full-Version-List, …` et classe en robot
+ * le navigateur qui ne les renvoie pas (retour de connexion Google refusé, scripts bloqués).
+ *  - toujours : `Sec-CH-UA`, `-Mobile`, `-Platform` ;
+ *  - à une origine qui les a demandés (`Accept-CH` d'une page principale) : les indices demandés ;
+ *  - `Critical-CH` sur une page principale dont la requête n'avait pas ces indices : Chrome
+ *    rejoue la requête avec eux. Ici : réponse transformée en 307 vers la même adresse (GET
+ *    seulement, une fois par adresse), les cookies de la réponse sont gardés.
+ */
+function createClientHintPolicy({ meta = buildUserAgentMetadata(), now = () => Date.now() } = {}) {
+  const lowEntropy = {
+    'sec-ch-ua': formatBrandsHeader(meta.brands),
+    'sec-ch-ua-mobile': meta.mobile ? '?1' : '?0',
+    'sec-ch-ua-platform': `"${meta.platform}"`,
+  };
+  const highEntropy = buildHighEntropyHintHeaders(meta);
+  /** origine → indices acceptés (en minuscules). */
+  const accepted = new Map();
+  /** adresse → date du dernier rejeu (évite toute boucle). */
+  const restarted = new Map();
+  const RESTART_WINDOW_MS = 30_000;
+
+  function hintsFor(url) {
+    const origin = httpsOrigin(url);
+    if (!origin) return null;
+    const headers = { ...lowEntropy };
+    const wanted = accepted.get(origin);
+    if (wanted) {
+      for (const name of wanted) {
+        if (highEntropy[name]) headers[name] = highEntropy[name];
+      }
     }
-    callback({ requestHeaders });
+    return headers;
+  }
+
+  /**
+   * En-têtes de la requête avec nos indices. Une page ne peut pas poser `Sec-CH-*` (en-têtes
+   * interdits) : ceux déjà présents viennent de Chromium, qui annonce « Chromium » sans
+   * « Google Chrome » sur les sous-ressources. Les nôtres les remplacent, pour rester cohérents.
+   */
+  function requestHeaders(url, current = {}) {
+    const hints = hintsFor(url);
+    if (!hints) return current;
+    const next = {};
+    for (const [key, value] of Object.entries(current || {})) {
+      if (!Object.prototype.hasOwnProperty.call(hints, key.toLowerCase())) next[key] = value;
+    }
+    return Object.assign(next, hints);
+  }
+
+  /**
+   * Retient `Accept-CH` d'une page principale. Renvoie `{ restart: true }` quand Chrome
+   * rejouerait la requête pour `Critical-CH`.
+   */
+  function onResponse({ url, method, resourceType, responseHeaders }) {
+    if (resourceType !== 'mainFrame') return { restart: false };
+    const origin = httpsOrigin(url);
+    if (!origin) return { restart: false };
+    const before = accepted.get(origin) || new Set();
+    const acceptHeader = headerValue(responseHeaders, 'accept-ch');
+    if (acceptHeader === undefined) return { restart: false };
+    const next = new Set(parseHintList(acceptHeader).filter((name) => highEntropy[name]));
+    accepted.set(origin, next);
+    if (String(method || 'GET').toUpperCase() !== 'GET') return { restart: false };
+    const critical = parseHintList(headerValue(responseHeaders, 'critical-ch'));
+    const missing = critical.some((name) => highEntropy[name] && next.has(name) && !before.has(name));
+    if (!missing) return { restart: false };
+    const last = restarted.get(url);
+    if (last !== undefined && now() - last < RESTART_WINDOW_MS) return { restart: false };
+    restarted.set(url, now());
+    if (restarted.size > 200) restarted.delete(restarted.keys().next().value);
+    return { restart: true };
+  }
+
+  return { requestHeaders, onResponse, hintsFor };
+}
+
+/** Indices du client sur les requêtes HTTPS de la session des onglets web (jamais en HTTP, comme Chrome). */
+function installClientHintHeaders(browserSession, policy = createClientHintPolicy()) {
+  browserSession.webRequest.onBeforeSendHeaders({ urls: ['https://*/*'] }, (details, callback) => {
+    callback({ requestHeaders: policy.requestHeaders(details.url, details.requestHeaders) });
   });
+  browserSession.webRequest.onHeadersReceived({ urls: ['https://*/*'] }, (details, callback) => {
+    const { restart } = policy.onResponse(details);
+    if (!restart) {
+      callback({});
+      return;
+    }
+    const responseHeaders = {};
+    for (const [key, value] of Object.entries(details.responseHeaders || {})) {
+      const lower = key.toLowerCase();
+      if (lower === 'location' || lower === 'content-length' || lower === 'content-type') continue;
+      responseHeaders[key] = value;
+    }
+    responseHeaders.Location = [details.url];
+    callback({ responseHeaders, statusLine: 'HTTP/1.1 307 Temporary Redirect' });
+  });
+  return policy;
 }
 
 /**
@@ -200,6 +332,9 @@ module.exports = {
   buildChromeBrands,
   buildUserAgentMetadata,
   buildClientHintHeaders,
+  buildHighEntropyHintHeaders,
+  createClientHintPolicy,
+  parseHintList,
   formatBrandsHeader,
   installClientHintHeaders,
   applyChromeIdentity,
