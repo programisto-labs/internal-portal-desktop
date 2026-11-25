@@ -16,6 +16,7 @@ const {
 } = require('./default-browser');
 const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
 const { createHistoryStore } = require('./browser-tabs/history');
+const { createSearchEngineStore } = require('./browser-tabs/search-engines');
 const { createDownloadsStore } = require('./downloads/store');
 const { createDownloadService } = require('./downloads/service');
 const { PASSWORD_PAGE_CHANNELS } = require('./browser-tabs/passwords');
@@ -1006,6 +1007,25 @@ function getDownloadService() {
   return downloadService;
 }
 
+/** Moteurs de recherche du navigateur, communs à toutes les fenêtres (docs/search-engines.md). */
+let searchEngineStore = null;
+const SEARCH_ENGINES_CHANNEL = 'browser-search-engines-changed';
+
+function getSearchEngineStore() {
+  if (!searchEngineStore) {
+    searchEngineStore = createSearchEngineStore({ filePath: path.join(app.getPath('userData'), 'search-engines.json') });
+    // Moteur par défaut changé dans les Réglages, site repéré : chaque fenêtre du portail suit.
+    searchEngineStore.subscribe(() => {
+      const snapshot = searchEngineStore.snapshot();
+      for (const entry of portalWindows.values()) {
+        if (!entry.win.isDestroyed()) entry.win.webContents.send(SEARCH_ENGINES_CHANNEL, snapshot);
+      }
+      refreshSettings();
+    });
+  }
+  return searchEngineStore;
+}
+
 function portalWindowEntry(win) {
   if (!win || win.isDestroyed()) return null;
   return portalWindows.get(win.id) || null;
@@ -1020,6 +1040,7 @@ function tabManagerFor(win) {
       getMainWindow: () => (win.isDestroyed() ? null : win),
       history: getBrowserHistoryStore(),
       interceptLink: routePortalLinkInApp,
+      searchEngines: getSearchEngineStore(),
     });
   }
   return entry.tabManager;
@@ -2312,6 +2333,7 @@ function registerWindowIPC() {
       },
       update: buildUpdateSnapshot(),
       driveSync: driveSyncSettingsState(getDriveSyncStore()),
+      searchEngines: getSearchEngineStore().list(),
       downloads: {
         directory: downloadsDirectory(),
         isDefault: !settings.downloadsDirectory || downloadsDirectory() !== settings.downloadsDirectory,
@@ -2431,6 +2453,31 @@ function registerWindowIPC() {
     if (!fromSettings(event) || typeof value !== 'boolean') return false;
     getSettingsStore().set({ downloadsAskWhere: value });
     return true;
+  });
+  // Réglages > Moteur de recherche (docs/search-engines.md).
+  ipcMain.handle('settings-modal-search-set-default', (event, id) => {
+    if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
+    return getSearchEngineStore().setDefault(id);
+  });
+  ipcMain.handle('settings-modal-search-set-auto-discover', (event, enabled) => {
+    if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
+    return getSearchEngineStore().setAutoDiscover(enabled);
+  });
+  ipcMain.handle('settings-modal-search-add', (event, fields) => {
+    if (!fromSettings(event) || !fields || typeof fields !== 'object') return { ok: false, error: 'forbidden' };
+    return getSearchEngineStore().addCustom(fields);
+  });
+  ipcMain.handle('settings-modal-search-update', (event, id, fields) => {
+    if (!fromSettings(event) || !fields || typeof fields !== 'object') return { ok: false, error: 'forbidden' };
+    return getSearchEngineStore().update(id, fields);
+  });
+  ipcMain.handle('settings-modal-search-remove', (event, id) => {
+    if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
+    return getSearchEngineStore().remove(id);
+  });
+  ipcMain.handle('settings-modal-search-set-active', (event, id, active) => {
+    if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
+    return getSearchEngineStore().setActive(id, active);
   });
   ipcMain.handle('settings-modal-update-check', async (event) => {
     if (!fromSettings(event)) return null;
@@ -2656,6 +2703,21 @@ function registerWindowIPC() {
     });
   }
 
+  // Barre d'adresse du portail : moteur par défaut et raccourcis des sites (docs/search-engines.md).
+  ipcMain.handle('browser-search-engines-get', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return { ok: true, ...getSearchEngineStore().snapshot() };
+  });
+  ipcMain.handle('browser-search-engines-mark-used', (event, payload) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return getSearchEngineStore().markUsed(payload && payload.id);
+  });
+  ipcMain.handle('browser-search-engines-manage', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    openSettings('search');
+    return { ok: true };
+  });
+
   // Identity check before the portal shows a saved password (docs/passwords.md). Portal windows only.
   const vaultAuth = createVaultAuth({ systemPreferences });
   ipcMain.handle('lasco-vault-verify-user', (event, payload) => {
@@ -2756,6 +2818,7 @@ if (!app.requestSingleInstanceLock()) {
     }
     destroyAllBrowserViews();
     if (downloadService) downloadService.flush();
+    if (searchEngineStore) searchEngineStore.flush();
     if (updateCheckIntervalId) {
       clearInterval(updateCheckIntervalId);
       updateCheckIntervalId = null;

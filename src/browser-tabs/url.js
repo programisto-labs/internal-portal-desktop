@@ -28,9 +28,10 @@ function looksLikeUrl(input) {
 
 /**
  * Convert omnibox input into a navigable http(s) URL.
- * Valid URLs / hostnames navigate directly; everything else searches Google.
+ * Valid URLs / hostnames navigate directly; everything else searches with `searchTemplate`
+ * (`%s` = the query; Google when absent, docs/search-engines.md).
  */
-function resolveOmniboxInput(input) {
+function resolveOmniboxInput(input, searchTemplate = 'https://www.google.com/search?q=%s') {
   const trimmed = String(input || '').trim();
   if (!trimmed) return null;
 
@@ -47,9 +48,7 @@ function resolveOmniboxInput(input) {
     return sanitizeBrowserUrl(withScheme);
   }
 
-  return sanitizeBrowserUrl(
-    `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`,
-  );
+  return sanitizeBrowserUrl(String(searchTemplate).split('%s').join(encodeURIComponent(trimmed)));
 }
 
 /**
