@@ -44,6 +44,7 @@ const {
   discoverSiteSearchEngine,
 } = require('./search-engines');
 const path = require('path');
+const { randomUUID } = require('crypto');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
 const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.js');
@@ -52,6 +53,7 @@ const PASSWORD_POPOVER_PAGE = path.join(__dirname, 'password-popover.html');
 const BROWSER_PARTITION = 'persist:browser-tabs';
 const STATE_CHANNEL = 'browser-tab-state';
 const OPEN_REQUEST_CHANNEL = 'browser-tab-open-request';
+const CLOSED_CHANNEL = 'browser-tab-closed';
 const FIND_RESULT_CHANNEL = 'browser-tab-find-result';
 const SHORTCUT_CHANNEL = 'browser-tab-shortcut';
 
@@ -298,6 +300,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   /** @type {Map<string, { view: import('electron').WebContentsView, url: string }>} */
   const tabs = new Map();
+  let adoptPopups = false;
   let activeTabId = null;
   /** @type {{ x: number, y: number, width: number, height: number } | null} */
   let lastBounds = null;
@@ -716,14 +719,35 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const launchExternalApp = (url) =>
       externalApps.launch({ url, pageUrl: wc.getURL(), key: `tab:${tabId}` });
 
-    wc.setWindowOpenHandler(({ url }) => {
+    wc.setWindowOpenHandler(({ url, disposition }) => {
       if (launchExternalApp(url)) return { action: 'deny' };
       const safe = sanitizeBrowserUrl(url);
       if (safe && typeof interceptLink === 'function' && interceptLink(safe)) {
         return { action: 'deny' };
       }
+      const blankPopup = !url || url === 'about:blank';
+      if (adoptPopups && (safe || blankPopup)) {
+        // Vraie fenêtre fille (docs/popups.md) : `window.open` renvoie une fenêtre, `opener`,
+        // `postMessage` et `window.close()` marchent (Gmail « popout », connexions OAuth).
+        // Elle devient un onglet que le portail adopte sous `adoptedTabId`.
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: { webPreferences: browserTabWebPreferences() },
+          createWindow: (options) => adoptPopup(options, {
+            url: safe || 'about:blank',
+            openerTabId: tabId,
+            disposition,
+          }),
+        };
+      }
       if (safe) {
-        emitToRenderer(OPEN_REQUEST_CHANNEL, { url: safe, openerTabId: tabId });
+        // `disposition` : `background-tab` pour un clic molette ou ⌘-clic. Le portail ouvre
+        // alors l'onglet sans focus, juste à droite de `openerTabId` (comme Chrome).
+        emitToRenderer(OPEN_REQUEST_CHANNEL, {
+          url: safe,
+          openerTabId: tabId,
+          ...(typeof disposition === 'string' ? { disposition } : {}),
+        });
       }
       return { action: 'deny' };
     });
@@ -807,9 +831,13 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // view and registers the new one at once; the old view's `destroyed` comes later
       // and must not drop the new entry (tab stuck loading, stop / reload ignored).
       if (!isCurrentTabView(tabs, tabId, view)) return;
+      // Encore enregistrée : la vue n'a pas été fermée par `destroyTab`, c'est la page qui s'est
+      // fermée (`window.close()`, fenêtre de connexion OAuth) ou qui a disparu. Le portail retire
+      // l'onglet et revient à celui qui l'a ouvert, comme Chrome.
       passwords.forgetTab(tabId);
       tabs.delete(tabId);
       if (activeTabId === tabId) activeTabId = null;
+      emitToRenderer(CLOSED_CHANNEL, { tabId });
     });
 
     wc.on('zoom-changed', (_event, direction) => {
@@ -870,7 +898,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         f: () => forwardToPortalField('find'),
         g: () => forward(input.shift ? 'find-previous' : 'find-next'),
         l: () => forwardToPortalField('focus-address'),
-        t: () => forward('new-tab'),
+        // Le nouvel onglet met le curseur dans la barre d'adresse : le clavier doit quitter cette vue.
+        t: () => forwardToPortalField('new-tab'),
         // Téléchargements : ⌘⇧J (macOS), Ctrl+J (Windows / Linux), comme Chrome.
         j: () => forward('downloads'),
         p: () => print({ tabId }),
@@ -895,7 +924,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       const separator = { type: 'separator' };
       const openInNewTab = (url) => {
         const safe = sanitizeBrowserUrl(url);
-        if (safe) emitToRenderer(OPEN_REQUEST_CHANNEL, { url: safe, openerTabId: tabId });
+        // « Ouvrir dans un nouvel onglet » : en arrière-plan, à droite de cet onglet (Chrome).
+        if (safe) {
+          emitToRenderer(OPEN_REQUEST_CHANNEL, {
+            url: safe,
+            openerTabId: tabId,
+            disposition: 'background-tab',
+          });
+        }
       };
 
       // Téléchargement géré par Lasco (docs/downloads.md) : dossier choisi dans les Réglages.
@@ -1012,21 +1048,23 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     return next;
   }
 
+  function browserTabWebPreferences() {
+    return {
+      session: getBrowserSession(),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      // Password manager runtime (main frame only, isolated world, exposes nothing to the
+      // page): untrusted web content never reaches Electron APIs.
+      preload: PASSWORD_PRELOAD,
+      allowRunningInsecureContent: false,
+      spellcheck: true,
+    };
+  }
+
   function createView(tabId, initialUrl) {
-    const view = new WebContentsView({
-      webPreferences: {
-        session: getBrowserSession(),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        webSecurity: true,
-        // Password manager runtime (main frame only, isolated world, exposes nothing to the
-        // page): untrusted web content never reaches Electron APIs.
-        preload: PASSWORD_PRELOAD,
-        allowRunningInsecureContent: false,
-        spellcheck: true,
-      },
-    });
+    const view = new WebContentsView({ webPreferences: browserTabWebPreferences() });
     view.setBackgroundColor('#ffffff');
     const entry = {
       view,
@@ -1070,6 +1108,36 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       entry.identityPending = false;
       if (!wc.isDestroyed() && !entry.abortedBlank) void wc.loadURL(entry.url);
     }
+  }
+
+  /**
+   * Onglet pour une fenêtre ouverte par une page (`window.open`) : la vue reprend les
+   * webContents créés par Chromium, reliés à leur page d'origine. Cachée jusqu'au `select`.
+   */
+  function adoptPopup(options, { url, openerTabId, disposition }) {
+    const tabId = `popup-${randomUUID()}`;
+    const view = new WebContentsView({
+      webContents: options.webContents,
+      webPreferences: options.webPreferences,
+    });
+    view.setBackgroundColor('#ffffff');
+    tabs.set(tabId, { view, url, title: '', favicon: null, abortedBlank: false, identityPending: false });
+    wireWebContents(tabId, view);
+    const wc = view.webContents;
+    wc.setUserAgent(userAgent);
+    void applyChromeIdentity(wc, userAgent).catch(() => {});
+    emitToRenderer(OPEN_REQUEST_CHANNEL, {
+      url,
+      openerTabId,
+      adoptedTabId: tabId,
+      ...(typeof disposition === 'string' ? { disposition } : {}),
+    });
+    return wc;
+  }
+
+  /** Le portail sait adopter les fenêtres filles (`adoptedTabId`) : sinon, ancien comportement. */
+  function setAdoptPopups(value) {
+    adoptPopups = value === true;
   }
 
   function create({ tabId, url }) {
@@ -1674,6 +1742,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   return {
     create,
+    setAdoptPopups,
     navigate,
     select,
     hide,

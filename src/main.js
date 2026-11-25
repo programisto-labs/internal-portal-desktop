@@ -110,6 +110,9 @@ function sendAppMenuCommand(command) {
   const win = focused && portalWindows.has(focused.id) ? focused : mainWindowRef;
   if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
+  // Les commandes agissent dans la page du portail (barre d'adresse du nouvel onglet,
+  // palette…) : le clavier doit la rejoindre, même s'il était dans un onglet web.
+  win.webContents.focus();
   win.webContents.send('app-menu-command', { command });
 }
 
@@ -2578,8 +2581,11 @@ function registerWindowIPC() {
 
   // The tab strip subscribed to open requests: deliver web links received while
   // the portal was starting (cold start as default browser, page reload).
-  ipcMain.on('browser-tab-open-ready', (event) => {
-    if (BrowserWindow.fromWebContents(event.sender) === mainPortalWindow()) flushPendingWebUrls();
+  ipcMain.on('browser-tab-open-ready', (event, payload) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    // Portail récent : il adopte les fenêtres filles (`adoptedTabId`, docs/popups.md).
+    tabManagerFor(win)?.setAdoptPopups(Boolean(payload && payload.adoptPopups === true));
+    if (win === mainPortalWindow()) flushPendingWebUrls();
   });
   ipcMain.handle('browser-tab-create', (event, payload) => {
     const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));

@@ -22,9 +22,30 @@ const PLATFORMS = {
   linux: { platform: 'Linux', navigatorPlatform: 'Linux x86_64', architecture: 'x86', platformVersion: '6.0.0' },
 };
 
-function platformInfo(platform = process.platform, arch = process.arch) {
+/**
+ * Version du système telle que Chromium la calcule (`Sec-CH-UA-Platform-Version`).
+ * Jamais une valeur figée : les protections anti-robots (Akamai : L'Équipe…) comparent cette
+ * valeur aux autres signaux et refusent la session si elle ne colle pas (« Access Denied »).
+ * macOS : version du produit (`15.8.3`) ; Linux : noyau ; Windows : valeur par défaut gardée.
+ */
+function realPlatformVersion(platform, fallback, getSystemVersion = process.getSystemVersion, osRelease) {
+  let raw = '';
+  try {
+    if (platform === 'darwin' && typeof getSystemVersion === 'function') raw = String(getSystemVersion() || '');
+    if (platform === 'linux') raw = String((osRelease || require('os').release)() || '').split('-')[0];
+  } catch (_) {
+    raw = '';
+  }
+  const parts = raw.split('.').filter((part) => /^\d+$/.test(part));
+  if (parts.length === 0) return fallback;
+  while (parts.length < 3) parts.push('0');
+  return parts.slice(0, 3).join('.');
+}
+
+function platformInfo(platform = process.platform, arch = process.arch, getSystemVersion, osRelease) {
   const info = { ...(PLATFORMS[platform] || PLATFORMS.linux) };
   info.architecture = arch === 'arm64' ? 'arm' : 'x86';
+  info.platformVersion = realPlatformVersion(platform, info.platformVersion, getSystemVersion, osRelease);
   return info;
 }
 
@@ -175,6 +196,7 @@ async function applyChromeIdentity(webContents, userAgent) {
 }
 
 module.exports = {
+  realPlatformVersion,
   buildChromeBrands,
   buildUserAgentMetadata,
   buildClientHintHeaders,

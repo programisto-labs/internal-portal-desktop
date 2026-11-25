@@ -51,13 +51,16 @@ ipcRenderer.on('browser-tab-open-request', (_event, payload) => {
   for (const callback of openRequestSubscribers) callback(payload);
 });
 
-function onBrowserTabOpenRequest(callback) {
+function onBrowserTabOpenRequest(callback, options) {
   if (typeof callback !== 'function') {
     throw new TypeError('onBrowserTabOpenRequest requires a function callback.');
   }
   openRequestSubscribers.add(callback);
   for (const payload of pendingOpenRequests.splice(0, pendingOpenRequests.length)) callback(payload);
-  ipcRenderer.send('browser-tab-open-ready');
+  // `adoptPopups` : le portail sait reprendre une fenêtre fille sous `adoptedTabId`.
+  ipcRenderer.send('browser-tab-open-ready', {
+    adoptPopups: Boolean(options && options.adoptPopups === true),
+  });
   return () => openRequestSubscribers.delete(callback);
 }
 
@@ -127,6 +130,8 @@ const browserTabsBridge = {
   },
   onState: onBrowserTabState,
   onOpenRequest: onBrowserTabOpenRequest,
+  /** La page a fermé son onglet (`window.close()`, fenêtre de connexion OAuth) : { tabId }. */
+  onClosed: (callback) => subscribe('browser-tab-closed', callback),
   onFindResult: (callback) => subscribe('browser-tab-find-result', callback),
   onShortcut: (callback) => subscribe('browser-tab-shortcut', callback),
 };
