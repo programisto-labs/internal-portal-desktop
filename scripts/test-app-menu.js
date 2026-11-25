@@ -58,4 +58,26 @@ describe('application menu « Fenêtre »', () => {
     assert.ok(sent.length > 0);
     for (const command of sent) assert.ok(APP_MENU_COMMANDS.includes(command), command);
   });
+
+  it('« Nouvelle fenêtre » (⌘N) is a real accelerator, enabled only when the page can open a window', () => {
+    const fileMenu = (state, sent = []) =>
+      buildApplicationMenuTemplate({
+        isMac: true,
+        state,
+        closeTab: noop,
+        closeWindow: noop,
+        openSettings: noop,
+        send: (command) => sent.push(command),
+      }).find((m) => m.label === 'Fichier').submenu;
+    assert.equal(byLabel(fileMenu(null), 'Nouvelle fenêtre').enabled, false);
+    assert.equal(byLabel(fileMenu(normalizeAppMenuState({ canCreateTab: true })), 'Nouvelle fenêtre').enabled, false);
+    const sent = [];
+    const item = byLabel(fileMenu(normalizeAppMenuState({ canOpenWindow: true }), sent), 'Nouvelle fenêtre');
+    assert.equal(item.enabled, true);
+    assert.equal(item.accelerator, 'CmdOrCtrl+N');
+    assert.equal(item.registerAccelerator, undefined);
+    item.click();
+    assert.deepEqual(sent, ['new-window']);
+    assert.ok(APP_MENU_COMMANDS.includes('new-window'));
+  });
 });

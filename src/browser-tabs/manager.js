@@ -34,6 +34,7 @@ const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-iden
 const { createPasswordController } = require('./passwords');
 const { createPasswordPopover } = require('./password-popover');
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
+const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
 const path = require('path');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
@@ -794,18 +795,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     // these. Handle browser shortcuts here (and keep the default app menu from
     // reloading the whole portal on ⌘R).
     wc.on('before-input-event', (event, input) => {
-      if (input.type !== 'keyDown' || input.alt) return;
+      if (input.type !== 'keyDown') return;
       // Échap quitte le plein écran d'une vidéo, comme dans Chrome.
       if (input.key === 'Escape' && tabs.get(tabId)?.htmlFullscreen) {
         exitPageFullscreen(tabs.get(tabId));
         return;
       }
-      const mod = process.platform === 'darwin' ? input.meta : input.control;
-      if (!mod) return;
-      const key = String(input.key || '').toLowerCase();
-      // Menu owns ⌘W (Close Tab). Don't preventDefault here or the menu item
-      // never runs when focus is inside a native browser view.
-      if (key === 'w' && !input.shift) return;
       const forward = (action) => emitToRenderer(SHORTCUT_CHANNEL, { tabId, action });
       // The find bar and the address bar live in the portal page: hand it the
       // keyboard focus first, otherwise the field is focused in the DOM but the
@@ -815,6 +810,27 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         if (win && !win.isDestroyed()) win.webContents.focus();
         forward(action);
       };
+      // Onglets, agents, favori, historique, liste des raccourcis : la coquille les exécute
+      // (le chat d'un agent, la bulle du favori et la fenêtre d'aide prennent le focus).
+      const relayed = resolveRelayedShellShortcut(input, process.platform === 'darwin');
+      if (relayed) {
+        event.preventDefault();
+        forwardToPortalField(relayed);
+        return;
+      }
+      if (input.alt) return;
+      const mod = process.platform === 'darwin' ? input.meta : input.control;
+      if (!mod) return;
+      const key = String(input.key || '').toLowerCase();
+      // Menu owns ⌘W (Close Tab). Don't preventDefault here or the menu item
+      // never runs when focus is inside a native browser view.
+      if (key === 'w' && !input.shift) return;
+      // ⌘⇧R : recharger sans le cache, comme Chrome.
+      if (key === 'r' && input.shift) {
+        event.preventDefault();
+        wc.reloadIgnoringCache();
+        return;
+      }
       const handlers = {
         f: () => forwardToPortalField('find'),
         g: () => forward(input.shift ? 'find-previous' : 'find-next'),

@@ -8,6 +8,7 @@ const {
   decodeTabWindowArg,
   findWindowAtPoint,
   buildDetachedWindowBounds,
+  buildNewWindowBounds,
   createAdoptQueue,
   isPortalPath,
   resolveTabDropTarget,
@@ -188,5 +189,26 @@ describe('spare window', () => {
     assert.equal(isSpareWindowUsable({ url: `${origin}/other/new-tab`, href: '/clad/new-tab', origin }), false);
     assert.equal(isSpareWindowUsable({ url: '', href: '/clad/new-tab', origin }), false);
     assert.equal(isSpareWindowUsable({ url: `${origin}/clad/new-tab`, href: '//evil/new-tab', origin }), false);
+  });
+});
+
+describe('buildNewWindowBounds (⌘N)', () => {
+  const workArea = { x: 0, y: 25, width: 1920, height: 1055 };
+  it('cascades from the source window, same size', () => {
+    assert.deepEqual(buildNewWindowBounds({ sourceBounds: { x: 100, y: 80, width: 1280, height: 800 }, workArea }), {
+      x: 128,
+      y: 108,
+      width: 1280,
+      height: 800,
+    });
+  });
+  it('wraps back to the work area corner when the shift would leave it', () => {
+    const b = buildNewWindowBounds({ sourceBounds: { x: 700, y: 300, width: 1280, height: 800 }, workArea });
+    assert.equal(b.x, 0);
+    assert.equal(b.y, 25);
+  });
+  it('centres without a source window', () => {
+    const b = buildNewWindowBounds({ sourceBounds: null, workArea });
+    assert.ok(Number.isFinite(b.x) && Number.isFinite(b.y));
   });
 });

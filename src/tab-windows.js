@@ -131,6 +131,33 @@ function buildDetachedWindowBounds({ point, size, workArea }) {
   };
 }
 
+/** Offset of a new window from the window it was opened from (⌘N), like Chrome. */
+const NEW_WINDOW_CASCADE_PX = 28;
+
+/**
+ * Bounds of a window opened by ⌘N: same size as `sourceBounds`, shifted down-right, kept in the
+ * work area (back to its top-left corner when the shift would leave it). Centred without a source.
+ */
+function buildNewWindowBounds({ sourceBounds, workArea }) {
+  if (!sourceBounds || !Number.isFinite(sourceBounds.x) || !Number.isFinite(sourceBounds.y)) {
+    return buildDetachedWindowBounds({ size: sourceBounds, workArea });
+  }
+  const width = Math.max(800, Math.round(sourceBounds.width || 1100));
+  const height = Math.max(500, Math.round(sourceBounds.height || 760));
+  let x = Math.round(sourceBounds.x + NEW_WINDOW_CASCADE_PX);
+  let y = Math.round(sourceBounds.y + NEW_WINDOW_CASCADE_PX);
+  if (workArea) {
+    if (x + width > workArea.x + workArea.width) x = workArea.x;
+    if (y + height > workArea.y + workArea.height) y = workArea.y;
+  }
+  return {
+    width: workArea ? Math.min(width, workArea.width) : width,
+    height: workArea ? Math.min(height, workArea.height) : height,
+    x,
+    y,
+  };
+}
+
 /**
  * Where a tab dragged out of `sourceId` lands when released at `point`:
  * another Lasco window (attach there), back over its own window (cancel), or nowhere (keep the
@@ -214,6 +241,7 @@ module.exports = {
   decodeTabWindowArg,
   findWindowAtPoint,
   buildDetachedWindowBounds,
+  buildNewWindowBounds,
   createAdoptQueue,
   resolveTabDropTarget,
   followPosition,
