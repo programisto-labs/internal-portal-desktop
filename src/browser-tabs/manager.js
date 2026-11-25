@@ -44,6 +44,7 @@ const PASSWORD_POPOVER_PAGE = path.join(__dirname, 'password-popover.html');
 const BROWSER_PARTITION = 'persist:browser-tabs';
 const STATE_CHANNEL = 'browser-tab-state';
 const OPEN_REQUEST_CHANNEL = 'browser-tab-open-request';
+const CLOSED_CHANNEL = 'browser-tab-closed';
 const FIND_RESULT_CHANNEL = 'browser-tab-find-result';
 const SHORTCUT_CHANNEL = 'browser-tab-shortcut';
 
@@ -778,9 +779,13 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       // view and registers the new one at once; the old view's `destroyed` comes later
       // and must not drop the new entry (tab stuck loading, stop / reload ignored).
       if (!isCurrentTabView(tabs, tabId, view)) return;
+      // Encore enregistrée : la vue n'a pas été fermée par `destroyTab`, c'est la page qui s'est
+      // fermée (`window.close()`, fenêtre de connexion OAuth) ou qui a disparu. Le portail retire
+      // l'onglet et revient à celui qui l'a ouvert, comme Chrome.
       passwords.forgetTab(tabId);
       tabs.delete(tabId);
       if (activeTabId === tabId) activeTabId = null;
+      emitToRenderer(CLOSED_CHANNEL, { tabId });
     });
 
     wc.on('zoom-changed', (_event, direction) => {
@@ -866,7 +871,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       const separator = { type: 'separator' };
       const openInNewTab = (url) => {
         const safe = sanitizeBrowserUrl(url);
-        if (safe) emitToRenderer(OPEN_REQUEST_CHANNEL, { url: safe, openerTabId: tabId });
+        // « Ouvrir dans un nouvel onglet » : en arrière-plan, à droite de cet onglet (Chrome).
+        if (safe) {
+          emitToRenderer(OPEN_REQUEST_CHANNEL, {
+            url: safe,
+            openerTabId: tabId,
+            disposition: 'background-tab',
+          });
+        }
       };
 
       // Téléchargement géré par Lasco (docs/downloads.md) : dossier choisi dans les Réglages.

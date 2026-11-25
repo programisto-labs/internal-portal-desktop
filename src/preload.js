@@ -120,6 +120,8 @@ const browserTabsBridge = {
   },
   onState: onBrowserTabState,
   onOpenRequest: onBrowserTabOpenRequest,
+  /** La page a fermé son onglet (`window.close()`, fenêtre de connexion OAuth) : { tabId }. */
+  onClosed: (callback) => subscribe('browser-tab-closed', callback),
   onFindResult: (callback) => subscribe('browser-tab-find-result', callback),
   onShortcut: (callback) => subscribe('browser-tab-shortcut', callback),
 };
