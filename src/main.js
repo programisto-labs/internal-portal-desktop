@@ -2677,6 +2677,7 @@ function registerWindowIPC() {
 
   const browserTabActions = {
     'browser-tab-zoom': 'zoom',
+    'browser-tab-set-muted': 'setMuted',
     'browser-tab-find': 'findInPage',
     'browser-tab-stop-find': 'stopFindInPage',
     'browser-tab-print': 'print',
