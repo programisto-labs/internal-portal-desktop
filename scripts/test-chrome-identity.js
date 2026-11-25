@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  realPlatformVersion,
   buildChromeBrands,
   buildUserAgentMetadata,
   buildClientHintHeaders,
@@ -25,6 +26,14 @@ describe('browser tab Chrome identity', () => {
     assert.equal(meta.mobile, false);
     assert.equal(meta.fullVersionList[0].version, '152.0.7977.130');
     assert.equal(buildUserAgentMetadata('152.0.1.2', 'win32', 'x64').platform, 'Windows');
+  });
+
+  it('announces the real OS version, never a fixed one (Akamai denies a mismatch)', () => {
+    assert.equal(realPlatformVersion('darwin', '15.0.0', () => '15.8.3'), '15.8.3');
+    assert.equal(realPlatformVersion('darwin', '15.0.0', () => '26.1'), '26.1.0');
+    assert.equal(realPlatformVersion('darwin', '15.0.0', () => ''), '15.0.0');
+    assert.equal(realPlatformVersion('linux', '6.0.0', undefined, () => '6.8.0-49-generic'), '6.8.0');
+    assert.equal(realPlatformVersion('win32', '19.0.0', () => '10.0.26100'), '19.0.0');
   });
 
   it('formats Sec-CH-UA headers', () => {
