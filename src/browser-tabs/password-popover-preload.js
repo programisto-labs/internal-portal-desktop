@@ -11,6 +11,16 @@ const ICONS = {
   key: ['M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z', 'M16.5 7.5h.01'],
   search: ['M21 21l-4.34-4.34', 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z'],
   settings: ['M20 7h-9', 'M14 17H5', 'M17 20a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M7 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],
+  user: ['M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2', 'M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z'],
+  pin: [
+    'M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0',
+    'M12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  ],
+  mail: ['M22 7l-8.991 5.727a2 2 0 0 1-2.009 0L2 7', 'M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'],
+  phone: [
+    'M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z',
+  ],
+  building: ['M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18z', 'M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2', 'M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2', 'M10 6h4', 'M10 10h4', 'M10 14h4', 'M10 18h4'],
 };
 
 /** Rows that can be highlighted, in order: credentials, then the two actions. */
@@ -101,7 +111,7 @@ function render(spec) {
   }
   items.forEach((item, index) => {
     const row = makeRow({
-      iconName: 'key',
+      iconName: ICONS[item.icon] ? item.icon : 'key',
       label: String(item.label || ''),
       sub: String(item.sub || ''),
       choice: { action: 'item', index },
@@ -112,11 +122,16 @@ function render(spec) {
 
   const actions = document.getElementById('actions');
   actions.replaceChildren();
-  for (const [iconName, label, action] of [
-    ['search', spec.other, 'pick'],
-    ['settings', spec.manage, 'manage'],
-  ]) {
-    const row = makeRow({ iconName, label: String(label || ''), action: true, choice: { action } });
+  const actionList = Array.isArray(spec.actions)
+    ? spec.actions.slice(0, 4)
+    : [
+        { icon: 'search', label: spec.other, action: 'pick' },
+        { icon: 'settings', label: spec.manage, action: 'manage' },
+      ];
+  for (const entry of actionList) {
+    if (!entry || typeof entry.action !== 'string') continue;
+    const iconName = ICONS[entry.icon] ? entry.icon : 'settings';
+    const row = makeRow({ iconName, label: String(entry.label || ''), action: true, choice: { action: entry.action } });
     rows.push(row);
     actions.append(row.el);
   }

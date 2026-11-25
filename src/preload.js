@@ -130,6 +130,13 @@ const browserTabsBridge = {
     onFillRequest: (callback) => subscribe('browser-tab-password-fill-request', callback),
     onAction: (callback) => subscribe('browser-tab-password-action', callback),
   },
+  // Form autofill of the web tabs (docs/form-autofill.md): names, addresses, e-mail, phone.
+  autofill: {
+    setProfiles: (payload) => invokeBrowserTab('browser-autofill-set-profiles', payload),
+    onCapture: (callback) => subscribe('browser-tab-autofill-capture', callback),
+    onUsed: (callback) => subscribe('browser-tab-autofill-used', callback),
+    onAction: (callback) => subscribe('browser-tab-autofill-action', callback),
+  },
   onState: onBrowserTabState,
   onOpenRequest: onBrowserTabOpenRequest,
   /** La page a fermé son onglet (`window.close()`, fenêtre de connexion OAuth) : { tabId }. */
