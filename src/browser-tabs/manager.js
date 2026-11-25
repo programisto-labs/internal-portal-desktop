@@ -427,6 +427,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       // Page affichée par Lasco à la place du site : crashed | network | certificate.
       pageError: entry.errorPage ? entry.errorPage.kind : null,
       htmlFullscreen: Boolean(entry.htmlFullscreen),
+      // Son de l'onglet (icône haut-parleur de la barre d'onglets, comme Chrome).
+      audible: wc.isCurrentlyAudible(),
+      muted: wc.isAudioMuted(),
     };
   }
 
@@ -804,6 +807,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       if (activeTabId === tabId) activeTabId = null;
       emitToRenderer(CLOSED_CHANNEL, { tabId });
     });
+
+    // La page commence ou arrête de jouer du son : l'icône de l'onglet suit.
+    wc.on('audio-state-changed', () => pushState(tabId));
 
     wc.on('zoom-changed', (_event, direction) => {
       applyZoom(wc, direction === 'in' ? 'in' : 'out');
@@ -1202,6 +1208,15 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       entry.view.webContents.goForward();
     }
     return { ok: true };
+  }
+
+  /** Couper ou réactiver le son d'un onglet (icône haut-parleur, clic droit). */
+  function setMuted({ tabId, muted }) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+    entry.view.webContents.setAudioMuted(muted === true);
+    pushState(tabId);
+    return { ok: true, muted: entry.view.webContents.isAudioMuted() };
   }
 
   function reload({ tabId }) {
@@ -1680,6 +1695,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     goBack,
     goForward,
     reload,
+    setMuted,
     stop,
     setBounds,
     getState,
