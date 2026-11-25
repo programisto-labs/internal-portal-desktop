@@ -7,6 +7,7 @@ const {
   buildChromeBrands,
   buildUserAgentMetadata,
   buildClientHintHeaders,
+  createClientHintPolicy,
   CHROME_OBJECT_SCRIPT,
   PASSKEY_FALLBACK_SCRIPT,
 } = require('../src/browser-tabs/chrome-identity');
@@ -66,5 +67,54 @@ describe('browser tab Chrome identity', () => {
     assert.equal(await navigator.credentials.get({ password: true }), 'password');
     assert.equal(calls.length, 1);
     assert.equal(await window.PublicKeyCredential.isConditionalMediationAvailable(), false);
+  });
+});
+
+describe('client hints like Chrome (Accept-CH / Critical-CH)', () => {
+  const meta = buildUserAgentMetadata('152.0.7977.130', 'darwin', 'arm64');
+  const cloudflare = {
+    'accept-ch': ['Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, UA-Arch'],
+    'critical-ch': ['Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform-Version'],
+  };
+  const url = 'https://www.canva.com/oauth/authorized/google?code=x';
+
+  it('sends only the low-entropy hints to a site that asked nothing', () => {
+    const policy = createClientHintPolicy({ meta });
+    assert.deepEqual(Object.keys(policy.requestHeaders(url, {})).sort(), ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform']);
+    assert.equal(policy.requestHeaders('http://example.com/', {})['sec-ch-ua'], undefined);
+  });
+
+  it('replays a navigation once when Critical-CH asks for missing hints, then sends them', () => {
+    const policy = createClientHintPolicy({ meta, now: () => 1000 });
+    const response = { url, method: 'GET', resourceType: 'mainFrame', responseHeaders: cloudflare };
+    assert.equal(policy.onResponse(response).restart, true);
+    const headers = policy.requestHeaders(url, {});
+    assert.equal(headers['sec-ch-ua-full-version-list'], '"Google Chrome";v="152.0.7977.130", "Chromium";v="152.0.7977.130", "Not?A_Brand";v="24.0.0.0"');
+    assert.equal(headers['sec-ch-ua-arch'], '"arm"');
+    assert.equal(headers['sec-ch-ua-bitness'], '"64"');
+    assert.equal(headers['sec-ch-ua-model'], undefined);
+    // Hints now sent: the same answer never replays again (no loop).
+    assert.equal(policy.onResponse(response).restart, false);
+    // Same origin only.
+    assert.equal(policy.requestHeaders('https://static.canva-cdn.com/a.js', {})['sec-ch-ua-arch'], undefined);
+  });
+
+  it('never replays a POST, a subresource or a page without Critical-CH', () => {
+    const policy = createClientHintPolicy({ meta });
+    assert.equal(policy.onResponse({ url, method: 'POST', resourceType: 'mainFrame', responseHeaders: cloudflare }).restart, false);
+    const other = createClientHintPolicy({ meta });
+    assert.equal(other.onResponse({ url, method: 'GET', resourceType: 'script', responseHeaders: cloudflare }).restart, false);
+    assert.equal(other.requestHeaders(url, {})['sec-ch-ua-arch'], undefined);
+    const plain = createClientHintPolicy({ meta });
+    assert.equal(plain.onResponse({ url, method: 'GET', resourceType: 'mainFrame', responseHeaders: { 'Accept-CH': 'Sec-CH-UA-Arch' } }).restart, false);
+    assert.equal(plain.requestHeaders(url, {})['sec-ch-ua-arch'], '"arm"');
+  });
+
+  it("replaces Chromium's own brands (no Google Chrome) and keeps other headers", () => {
+    const policy = createClientHintPolicy({ meta });
+    const headers = policy.requestHeaders(url, { 'Sec-CH-UA': '"Chromium";v="152"', Accept: '*/*' });
+    assert.equal(headers['Sec-CH-UA'], undefined);
+    assert.match(headers['sec-ch-ua'], /Google Chrome/);
+    assert.equal(headers.Accept, '*/*');
   });
 });
