@@ -863,7 +863,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
         f: () => forwardToPortalField('find'),
         g: () => forward(input.shift ? 'find-previous' : 'find-next'),
         l: () => forwardToPortalField('focus-address'),
-        t: () => forward('new-tab'),
+        // Le nouvel onglet met le curseur dans la barre d'adresse : le clavier doit quitter cette vue.
+        t: () => forwardToPortalField('new-tab'),
         // Téléchargements : ⌘⇧J (macOS), Ctrl+J (Windows / Linux), comme Chrome.
         j: () => forward('downloads'),
         p: () => print({ tabId }),

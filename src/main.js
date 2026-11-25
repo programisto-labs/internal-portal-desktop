@@ -109,6 +109,9 @@ function sendAppMenuCommand(command) {
   const win = focused && portalWindows.has(focused.id) ? focused : mainWindowRef;
   if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
+  // Les commandes agissent dans la page du portail (barre d'adresse du nouvel onglet,
+  // palette…) : le clavier doit la rejoindre, même s'il était dans un onglet web.
+  win.webContents.focus();
   win.webContents.send('app-menu-command', { command });
 }
 
