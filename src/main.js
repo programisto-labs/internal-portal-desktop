@@ -2531,8 +2531,11 @@ function registerWindowIPC() {
 
   // The tab strip subscribed to open requests: deliver web links received while
   // the portal was starting (cold start as default browser, page reload).
-  ipcMain.on('browser-tab-open-ready', (event) => {
-    if (BrowserWindow.fromWebContents(event.sender) === mainPortalWindow()) flushPendingWebUrls();
+  ipcMain.on('browser-tab-open-ready', (event, payload) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    // Portail récent : il adopte les fenêtres filles (`adoptedTabId`, docs/popups.md).
+    tabManagerFor(win)?.setAdoptPopups(Boolean(payload && payload.adoptPopups === true));
+    if (win === mainPortalWindow()) flushPendingWebUrls();
   });
   ipcMain.handle('browser-tab-create', (event, payload) => {
     const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));

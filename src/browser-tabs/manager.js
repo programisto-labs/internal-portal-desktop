@@ -36,6 +36,7 @@ const { createPasswordPopover } = require('./password-popover');
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
 const path = require('path');
+const { randomUUID } = require('crypto');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
 const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.js');
@@ -267,6 +268,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
 
   /** @type {Map<string, { view: import('electron').WebContentsView, url: string }>} */
   const tabs = new Map();
+  let adoptPopups = false;
   let activeTabId = null;
   /** @type {{ x: number, y: number, width: number, height: number } | null} */
   let lastBounds = null;
@@ -691,6 +693,21 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       if (safe && typeof interceptLink === 'function' && interceptLink(safe)) {
         return { action: 'deny' };
       }
+      const blankPopup = !url || url === 'about:blank';
+      if (adoptPopups && (safe || blankPopup)) {
+        // Vraie fenêtre fille (docs/popups.md) : `window.open` renvoie une fenêtre, `opener`,
+        // `postMessage` et `window.close()` marchent (Gmail « popout », connexions OAuth).
+        // Elle devient un onglet que le portail adopte sous `adoptedTabId`.
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: { webPreferences: browserTabWebPreferences() },
+          createWindow: (options) => adoptPopup(options, {
+            url: safe || 'about:blank',
+            openerTabId: tabId,
+            disposition,
+          }),
+        };
+      }
       if (safe) {
         // `disposition` : `background-tab` pour un clic molette ou ⌘-clic. Le portail ouvre
         // alors l'onglet sans focus, juste à droite de `openerTabId` (comme Chrome).
@@ -992,21 +1009,23 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
     return next;
   }
 
+  function browserTabWebPreferences() {
+    return {
+      session: getBrowserSession(),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      // Password manager runtime (main frame only, isolated world, exposes nothing to the
+      // page): untrusted web content never reaches Electron APIs.
+      preload: PASSWORD_PRELOAD,
+      allowRunningInsecureContent: false,
+      spellcheck: true,
+    };
+  }
+
   function createView(tabId, initialUrl) {
-    const view = new WebContentsView({
-      webPreferences: {
-        session: getBrowserSession(),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        webSecurity: true,
-        // Password manager runtime (main frame only, isolated world, exposes nothing to the
-        // page): untrusted web content never reaches Electron APIs.
-        preload: PASSWORD_PRELOAD,
-        allowRunningInsecureContent: false,
-        spellcheck: true,
-      },
-    });
+    const view = new WebContentsView({ webPreferences: browserTabWebPreferences() });
     view.setBackgroundColor('#ffffff');
     const entry = {
       view,
@@ -1050,6 +1069,36 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
       entry.identityPending = false;
       if (!wc.isDestroyed() && !entry.abortedBlank) void wc.loadURL(entry.url);
     }
+  }
+
+  /**
+   * Onglet pour une fenêtre ouverte par une page (`window.open`) : la vue reprend les
+   * webContents créés par Chromium, reliés à leur page d'origine. Cachée jusqu'au `select`.
+   */
+  function adoptPopup(options, { url, openerTabId, disposition }) {
+    const tabId = `popup-${randomUUID()}`;
+    const view = new WebContentsView({
+      webContents: options.webContents,
+      webPreferences: options.webPreferences,
+    });
+    view.setBackgroundColor('#ffffff');
+    tabs.set(tabId, { view, url, title: '', favicon: null, abortedBlank: false, identityPending: false });
+    wireWebContents(tabId, view);
+    const wc = view.webContents;
+    wc.setUserAgent(userAgent);
+    void applyChromeIdentity(wc, userAgent).catch(() => {});
+    emitToRenderer(OPEN_REQUEST_CHANNEL, {
+      url,
+      openerTabId,
+      adoptedTabId: tabId,
+      ...(typeof disposition === 'string' ? { disposition } : {}),
+    });
+    return wc;
+  }
+
+  /** Le portail sait adopter les fenêtres filles (`adoptedTabId`) : sinon, ancien comportement. */
+  function setAdoptPopups(value) {
+    adoptPopups = value === true;
   }
 
   function create({ tabId, url }) {
@@ -1622,6 +1671,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink }) {
 
   return {
     create,
+    setAdoptPopups,
     navigate,
     select,
     hide,
