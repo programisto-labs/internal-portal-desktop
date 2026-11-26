@@ -54,6 +54,7 @@ const {
   writeControlToken,
   createVmControlServer,
   cdpTargetIdOf,
+  viewModeFrom,
   VM_USER_AGENT_TOKEN,
   VM_DISABLED_FEATURES,
 } = require('./vm-mode');
@@ -1563,6 +1564,8 @@ function createWindow({
   if (VM_MODE) {
     // Desktop's own browser shell: never the portal, so never a Lasco session in the VM.
     win.loadFile(path.join(__dirname, 'vm-shell', 'index.html'));
+    // Page alone (full screen) or whole browser, as asked by the control endpoint (`POST /v1/view`).
+    win.once('ready-to-show', () => applyVmViewMode(win));
   } else if (spareHref || startHref) {
     loadMainPortalUrl(win, PORTAL_ORIGIN + (spareHref || startHref));
   } else if (role === 'detached' && initialTab) {
@@ -2929,6 +2932,29 @@ function vmControlTokenPath() {
   return process.env.LASCO_VM_CONTROL_TOKEN_FILE || path.join(app.getPath('userData'), 'vm-control-token');
 }
 
+/** Page alone (full screen) or whole browser (above the dock): `LASCO_VM_VIEW_MODE`, then `POST /v1/view`. */
+let vmViewMode = viewModeFrom(process.env);
+
+function applyVmViewMode(win = mainPortalWindow()) {
+  if (!win || win.isDestroyed()) return;
+  const page = vmViewMode === 'page';
+  // Full screen covers the dock: the stream shows the page alone, like a tab of the viewer's own browser.
+  if (win.isFullScreen() !== page) win.setFullScreen(page);
+  if (!page) {
+    const bounds = vmWindowBounds();
+    if (bounds.width) win.setBounds(bounds);
+  }
+  if (!win.webContents.isDestroyed()) win.webContents.send('vm-shell-view-mode', { mode: vmViewMode });
+}
+
+async function vmSetViewMode(mode) {
+  vmViewMode = mode;
+  const win = mainPortalWindow();
+  if (!win) return { ok: false, error: 'no-window' };
+  applyVmViewMode(win);
+  return { ok: true, mode: vmViewMode };
+}
+
 async function startVmControl() {
   const token = writeControlToken(vmControlTokenPath());
   vmControl = createVmControlServer({
@@ -2939,6 +2965,8 @@ async function startVmControl() {
       openTab: vmOpenTab,
       activateTab: vmActivateTab,
       activeTab: vmActiveTab,
+      getViewMode: () => vmViewMode,
+      setViewMode: vmSetViewMode,
     },
   });
   try {
@@ -2981,6 +3009,7 @@ function startVmMode() {
       version: app.getVersion(),
       downloadsDirectory: getSettings().downloadsDirectory,
       homeUrl: vmHomeUrl(),
+      viewMode: vmViewMode,
       disabled: VM_DISABLED_FEATURES,
     };
   });

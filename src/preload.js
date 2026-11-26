@@ -167,6 +167,8 @@ const vmShellBridge = {
   /** A tab the daemon activated: `{ tabId }`. */
   onTabActivated: (callback) => subscribe('vm-shell-tab-activated', callback),
   getInfo: () => ipcRenderer.invoke('vm-shell-info'),
+  /** `{ mode: 'page' | 'desktop' }`: page alone (full screen) or the whole browser (docs/vm-mode.md). */
+  onViewMode: (callback) => subscribe('vm-shell-view-mode', callback),
 };
 const exposeHostOps =
   !vmMode && !noAgents && Boolean(portalOrigin) && Boolean(globalThis.location) && globalThis.location.origin === portalOrigin;
