@@ -13,7 +13,9 @@ Objectif : pas de parc d'applications anciennes. Une version publiée est instal
 
 Pas de mise à jour dans la machine : l'application y est installée par root (paquet `.deb`, dossier en lecture seule pour l'utilisateur du bureau), et l'utilisateur `lasco` ne peut pas la remplacer.
 
-La version suit l'image : chaque release Linux déclenche la reconstruction de l'image de l'ordinateur Lasco (build args `LASCO_DESKTOP_DEB_URL`, `LASCO_DESKTOP_DEB_SHA256`), et chaque machine démarre sur l'image la plus récente. Le disque de données (profil, téléchargements, projets) est conservé. Voir `docker/lasco-computer` du dépôt `internal-portal`.
+La version suit l'image, une par release : à chaque release Linux, la CI du portail (`.github/workflows/lasco-computer-image.yml` du dépôt `internal-portal`, release relevée toutes les 15 min) construit l'image de l'ordinateur Lasco avec ce `.deb` (vérifié par son `.sha256`) et déplace le canal `:stable` (ou `:develop`) dessus. Le vm-runner prépare le rootfs de cette image ; l'API passe chaque machine dessus dès qu'elle est au repos (en pause ou arrêtée), et elle repart sur la nouvelle version au prochain usage. Le disque de données (profil, téléchargements, projets) est conservé.
+
+Une release sans `.deb` ni `.sha256` n'est pas déployée dans les machines. Retour arrière : variable de dépôt `LASCO_COMPUTER_DESKTOP_PIN_STABLE` du portail. Détail : `apps/api/src/modules/computers/README.md` du dépôt `internal-portal`, « Image de l'ordinateur Lasco ».
 
 ## Tests
 
