@@ -21,6 +21,8 @@ const RETRY_PROTOCOLS = new Set(['http:', 'https:']);
  * - getSession(source): session to retry a download in
  * - onFinished(path): macOS dock bounce on the Downloads stack
  * - setProgress(fraction): -1 when nothing runs (dock / taskbar progress)
+ * - onStarted({ webContents, source }): a download began in this page (an empty tab opened
+ *   only for it is closed, like Chrome)
  */
 function createDownloadService({
   store,
@@ -35,6 +37,7 @@ function createDownloadService({
   getSession,
   onFinished = () => undefined,
   setProgress = () => undefined,
+  onStarted = () => undefined,
   now = () => Date.now(),
   randomId = () => crypto.randomUUID(),
 }) {
@@ -184,7 +187,14 @@ function createDownloadService({
   }
 
   function attach(targetSession, source) {
-    targetSession.on('will-download', (_event, item) => handleDownload(item, source));
+    targetSession.on('will-download', (_event, item, webContents) => {
+      handleDownload(item, source);
+      try {
+        onStarted({ webContents, source });
+      } catch (_) {
+        // Never let the tab bookkeeping break a download.
+      }
+    });
   }
 
   // --- Actions of the page (by id: the page never names a path) ---

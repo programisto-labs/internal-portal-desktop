@@ -282,6 +282,15 @@ async function askSitePermission({ origin, label, webContents }) {
   return ['allow', 'block', 'dismiss'][response] || 'dismiss';
 }
 
+/**
+ * Onglet ouvert seulement pour un téléchargement (lien `target="_blank"` vers un fichier) :
+ * aucune page affichée, rien derrière. Chrome le ferme ; on fait pareil.
+ */
+function isBlankDownloadTab({ url, canGoBack }) {
+  if (canGoBack) return false;
+  return !url || url === 'about:blank';
+}
+
 function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines }) {
   const historyStore =
     history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
@@ -614,6 +623,37 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         // Ignore close races during quit.
       }
     }
+  }
+
+  /**
+   * Un téléchargement a commencé dans `webContents`. Si c'est un onglet resté vide (ouvert
+   * seulement pour ce fichier), il est fermé et le portail revient à l'onglet d'origine
+   * (`CLOSED_CHANNEL`, comme un `window.close()`). Le téléchargement continue : il appartient
+   * à la session, pas à la page.
+   */
+  function closeIfBlankAfterDownload(webContents) {
+    if (!webContents || webContents.isDestroyed()) return false;
+    const tabId = tabIdsByWebContents.get(webContents.id);
+    if (!tabId) return false;
+    const blank = () => {
+      if (webContents.isDestroyed()) return false;
+      const history = webContents.navigationHistory;
+      return isBlankDownloadTab({
+        // URL de la page affichée (validée), pas celle qui se charge : le lien du fichier
+        // n'a jamais affiché de page.
+        url: webContents.mainFrame ? webContents.mainFrame.url : webContents.getURL(),
+        canGoBack: history && typeof history.canGoBack === 'function' ? history.canGoBack() : false,
+      });
+    };
+    if (!blank()) return false;
+    // Après la prise en charge du téléchargement par la session.
+    setImmediate(() => {
+      const entry = tabs.get(tabId);
+      if (!entry || entry.view.webContents !== webContents || !blank()) return;
+      destroyTab(tabId);
+      emitToRenderer(CLOSED_CHANNEL, { tabId });
+    });
+    return true;
   }
 
   function destroyAll() {
@@ -1877,6 +1917,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     handlePasswordMessage,
     handlePasswordPopoverMessage,
     destroyAll,
+    closeIfBlankAfterDownload,
     has(tabId) {
       return tabs.has(tabId);
     },
@@ -1901,6 +1942,7 @@ module.exports = {
   parseKeyCombo,
   nextZoomFactor,
   isCurrentTabView,
+  isBlankDownloadTab,
   buildChromiumUserAgent,
   buildAcceptLanguages,
 };

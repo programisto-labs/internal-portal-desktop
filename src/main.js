@@ -1050,6 +1050,13 @@ function getDownloadService() {
       const win = mainPortalWindow();
       if (win && !win.isDestroyed()) win.setProgressBar(fraction);
     },
+    // Onglet ouvert seulement pour ce fichier : fermé, comme Chrome (plus d'onglet vide).
+    onStarted: ({ webContents, source }) => {
+      if (source !== 'web' || !webContents) return;
+      for (const entry of portalWindows.values()) {
+        if (entry.tabManager && entry.tabManager.closeIfBlankAfterDownload(webContents)) return;
+      }
+    },
   });
   return downloadService;
 }

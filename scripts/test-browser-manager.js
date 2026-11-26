@@ -6,6 +6,7 @@ const {
   parseKeyCombo,
   nextZoomFactor,
   isCurrentTabView,
+  isBlankDownloadTab,
   buildChromiumUserAgent,
   buildAcceptLanguages,
 } = require('../src/browser-tabs/manager');
@@ -58,5 +59,16 @@ describe('desktop browser manager helpers', () => {
     assert.match(script, /^\(function pageAgentRuntime\(command\)/);
     assert.match(script, /\{"op":"snapshot","maxText":10\}\)$/);
     assert.doesNotThrow(() => new Function(script));
+  });
+});
+
+describe('tab opened only for a download', () => {
+  it('is closed when it never showed a page', () => {
+    assert.equal(isBlankDownloadTab({ url: '', canGoBack: false }), true);
+    assert.equal(isBlankDownloadTab({ url: 'about:blank', canGoBack: false }), true);
+  });
+  it('stays when a page is shown or there is a page behind', () => {
+    assert.equal(isBlankDownloadTab({ url: 'https://example.com/', canGoBack: false }), false);
+    assert.equal(isBlankDownloadTab({ url: 'about:blank', canGoBack: true }), false);
   });
 });
