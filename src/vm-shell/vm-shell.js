@@ -463,6 +463,7 @@
   }
 
   function focusAddress() {
+    if (document.body.dataset.view === 'page') return;
     address.focus();
     address.select();
   }
@@ -957,10 +958,24 @@
     sendBounds();
   });
 
+  // --- Vue page / vue ordinateur ---------------------------------------------------------------------------------
+  // Page : la page active seule, en plein écran (Desktop passe la fenêtre en plein écran). Ordinateur : tout le
+  // navigateur. Choisi depuis la vue en direct du portail, par le point de contrôle (`POST /v1/view`).
+  function setViewMode(mode) {
+    const next = mode === 'desktop' ? 'desktop' : 'page';
+    if (document.body.dataset.view === next) return;
+    document.body.dataset.view = next;
+    closeFloating();
+    if (next === 'page' && document.activeElement === address) address.blur();
+    requestAnimationFrame(sendBounds);
+  }
+  if (typeof desktop.vm.onViewMode === 'function') desktop.vm.onViewMode((payload) => payload && setViewMode(payload.mode));
+
   // --- Start ----------------------------------------------------------------------------------------------------
   render();
   void desktop.vm.getInfo().then((info) => {
     if (info && info.ok) {
+      if (typeof info.viewMode === 'string') setViewMode(info.viewMode);
       if (typeof info.homeUrl === 'string') homeUrl = info.homeUrl;
       if (info.downloadsDirectory) el('downloads-dir').textContent = info.downloadsDirectory;
       el('version').textContent = `Lasco Desktop ${info.version}`;
