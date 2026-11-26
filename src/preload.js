@@ -119,6 +119,8 @@ const browserTabsBridge = {
   showTabContextMenu: (payload) => invokeBrowserTab('browser-tab-show-context-menu', payload),
   onTabContextMenuAction: (callback) => subscribe('browser-tab-context-menu-action', callback),
   agentAction: (payload) => invokeBrowserTab('browser-tab-agent-action', payload),
+  /** `{ tabId, active }` : onglet piloté par un agent en arrière-plan (docs/agent-tabs.md). */
+  setAgentControl: (payload) => invokeBrowserTab('browser-tab-set-agent-control', payload),
   // Password manager of the web tabs (docs/passwords.md). Captures arrive without the password.
   passwords: {
     setEnabled: (payload) => invokeBrowserTab('browser-password-set-enabled', payload),

@@ -308,6 +308,11 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   let viewsVisible = false;
   /** Portal HTML overlay (menu, dialog) is open above the viewport: keep the native view hidden. */
   let overlayActive = false;
+  /**
+   * Onglets pilotés par un agent en arrière-plan (docs/agent-tabs.md) : leur page n'est pas ralentie quand elle
+   * est cachée, et les actions de l'agent n'y prennent jamais le clavier de la personne.
+   */
+  const agentControlled = new Set();
   /** webContents id → tab id, to route the password messages of a page to its tab. */
   const tabIdsByWebContents = new Map();
 
@@ -488,6 +493,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // Page affichée par Lasco à la place du site : crashed | network | certificate.
       pageError: entry.errorPage ? entry.errorPage.kind : null,
       htmlFullscreen: Boolean(entry.htmlFullscreen),
+      // Piloté par un agent en arrière-plan (setAgentControl).
+      agentControlled: agentControlled.has(tabId),
       // Son de l'onglet (icône haut-parleur de la barre d'onglets, comme Chrome).
       audible: wc.isCurrentlyAudible(),
       muted: wc.isAudioMuted(),
@@ -582,6 +589,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const entry = tabs.get(tabId);
     if (!entry) return;
     tabs.delete(tabId);
+    agentControlled.delete(tabId);
     passwords.forgetTab(tabId);
     formAutofill.forgetTab(tabId);
     if (activeTabId === tabId) activeTabId = null;
@@ -1638,8 +1646,13 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     }
   }
 
-  /** Give synthetic input to the page, then hand keyboard focus back to the portal (chat composer). */
-  async function withPageFocus(wc, fn) {
+  /**
+   * Give synthetic input to the page, then hand keyboard focus back to the portal (chat composer).
+   * Hidden tab driven by an agent: no focus at all (the person keeps typing elsewhere). Clicks and
+   * `insertText` reach a hidden page without it (docs/agent-tabs.md).
+   */
+  async function withPageFocus(wc, fn, tabId) {
+    if (tabId && agentControlled.has(tabId) && !(viewsVisible && activeTabId === tabId)) return fn();
     wc.focus();
     try {
       return await fn();
@@ -1685,6 +1698,33 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
    * AI agent browser automation on one tab. Returns a fresh page snapshot after
    * every action so the model sees the result without an extra round trip.
    */
+  /**
+   * Onglet piloté par un agent en arrière-plan : sa page n'est pas ralentie cachée (sinon minuteries à 1 /s,
+   * captures impossibles), et elle garde la taille de la zone des onglets pour que la mise en page reste juste.
+   */
+  function setAgentControl({ tabId, active }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    if (active === true) {
+      agentControlled.add(tabId);
+      wc.setBackgroundThrottling(false);
+      if (lastBounds && lastBounds.width > 0 && lastBounds.height > 0 && activeTabId !== tabId) {
+        entry.view.setBounds({
+          x: Math.round(lastBounds.x),
+          y: Math.round(lastBounds.y),
+          width: Math.round(lastBounds.width),
+          height: Math.round(lastBounds.height),
+        });
+      }
+    } else {
+      agentControlled.delete(tabId);
+      wc.setBackgroundThrottling(true);
+    }
+    pushState(tabId);
+    return { ok: true, tabId, active: agentControlled.has(tabId) };
+  }
+
   async function agentAction(payload) {
     const { tabId, action } = payload || {};
     const entry = liveEntry(tabId);
@@ -1713,7 +1753,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
           if (!point.ok) return point;
           await withPageFocus(wc, async () => {
             sendClick(wc, point.x, point.y, payload.doubleClick ? 2 : 1);
-          });
+          }, tabId);
           return { ok: true, ...(point.covered ? { warning: 'element-covered' } : {}), page: await settleAndSnapshot(wc) };
         }
         case 'type': {
@@ -1730,13 +1770,13 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
             }
             if (text) await wc.insertText(text);
             if (payload.submit) sendKey(wc, { keyCode: 'Enter', modifiers: [] });
-          });
+          }, tabId);
           return { ok: true, page: await settleAndSnapshot(wc) };
         }
         case 'press': {
           const combo = parseKeyCombo(payload.key);
           if (!combo) return { ok: false, error: 'invalid-key' };
-          await withPageFocus(wc, async () => sendKey(wc, combo));
+          await withPageFocus(wc, async () => sendKey(wc, combo), tabId);
           return { ok: true, page: await settleAndSnapshot(wc) };
         }
         case 'scroll': {
@@ -1820,6 +1860,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     historyClear,
     setOverlay,
     agentAction,
+    setAgentControl,
     passwordSetEnabled: (payload) => passwords.setEnabled(payload),
     passwordSetSuggestions: (payload) => passwords.setSuggestions(payload),
     passwordTakeCapture: (payload) => passwords.takeCapture(payload),
