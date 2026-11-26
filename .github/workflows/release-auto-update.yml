@@ -124,3 +124,38 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
         run: npm run publish:win
+
+  # Linux : AppImage (mises à jour automatiques) et .deb, installé dans l'image de l'ordinateur Lasco (mode --vm,
+  # docs/vm-mode.md). L'empreinte SHA-256 du .deb est publiée à côté : l'image la vérifie (LASCO_DESKTOP_DEB_SHA256).
+  publish-linux:
+    name: Publish Linux artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and publish Linux release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: npm run publish:linux
+
+      - name: Publish the SHA-256 of the .deb
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          deb=$(ls *.deb | head -n1)
+          sha256sum "$deb" > "$deb.sha256"
+          cat "$deb.sha256"
+          gh release upload "$GITHUB_REF_NAME" "$deb.sha256" --clobber --repo "$GITHUB_REPOSITORY"
