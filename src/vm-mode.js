@@ -23,6 +23,23 @@ const VM_CONTROL_HOST = '127.0.0.1';
 const VM_CONTROL_DEFAULT_PORT = 9334;
 const VM_CONTROL_MAX_BODY = 16 * 1024;
 
+/**
+ * What the VM screen shows (docs/vm-mode.md, « Vue page / vue ordinateur »):
+ * - `page`: the active web page alone, full screen (no tab strip, no address bar, no dock). Default: the person
+ *   watching the stream sees a web page, as in a tab of their own browser.
+ * - `desktop`: the whole browser (tabs, address bar, menu) above the dock, the usual desktop.
+ */
+const VM_VIEW_MODES = Object.freeze(['page', 'desktop']);
+const VM_VIEW_MODE_ENV = 'LASCO_VM_VIEW_MODE';
+
+function normalizeViewMode(value) {
+  return VM_VIEW_MODES.includes(value) ? value : null;
+}
+
+function viewModeFrom(env = process.env) {
+  return normalizeViewMode(env && env[VM_VIEW_MODE_ENV]) || 'page';
+}
+
 function isVmMode(argv = process.argv, env = process.env) {
   return (Array.isArray(argv) && argv.includes(VM_ARG)) || (env && env[VM_ENV] === '1');
 }
@@ -160,6 +177,8 @@ function agentPayload(body) {
  * - `POST /v1/tabs/:id/history`  `{ action: 'back' | 'forward' | 'reload' }`
  * - `POST /v1/tabs/:id/agent`    `{ action, ... }` → same actions as `browserTabs.agentAction` of the portal's agents
  *   (snapshot, screenshot, click, type, press, scroll, select_option, wait), on that tab only.
+ * - `GET  /v1/view`           → `{ ok, mode }` (`page` | `desktop`)
+ * - `POST /v1/view`           `{ mode }` → shows the page alone or the whole browser → `{ ok, mode }`
  *
  * `targetId` is the CDP target of the tab's page (Target.getTargetInfo), never the shell's.
  *
@@ -171,6 +190,8 @@ function agentPayload(body) {
  *   navigateTab?: (tabId: string, url: string) => Promise<object> | object,
  *   tabHistory?: (tabId: string, action: string) => Promise<object> | object,
  *   agentAction?: (tabId: string, payload: object) => Promise<object>,
+ *   getViewMode?: () => string,
+ *   setViewMode?: (mode: string) => Promise<object> | object,
  * } }} options
  */
 function createVmControlServer({ token, port = VM_CONTROL_DEFAULT_PORT, host = VM_CONTROL_HOST, browser }) {
@@ -237,6 +258,16 @@ function createVmControlServer({ token, port = VM_CONTROL_DEFAULT_PORT, host = V
         const result = await browser.activeTab();
         return send(res, result && result.ok ? 200 : 503, result);
       }
+      if (parts[1] === 'view' && parts.length === 2 && browser.getViewMode && browser.setViewMode) {
+        if (req.method === 'GET') return send(res, 200, { ok: true, mode: browser.getViewMode() });
+        if (req.method === 'POST') {
+          const body = await readJson(req);
+          const mode = normalizeViewMode(body.mode);
+          if (!mode) return send(res, 400, { ok: false, error: 'invalid-mode' });
+          const result = await browser.setViewMode(mode);
+          return send(res, result && result.ok ? 200 : 503, result);
+        }
+      }
       return send(res, 404, { ok: false, error: 'not-found' });
     } catch (error) {
       const status = error && Number.isInteger(error.status) ? error.status : 500;
@@ -290,6 +321,10 @@ module.exports = {
   VM_CONTROL_DEFAULT_PORT,
   VM_FORCED_SETTINGS,
   VM_DISABLED_FEATURES,
+  VM_VIEW_MODES,
+  VM_VIEW_MODE_ENV,
+  normalizeViewMode,
+  viewModeFrom,
   isVmMode,
   applyVmSettings,
   controlPortFrom,

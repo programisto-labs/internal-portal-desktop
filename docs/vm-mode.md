@@ -14,6 +14,12 @@ La fenêtre ne charge jamais le portail : elle affiche la coquille de Desktop (`
 
 Les commandes exécutées dans la VM (`computer_exec`, page malveillante qui pousse l'agent) ne peuvent donc pas voler la session Lasco de la personne : il n'y en a pas. Les sites ouverts dans la VM gardent leurs propres connexions (profil `~/.config/lasco-desktop`, privé à l'utilisateur `lasco`).
 
+## Vue page / vue ordinateur
+
+- **Page** (défaut, `LASCO_VM_VIEW_MODE=page`) : la fenêtre passe en plein écran (par-dessus le dock) et la coquille masque ses onglets et sa barre d'adresse. Le flux de la vue en direct montre la page active seule, comme un onglet du navigateur de la personne. Les fenêtres natives (sélecteur de fichier, impression, menus) restent visibles : c'est l'écran de la VM qui change, pas un recadrage du flux.
+- **Ordinateur** (`desktop`) : tout le navigateur au-dessus du dock (zone de travail de l'écran).
+- Changé par `POST /v1/view` (démon du navigateur, interrupteur de la vue en direct du portail) ; gardé jusqu'à la fin du processus, réappliqué à chaque fenêtre. Événement `vm-shell-view-mode` vers la coquille (`lascoDesktop.vm.onViewMode`), `viewMode` dans `getInfo`.
+
 ## Réglages forcés
 
 `VM_FORCED_SETTINGS` (`src/vm-mode.js`) l'emporte sur `settings.json` :
@@ -41,6 +47,8 @@ Serveur HTTP sur `127.0.0.1:9334` (`LASCO_VM_CONTROL_PORT`), jeton `Bearer` alé
 | `POST /v1/tabs/:id/agent` `{ action, … }` | actions d'agent sur l'onglet, même moteur que `browserTabs.agentAction` sur un Mac : `snapshot`, `screenshot`, `click`, `type`, `press`, `scroll`, `select_option`, `wait`. Seuls les champs connus passent ; l'onglet vient du chemin. |
 
 Les trois dernières routes servent l'exécuteur « Ordinateur Lasco » du portail (internal-portal-front, routeur d'exécuteurs) : un agent rattaché à l'ordinateur Lasco pilote ce navigateur avec ses outils `browser_*` (instantané de la page avec des refs, clic, saisie…), comme les onglets d'un Mac, au lieu de captures d'écran.
+| `GET /v1/view` | `{ mode }` : `page` ou `desktop` |
+| `POST /v1/view` `{ mode }` | affiche la page seule ou tout le navigateur |
 
 `targetId` est la cible CDP de la page de l'onglet (`Target.getTargetInfo`) : le démon (`browser-daemon.mjs` du portail) pilote cette page, jamais la coquille, elle aussi visible sur le port CDP.
 

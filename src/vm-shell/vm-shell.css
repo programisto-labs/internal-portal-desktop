@@ -305,3 +305,8 @@ svg.icon {
 }
 .site-changed button svg.icon { width: 12px; height: 12px; }
 .site-changed button:hover { background: hsl(var(--accent)); }
+
+/* ---- Vue page (docs/vm-mode.md) : la page seule, plein écran, sans onglets ni barre d'adresse --------------- */
+body[data-view='page'] .tabbar,
+body[data-view='page'] .toolbar { display: none; }
+body[data-view='page'] .canvas { border: none; border-radius: 0; }
