@@ -77,7 +77,8 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Lasco utilise le micro pour la dictée et le mode vocal de vos agents.",
+        "NSMicrophoneUsageDescription": "Lasco utilise le micro pour la voix de vos agents et pour les sites que vous y autorisez (visioconférences…).",
+        "NSCameraUsageDescription": "Lasco utilise la caméra pour les sites que vous y autorisez (visioconférences…).",
         "CFBundleURLTypes": [
           {
             "CFBundleURLName": "Web site URL",

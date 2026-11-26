@@ -565,6 +565,8 @@
   }
 
   const PERMISSION_LABELS = {
+    microphone: 'Micro',
+    camera: 'Caméra',
     geolocation: 'Position',
     notifications: 'Notifications',
     'clipboard-read': 'Lecture du presse-papiers',

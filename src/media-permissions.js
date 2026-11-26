@@ -6,7 +6,8 @@
  * Electron accorde toute permission quand aucune règle n'est posée. Avec l'accès micro accordé à l'app par
  * macOS, n'importe quelle page aurait donc le micro sans rien demander. Règles :
  * - portail Lasco (`persist:portal`) : micro seul (pas de caméra), et seulement pour une page du portail ;
- * - onglets web du navigateur intégré (`persist:browser-tabs`) : ni micro ni caméra ;
+ * - onglets web du navigateur intégré (`persist:browser-tabs`) : micro et caméra demandés par site
+ *   (src/browser-tabs/site-permissions.js, docs/site-permissions.md) ;
  * - autres permissions : inchangées (accordées, comme avant).
  *
  * macOS : la première demande déclenche la boîte système (texte `NSMicrophoneUsageDescription`).
@@ -30,17 +31,26 @@ function portalMediaCheckAllowed(requestingOrigin, details, isPortalUrl) {
   return !type || type === 'audio' || type === 'unknown';
 }
 
-/** macOS : accès micro de l'app (boîte système la première fois). Ailleurs : géré par le système. */
-async function ensureSystemMicrophoneAccess(systemPreferences, platform = process.platform) {
+/**
+ * macOS : accès de l'app au micro ou à la caméra (`media` : `microphone` | `camera`), boîte
+ * système la première fois. Ailleurs : géré par le système.
+ */
+async function ensureSystemMediaAccess(systemPreferences, media, platform = process.platform) {
   if (platform !== 'darwin' || !systemPreferences) return true;
+  if (media !== 'microphone' && media !== 'camera') return false;
   try {
-    const status = systemPreferences.getMediaAccessStatus('microphone');
+    const status = systemPreferences.getMediaAccessStatus(media);
     if (status === 'granted') return true;
     if (status === 'denied' || status === 'restricted') return false;
-    return await systemPreferences.askForMediaAccess('microphone');
+    return await systemPreferences.askForMediaAccess(media);
   } catch (_) {
     return false;
   }
+}
+
+/** macOS : accès micro de l'app (boîte système la première fois). Ailleurs : géré par le système. */
+function ensureSystemMicrophoneAccess(systemPreferences, platform = process.platform) {
+  return ensureSystemMediaAccess(systemPreferences, 'microphone', platform);
 }
 
 function requestingUrlOf(webContents, details) {
@@ -75,6 +85,7 @@ module.exports = {
   isAudioOnlyRequest,
   portalMediaAllowed,
   portalMediaCheckAllowed,
+  ensureSystemMediaAccess,
   ensureSystemMicrophoneAccess,
   installPortalMediaPermissions,
 };

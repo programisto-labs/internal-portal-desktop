@@ -39,6 +39,9 @@ describe('autorisations des sites', () => {
     assert.equal(permissionPolicy('geolocation'), 'ask');
     assert.equal(permissionPolicy('notifications'), 'ask');
     assert.equal(permissionPolicy('clipboard-read'), 'ask');
+    assert.equal(permissionPolicy('microphone'), 'ask');
+    assert.equal(permissionPolicy('camera'), 'ask');
+    // `media` n'est jamais retenu tel quel : il se traduit en micro / caméra.
     assert.equal(permissionPolicy('media'), 'deny');
     assert.equal(permissionPolicy('openExternal'), 'deny');
     assert.equal(permissionPolicy('hid'), 'deny');
@@ -134,7 +137,66 @@ describe('autorisations des sites', () => {
     assert.equal(calls, 1);
   });
 
-  it("refuse sans question ce qui n'est pas demandable (micro, appareils, pages non web)", async () => {
+  it('demande micro et caméra en une question, retenus séparément, puis accès système', async () => {
+    const store = createSitePermissionStore({});
+    const asked = [];
+    const system = [];
+    let answer = 'allow';
+    const handlers = createSitePermissionHandlers({
+      store,
+      ask: async (q) => {
+        asked.push(q);
+        return answer;
+      },
+      ensureSystemMediaAccess: async (media) => {
+        system.push(media);
+        return true;
+      },
+    });
+    const meet = tab('https://meet.google.com/abc');
+    assert.equal(handlers.check(meet, 'media', 'https://meet.google.com', { mediaType: 'audio' }), false);
+    assert.equal(await request(handlers, meet, 'media', { mediaTypes: ['audio', 'video'] }), true);
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].label, 'utiliser votre micro et votre caméra');
+    assert.deepEqual(asked[0].permissions, ['microphone', 'camera']);
+    assert.deepEqual(store.list('https://meet.google.com'), { microphone: 'allow', camera: 'allow' });
+    assert.deepEqual(system, ['microphone', 'camera']);
+    // Retenu : plus de question.
+    assert.equal(await request(handlers, meet, 'media', { mediaTypes: ['audio'] }), true);
+    assert.equal(asked.length, 1);
+    assert.equal(handlers.check(meet, 'media', 'https://meet.google.com', { mediaType: 'video' }), true);
+    assert.equal(handlers.check(meet, 'media', 'https://meet.google.com', { mediaType: 'unknown' }), true);
+
+    // Caméra bloquée sur un autre site : la demande micro + caméra est refusée, le micro seul reste demandable.
+    const other = tab('https://visio.example/');
+    store.set('https://visio.example', 'camera', 'block');
+    assert.equal(await request(handlers, other, 'media', { mediaTypes: ['audio', 'video'] }), false);
+    assert.equal(asked.length, 1);
+    answer = 'block';
+    assert.equal(await request(handlers, other, 'media', { mediaTypes: ['audio'] }), false);
+    assert.equal(asked.length, 2);
+    assert.equal(asked[1].label, 'utiliser votre micro');
+    assert.equal(store.get('https://visio.example', 'microphone'), 'block');
+  });
+
+  it("refuse le micro si macOS le refuse à l'app, et une demande média sans type", async () => {
+    const store = createSitePermissionStore({});
+    store.set('https://meet.example', 'microphone', 'allow');
+    let asked = 0;
+    const handlers = createSitePermissionHandlers({
+      store,
+      ask: async () => {
+        asked += 1;
+        return 'allow';
+      },
+      ensureSystemMediaAccess: async () => false,
+    });
+    assert.equal(await request(handlers, tab('https://meet.example/'), 'media', { mediaTypes: ['audio'] }), false);
+    assert.equal(await request(handlers, tab('https://meet.example/'), 'media', {}), false);
+    assert.equal(asked, 0);
+  });
+
+  it("refuse sans question ce qui n'est pas demandable (appareils, pages non web)", async () => {
     let calls = 0;
     const handlers = createSitePermissionHandlers({
       store: createSitePermissionStore({}),
@@ -143,7 +205,8 @@ describe('autorisations des sites', () => {
         return 'allow';
       },
     });
-    assert.equal(await request(handlers, tab('https://meet.example/'), 'media', { mediaTypes: ['audio'] }), false);
+    assert.equal(await request(handlers, tab('https://x.example/'), 'hid'), false);
+    assert.equal(await request(handlers, tab('file:///tmp/a.html'), 'media', { mediaTypes: ['audio'] }), false);
     assert.equal(await request(handlers, tab('https://x.example/'), 'fullscreen'), true);
     assert.equal(await request(handlers, tab('file:///tmp/a.html'), 'geolocation'), false);
     assert.equal(calls, 0);

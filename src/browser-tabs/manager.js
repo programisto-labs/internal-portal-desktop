@@ -12,8 +12,10 @@ const {
   Menu,
   nativeTheme,
   net,
+  systemPreferences,
 } = require('electron');
 const { sanitizeBrowserUrl } = require('./url');
+const { ensureSystemMediaAccess } = require('../media-permissions');
 const {
   createSitePermissionStore,
   installSitePermissions,
@@ -461,7 +463,11 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // Electron sends no Sec-CH-UA headers: Google sign-in then refuses the browser.
       installClientHintHeaders(browserSession);
       // Autorisations des sites : demandées puis retenues par site, jamais le micro ni la caméra.
-      installSitePermissions(browserSession, { store: sitePermissions, ask: askSitePermission });
+      installSitePermissions(browserSession, {
+        store: sitePermissions,
+        ask: askSitePermission,
+        ensureSystemMediaAccess: (media) => ensureSystemMediaAccess(systemPreferences, media),
+      });
     }
     return browserSession;
   }
