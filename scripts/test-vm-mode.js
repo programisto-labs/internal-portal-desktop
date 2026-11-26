@@ -83,6 +83,8 @@ describe('VM mode: control endpoint', () => {
   const token = 'b'.repeat(64);
   const opened = [];
   const tabs = [{ tabId: 't1', url: 'https://a.test/', title: 'A', active: true, targetId: 'TARGET-1' }];
+  const navigated = [];
+  const actions = [];
   let control;
   let port;
   const auth = () => ({ authorization: `Bearer ${token}`, host: `127.0.0.1:${port}` });
@@ -105,6 +107,15 @@ describe('VM mode: control endpoint', () => {
         activateTab: async (tabId) =>
           tabId === 't1' ? { ok: true, tabId, targetId: 'TARGET-1' } : { ok: false, error: 'unknown-tab' },
         activeTab: async () => ({ ok: true, tabId: 't1', targetId: 'TARGET-1' }),
+        navigateTab: async (tabId, url) => {
+          navigated.push({ tabId, url });
+          return tabId === 't1' ? { ok: true } : { ok: false, error: 'unknown-tab' };
+        },
+        tabHistory: async (tabId, action) => (tabId === 't1' ? { ok: true, action } : { ok: false, error: 'unknown-tab' }),
+        agentAction: async (tabId, payload) => {
+          actions.push({ tabId, payload });
+          return { ok: true, page: { url: 'https://a.test/' } };
+        },
       },
     });
     const address = await control.listen();
@@ -149,6 +160,24 @@ describe('VM mode: control endpoint', () => {
     assert.equal(notJson.status, 400);
     assert.equal((await request(port, { method: 'POST', pathname: '/v1/tabs/t1/activate', headers: auth() })).status, 200);
     assert.equal((await request(port, { method: 'POST', pathname: '/v1/tabs/nope/activate', headers: auth() })).status, 404);
+  });
+
+  it('navigates a tab and walks its history', async () => {
+    const post = (pathname, body) => request(port, { method: 'POST', pathname, headers: auth(), body });
+    assert.equal((await post('/v1/tabs/t1/navigate', { url: 'https://c.test/' })).status, 200);
+    assert.deepEqual(navigated.at(-1), { tabId: 't1', url: 'https://c.test/' });
+    assert.equal((await post('/v1/tabs/t1/navigate', {})).status, 400);
+    assert.equal((await post('/v1/tabs/t1/history', { action: 'back' })).status, 200);
+    assert.equal((await post('/v1/tabs/t1/history', { action: 'rm -rf' })).status, 400);
+    assert.equal((await post('/v1/tabs/nope/history', { action: 'reload' })).status, 404);
+  });
+
+  it('runs the agent actions on the tab of the path, with known fields only', async () => {
+    const post = (pathname, body) => request(port, { method: 'POST', pathname, headers: auth(), body });
+    const res = await post('/v1/tabs/t1/agent', { action: 'click', ref: 'e3', doubleClick: true, tabId: 'other', evil: 1 });
+    assert.equal(res.status, 200);
+    assert.deepEqual(actions.at(-1), { tabId: 't1', payload: { action: 'click', ref: 'e3', doubleClick: true } });
+    assert.equal((await post('/v1/tabs/t1/agent', { action: 'eval', code: '1' })).status, 400);
   });
 
   it('refuses large bodies and unknown routes', async () => {

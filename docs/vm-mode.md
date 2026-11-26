@@ -36,6 +36,11 @@ Serveur HTTP sur `127.0.0.1:9334` (`LASCO_VM_CONTROL_PORT`), jeton `Bearer` alé
 | `POST /v1/tabs` `{ url, activate? }` | ouvre un onglet web (http(s) seulement) |
 | `POST /v1/tabs/:id/activate` | l'affiche |
 | `GET /v1/active` | onglet affiché (ouvre la page d'accueil `LASCO_VM_HOME_URL` s'il n'y en a pas) |
+| `POST /v1/tabs/:id/navigate` `{ url }` | charge une page http(s) dans l'onglet |
+| `POST /v1/tabs/:id/history` `{ action }` | `back`, `forward` ou `reload` |
+| `POST /v1/tabs/:id/agent` `{ action, … }` | actions d'agent sur l'onglet, même moteur que `browserTabs.agentAction` sur un Mac : `snapshot`, `screenshot`, `click`, `type`, `press`, `scroll`, `select_option`, `wait`. Seuls les champs connus passent ; l'onglet vient du chemin. |
+
+Les trois dernières routes servent l'exécuteur « Ordinateur Lasco » du portail (internal-portal-front, routeur d'exécuteurs) : un agent rattaché à l'ordinateur Lasco pilote ce navigateur avec ses outils `browser_*` (instantané de la page avec des refs, clic, saisie…), comme les onglets d'un Mac, au lieu de captures d'écran.
 
 `targetId` est la cible CDP de la page de l'onglet (`Target.getTargetInfo`) : le démon (`browser-daemon.mjs` du portail) pilote cette page, jamais la coquille, elle aussi visible sur le port CDP.
 

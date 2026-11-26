@@ -128,6 +128,26 @@ function readJson(req) {
   });
 }
 
+const VM_HISTORY_ACTIONS = new Set(['back', 'forward', 'reload']);
+/** Actions of `browserTabs.agentAction` (portal agents), the same engine as on a Mac. */
+const VM_AGENT_ACTIONS = new Set(['snapshot', 'screenshot', 'click', 'type', 'press', 'scroll', 'select_option', 'wait']);
+
+/** Only the known fields, typed: the request never names another tab (`tabId` comes from the path). */
+function agentPayload(body) {
+  const out = { action: body.action };
+  for (const key of ['ref', 'text', 'key', 'direction', 'value']) {
+    if (typeof body[key] === 'string') out[key] = body[key];
+  }
+  for (const key of ['x', 'y', 'amount', 'ms', 'maxElements', 'maxText']) {
+    if (typeof body[key] === 'number' && Number.isFinite(body[key])) out[key] = body[key];
+  }
+  for (const key of ['doubleClick', 'clear', 'submit', 'includeText']) {
+    if (typeof body[key] === 'boolean') out[key] = body[key];
+  }
+  if (body.coordinateSpace === 'screenshot' || body.coordinateSpace === 'viewport') out.coordinateSpace = body.coordinateSpace;
+  return out;
+}
+
 /**
  * Control endpoint of the VM browser.
  *
@@ -136,6 +156,10 @@ function readJson(req) {
  * - `POST /v1/tabs`           `{ url, activate? }` → opens a web tab → `{ ok, tabId, targetId }`
  * - `POST /v1/tabs/:id/activate` → `{ ok, tabId, targetId }`
  * - `GET  /v1/active`         → active web tab (opens a blank one when there is none) → `{ ok, tabId, targetId }`
+ * - `POST /v1/tabs/:id/navigate` `{ url }` → loads an http(s) page in the tab
+ * - `POST /v1/tabs/:id/history`  `{ action: 'back' | 'forward' | 'reload' }`
+ * - `POST /v1/tabs/:id/agent`    `{ action, ... }` → same actions as `browserTabs.agentAction` of the portal's agents
+ *   (snapshot, screenshot, click, type, press, scroll, select_option, wait), on that tab only.
  *
  * `targetId` is the CDP target of the tab's page (Target.getTargetInfo), never the shell's.
  *
@@ -144,6 +168,9 @@ function readJson(req) {
  *   openTab: (input: { url: string, activate: boolean }) => Promise<object>,
  *   activateTab: (tabId: string) => Promise<object>,
  *   activeTab: () => Promise<object>,
+ *   navigateTab?: (tabId: string, url: string) => Promise<object> | object,
+ *   tabHistory?: (tabId: string, action: string) => Promise<object> | object,
+ *   agentAction?: (tabId: string, payload: object) => Promise<object>,
  * } }} options
  */
 function createVmControlServer({ token, port = VM_CONTROL_DEFAULT_PORT, host = VM_CONTROL_HOST, browser }) {
@@ -185,6 +212,26 @@ function createVmControlServer({ token, port = VM_CONTROL_DEFAULT_PORT, host = V
       if (req.method === 'POST' && parts[1] === 'tabs' && parts[3] === 'activate' && parts.length === 4) {
         const result = await browser.activateTab(decodeURIComponent(parts[2]));
         return send(res, result && result.ok ? 200 : 404, result);
+      }
+      if (req.method === 'POST' && parts[1] === 'tabs' && parts.length === 4) {
+        const tabId = decodeURIComponent(parts[2]);
+        const body = await readJson(req);
+        if (parts[3] === 'navigate' && browser.navigateTab) {
+          if (typeof body.url !== 'string' || !body.url.trim()) return send(res, 400, { ok: false, error: 'invalid-url' });
+          const result = await browser.navigateTab(tabId, body.url.trim());
+          return send(res, result && result.ok ? 200 : 400, result);
+        }
+        if (parts[3] === 'history' && browser.tabHistory) {
+          if (!VM_HISTORY_ACTIONS.has(body.action)) return send(res, 400, { ok: false, error: 'invalid-action' });
+          const result = await browser.tabHistory(tabId, body.action);
+          return send(res, result && result.ok ? 200 : 404, result);
+        }
+        if (parts[3] === 'agent' && browser.agentAction) {
+          if (!VM_AGENT_ACTIONS.has(body.action)) return send(res, 400, { ok: false, error: 'unknown-action' });
+          const result = await browser.agentAction(tabId, agentPayload(body));
+          // An action that fails on the page (ref not found…) is still a valid answer for the agent.
+          return send(res, 200, result || { ok: false, error: 'agent-action-failed' });
+        }
       }
       if (req.method === 'GET' && parts[1] === 'active' && parts.length === 2) {
         const result = await browser.activeTab();
@@ -251,4 +298,6 @@ module.exports = {
   isLocalRequest,
   createVmControlServer,
   cdpTargetIdOf,
+  agentPayload,
+  VM_AGENT_ACTIONS,
 };

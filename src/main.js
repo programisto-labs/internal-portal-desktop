@@ -2920,6 +2920,29 @@ async function vmListTabs() {
   return Promise.all(manager.tabIds().map((tabId) => vmTabInfo(manager, tabId)));
 }
 
+/** Agents of the portal (executor « Ordinateur Lasco »): same page engine as `browserTabs` on a Mac. */
+function vmNavigateTab(tabId, url) {
+  const manager = vmTabManager();
+  if (!manager || !manager.has(tabId)) return { ok: false, error: 'unknown-tab' };
+  const safe = sanitizeBrowserUrl(url);
+  if (!safe) return { ok: false, error: 'invalid-url' };
+  return manager.navigate({ tabId, url: safe });
+}
+
+function vmTabHistory(tabId, action) {
+  const manager = vmTabManager();
+  if (!manager || !manager.has(tabId)) return { ok: false, error: 'unknown-tab' };
+  if (action === 'back') return manager.goBack({ tabId });
+  if (action === 'forward') return manager.goForward({ tabId });
+  return manager.reload({ tabId });
+}
+
+async function vmAgentAction(tabId, payload) {
+  const manager = vmTabManager();
+  if (!manager || !manager.has(tabId)) return { ok: false, error: 'unknown-tab' };
+  return manager.agentAction({ ...payload, tabId });
+}
+
 /** First page of the VM browser and of a new tab (`LASCO_VM_HOME_URL`, http(s) only). */
 function vmHomeUrl() {
   return sanitizeBrowserUrl(process.env.LASCO_VM_HOME_URL || '') || 'https://www.google.com/';
@@ -2939,6 +2962,9 @@ async function startVmControl() {
       openTab: vmOpenTab,
       activateTab: vmActivateTab,
       activeTab: vmActiveTab,
+      navigateTab: vmNavigateTab,
+      tabHistory: vmTabHistory,
+      agentAction: vmAgentAction,
     },
   });
   try {
