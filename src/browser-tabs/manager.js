@@ -1833,6 +1833,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     has(tabId) {
       return tabs.has(tabId);
     },
+    /** VM mode (docs/vm-mode.md): the control endpoint lists the tabs and finds the page of one. */
+    tabIds: () => [...tabs.keys()],
+    activeTabId: () => activeTabId,
+    webContentsOf(tabId) {
+      const entry = tabs.get(tabId);
+      return entry && !entry.view.webContents.isDestroyed() ? entry.view.webContents : null;
+    },
+    stateOf: (tabId) => buildState(tabId),
   };
 }
 
