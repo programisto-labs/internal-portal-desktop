@@ -10,7 +10,7 @@ Lasco Desktop remplace Chrome comme navigateur de l'ordinateur Lasco (VM Linux d
 
 ## Jamais de session Lasco dans la VM
 
-La fenêtre ne charge jamais le portail : elle affiche la coquille de Desktop (`src/vm-shell/`, page `file:` sans script distant, CSP `default-src 'none'`). Elle comprend une barre d'onglets, une barre d'adresse et le panneau « Ordinateur Lasco ». Elle pilote les mêmes vues natives que le navigateur interne (`browserTabs`).
+La fenêtre ne charge jamais le portail : elle affiche la coquille de Desktop (`src/vm-shell/`, page `file:` sans script distant, CSP `default-src 'none'`). Elle reprend l'apparence et le fonctionnement du navigateur interne du portail (`PortalBrowserTabBar`, `PortalExternalBrowserToolbar` d'internal-portal-front), pour qu'une personne qui prend la main reconnaisse Lasco : onglets sur le rail (largeur partagée, glisser pour réordonner, clic molette pour fermer, menu contextuel natif), canevas arrondi, pilule précédent / suivant / actualiser, adresse centrée réduite au domaine avec suggestions de l'historique, cadenas et informations du site, recherche dans la page, menu ☰ (nouvel onglet, rechercher, imprimer, zoom, copier le lien, encart « Ordinateur Lasco »). Police Geist embarquée (`fonts/`, OFL). Retirés car sans objet dans la VM : favoris, mots de passe, téléchargements, Lasco AI, fenêtres détachées, outils de développement, « Ouvrir dans le navigateur par défaut ». À tenir à jour quand le navigateur du portail change. Elle pilote les mêmes vues natives que le navigateur interne (`browserTabs`).
 
 Les commandes exécutées dans la VM (`computer_exec`, page malveillante qui pousse l'agent) ne peuvent donc pas voler la session Lasco de la personne : il n'y en a pas. Les sites ouverts dans la VM gardent leurs propres connexions (profil `~/.config/lasco-desktop`, privé à l'utilisateur `lasco`).
 
@@ -23,7 +23,7 @@ Les commandes exécutées dans la VM (`computer_exec`, page malveillante qui pou
 - téléchargements dans le dossier Téléchargements de la VM sans boîte de dialogue ;
 - thème clair, aucun raccourci global.
 
-Désactivés : mises à jour dans la machine (la version suit l'image, reconstruite à chaque release : docs/updates.md), icône de la barre des menus, ouverture à la connexion, notifications, client `lasco:`, navigateur par défaut, gestionnaire de mots de passe et remplissage (ils dépendent du Coffre du portail), My Drive, fenêtres détachées, fenêtre Réglages. Le panneau « Ordinateur Lasco » de la coquille les rappelle.
+Désactivés : mises à jour dans la machine (la version suit l'image, reconstruite à chaque release : docs/updates.md), icône de la barre des menus, ouverture à la connexion, notifications, client `lasco:`, navigateur par défaut, gestionnaire de mots de passe et remplissage (ils dépendent du Coffre du portail), My Drive, fenêtres détachées, fenêtre Réglages. L'encart « Ordinateur Lasco » du menu ☰ de la coquille les rappelle.
 
 ## Point de contrôle (démon navigateur de la VM)
 

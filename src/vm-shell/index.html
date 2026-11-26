@@ -4,36 +4,116 @@
   <meta charset="utf-8" />
   <!-- Desktop's own page (docs/vm-mode.md): no remote script, no frame, no network from the shell itself. -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+        content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
   <title>Lasco</title>
   <link rel="stylesheet" href="vm-shell.css" />
 </head>
 <body>
-  <header class="chrome">
-    <div class="tabstrip" role="tablist" aria-label="Onglets" id="tabs"></div>
-    <button class="icon new-tab" id="new-tab" type="button" title="Nouvel onglet (Ctrl+T)" aria-label="Nouvel onglet">+</button>
-    <div class="toolbar">
-      <button class="icon" id="back" type="button" title="Précédent" aria-label="Précédent">&#8592;</button>
-      <button class="icon" id="forward" type="button" title="Suivant" aria-label="Suivant">&#8594;</button>
-      <button class="icon" id="reload" type="button" title="Actualiser (Ctrl+R)" aria-label="Actualiser">&#8635;</button>
-      <form class="omnibox" id="omnibox" autocomplete="off">
-        <span class="lock" id="lock" aria-hidden="true"></span>
-        <input id="address" type="text" spellcheck="false" placeholder="Rechercher ou saisir une adresse" aria-label="Adresse" />
-      </form>
-      <button class="managed" id="managed" type="button" aria-haspopup="dialog" aria-expanded="false">Ordinateur Lasco</button>
-    </div>
-    <div class="managed-panel" id="managed-panel" role="dialog" aria-label="Navigateur géré par Lasco" hidden>
-      <p class="managed-title">Navigateur géré par Lasco</p>
-      <p>Ce navigateur tourne sur votre ordinateur Lasco. Vos agents et vous l'utilisez à distance.</p>
-      <ul>
-        <li>Pas de compte Lasco ouvert ici : vos données Lasco ne sont jamais sur cette machine.</li>
-        <li>Téléchargements : <span id="downloads-dir">dossier Téléchargements</span>, sans confirmation.</li>
-        <li>Réglages, mises à jour, notifications, mots de passe et remplissage automatique désactivés.</li>
-      </ul>
-      <p class="managed-version" id="version"></p>
+  <!--
+    Same chrome as the portal's internal browser (PortalBrowserTabBar + PortalExternalBrowserToolbar of
+    internal-portal-front): tab row on the rail, rounded content canvas, navigation pill, centred address,
+    ☰ menu. Only what makes sense in the VM is kept (docs/vm-mode.md, « Coquille »).
+  -->
+  <header class="tabbar">
+    <div class="tablist" role="tablist" aria-label="Onglets" id="tabs"></div>
+    <div class="new-tab-wrap" id="new-tab-wrap">
+      <button class="glass-icon secondary" id="new-tab" type="button" title="Nouvel onglet (Ctrl+T)" aria-label="Nouvel onglet" data-icon="plus"></button>
     </div>
   </header>
-  <main class="content" id="content" aria-label="Page"></main>
+  <div class="canvas">
+    <div class="toolbar" data-browser-toolbar>
+      <div class="toolbar-start">
+        <div class="glass nav-group" role="group" aria-label="Navigation">
+          <button class="nav-button" id="back" type="button" title="Précédent" aria-label="Précédent" data-icon="arrow-left"></button>
+          <button class="nav-button" id="forward" type="button" title="Suivant" aria-label="Suivant" data-icon="arrow-right"></button>
+          <span class="nav-separator" aria-hidden="true"></span>
+          <button class="nav-button" id="reload" type="button" title="Actualiser" aria-label="Actualiser" data-icon="rotate-cw"></button>
+        </div>
+      </div>
+      <div class="address" id="address-box">
+        <button class="site-info" id="site-info" type="button" aria-label="Informations du site" aria-haspopup="dialog" aria-expanded="false" hidden></button>
+        <form class="omnibox" id="omnibox" autocomplete="off">
+          <span class="address-icon" id="address-icon" aria-hidden="true"></span>
+          <input class="glass" id="address" type="text" inputmode="url" spellcheck="false" autocapitalize="off"
+                 placeholder="Rechercher ou saisir une adresse" aria-label="Adresse" role="combobox"
+                 aria-expanded="false" aria-autocomplete="list" aria-controls="suggestions" />
+        </form>
+      </div>
+      <div class="toolbar-end">
+        <button class="zoom-badge" id="zoom-badge" type="button" title="Réinitialiser le zoom" aria-label="Réinitialiser le zoom" hidden></button>
+        <button class="glass-icon" id="menu-button" type="button" title="Menu du navigateur" aria-label="Menu du navigateur" aria-haspopup="menu" aria-expanded="false" data-icon="menu"></button>
+      </div>
+      <div class="loading-bar" id="loading-bar" aria-hidden="true" hidden></div>
+    </div>
+    <div class="find-bar" id="find-bar" role="search" hidden>
+      <input id="find-input" type="text" spellcheck="false" placeholder="Rechercher dans la page" aria-label="Rechercher dans la page" />
+      <span class="find-count" id="find-count"></span>
+      <button class="find-button" id="find-previous" type="button" aria-label="Résultat précédent" data-icon="chevron-up"></button>
+      <button class="find-button" id="find-next" type="button" aria-label="Résultat suivant" data-icon="chevron-down"></button>
+      <button class="find-button" id="find-close" type="button" aria-label="Fermer la recherche" data-icon="x"></button>
+    </div>
+    <!-- The native web view is composited over this placeholder; the frozen image stands in while a menu covers it. -->
+    <main class="content" id="content" aria-label="Page">
+      <img class="freeze" id="freeze" alt="" aria-hidden="true" hidden />
+    </main>
+  </div>
+
+  <ul class="popover suggestions" id="suggestions" role="listbox" hidden></ul>
+
+  <div class="popover menu" id="menu" role="menu" aria-label="Menu du navigateur" hidden>
+    <button class="menu-item" type="button" role="menuitem" data-action="new-tab" data-icon="plus">
+      <span class="menu-label">Nouvel onglet</span><kbd>Ctrl+T</kbd>
+    </button>
+    <div class="menu-separator" role="separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-action="find" data-icon="search">
+      <span class="menu-label">Rechercher dans la page</span><kbd>Ctrl+F</kbd>
+    </button>
+    <button class="menu-item" type="button" role="menuitem" data-action="print" data-icon="printer">
+      <span class="menu-label">Imprimer…</span><kbd>Ctrl+P</kbd>
+    </button>
+    <div class="menu-zoom">
+      <span class="menu-label">Zoom</span>
+      <div class="zoom-controls">
+        <button class="zoom-button" type="button" data-action="zoom-out" aria-label="Zoom arrière" data-icon="minus"></button>
+        <span class="zoom-value" id="zoom-value">100 %</span>
+        <button class="zoom-button" type="button" data-action="zoom-in" aria-label="Zoom avant" data-icon="plus"></button>
+      </div>
+      <button class="zoom-button" type="button" data-action="zoom-reset" aria-label="Réinitialiser le zoom" data-icon="rotate-ccw"></button>
+    </div>
+    <div class="menu-separator" role="separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-action="copy-link" data-icon="copy">
+      <span class="menu-label">Copier le lien</span>
+    </button>
+    <div class="menu-separator" role="separator"></div>
+    <div class="menu-about">
+      <p class="menu-about-title"><span data-icon="monitor"></span>Ordinateur Lasco</p>
+      <p>Ce navigateur tourne sur votre ordinateur Lasco. Vos agents et vous l'utilisez à distance.</p>
+      <p>Aucun compte Lasco n'est ouvert ici. Téléchargements : <span id="downloads-dir">dossier Téléchargements</span>.</p>
+      <p class="menu-about-version" id="version"></p>
+    </div>
+  </div>
+
+  <div class="popover site-panel" id="site-panel" role="dialog" aria-label="Informations du site" hidden>
+    <div class="site-head">
+      <span class="site-head-icon" id="site-panel-icon" aria-hidden="true"></span>
+      <div class="site-head-text">
+        <p class="site-host" id="site-host"></p>
+        <p class="site-title" id="site-title"></p>
+        <p class="site-description" id="site-description"></p>
+      </div>
+    </div>
+    <div class="site-body">
+      <h3>Autorisations</h3>
+      <p class="site-empty" id="site-empty">Ce site n'a encore demandé aucune autorisation.</p>
+      <ul class="site-permissions" id="site-permissions"></ul>
+      <button class="site-reset" id="site-reset" type="button" hidden>Réinitialiser les autorisations</button>
+      <div class="site-changed" id="site-changed" hidden>
+        <span>Actualisez la page pour appliquer les changements.</span>
+        <button type="button" id="site-reload" data-icon="rotate-cw">Actualiser</button>
+      </div>
+    </div>
+  </div>
+
   <script src="vm-shell.js"></script>
 </body>
 </html>
