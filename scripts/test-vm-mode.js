@@ -14,6 +14,7 @@ const {
   tokenMatches,
   createVmControlServer,
   VM_FORCED_SETTINGS,
+  viewModeFrom,
 } = require('../src/vm-mode');
 
 function request(port, { method = 'GET', pathname = '/v1/status', headers = {}, body } = {}) {
@@ -83,6 +84,7 @@ describe('VM mode: control endpoint', () => {
   const token = 'b'.repeat(64);
   const opened = [];
   const tabs = [{ tabId: 't1', url: 'https://a.test/', title: 'A', active: true, targetId: 'TARGET-1' }];
+  let viewMode = 'page';
   let control;
   let port;
   const auth = () => ({ authorization: `Bearer ${token}`, host: `127.0.0.1:${port}` });
@@ -105,6 +107,11 @@ describe('VM mode: control endpoint', () => {
         activateTab: async (tabId) =>
           tabId === 't1' ? { ok: true, tabId, targetId: 'TARGET-1' } : { ok: false, error: 'unknown-tab' },
         activeTab: async () => ({ ok: true, tabId: 't1', targetId: 'TARGET-1' }),
+        getViewMode: () => viewMode,
+        setViewMode: async (mode) => {
+          viewMode = mode;
+          return { ok: true, mode };
+        },
       },
     });
     const address = await control.listen();
@@ -151,10 +158,27 @@ describe('VM mode: control endpoint', () => {
     assert.equal((await request(port, { method: 'POST', pathname: '/v1/tabs/nope/activate', headers: auth() })).status, 404);
   });
 
+  it('switches between the page alone and the whole browser', async () => {
+    assert.deepEqual((await request(port, { pathname: '/v1/view', headers: auth() })).body, { ok: true, mode: 'page' });
+    const desktop = await request(port, { method: 'POST', pathname: '/v1/view', headers: auth(), body: { mode: 'desktop' } });
+    assert.deepEqual(desktop.body, { ok: true, mode: 'desktop' });
+    assert.equal(viewMode, 'desktop');
+    assert.equal((await request(port, { method: 'POST', pathname: '/v1/view', headers: auth(), body: { mode: 'kiosk' } })).status, 400);
+    assert.equal((await request(port, { method: 'POST', pathname: '/v1/view', body: { mode: 'page' } })).status, 401);
+  });
+
   it('refuses large bodies and unknown routes', async () => {
     const big = await request(port, { method: 'POST', pathname: '/v1/tabs', headers: auth(), body: JSON.stringify({ url: 'x'.repeat(20000) }) }).catch(() => ({ status: 413 }));
     assert.equal(big.status, 413);
     assert.equal((await request(port, { pathname: '/v2/x', headers: auth() })).status, 404);
+  });
+});
+
+describe('VM mode: view mode', () => {
+  it('shows the page alone by default, the whole browser on request', () => {
+    assert.equal(viewModeFrom({}), 'page');
+    assert.equal(viewModeFrom({ LASCO_VM_VIEW_MODE: 'desktop' }), 'desktop');
+    assert.equal(viewModeFrom({ LASCO_VM_VIEW_MODE: 'kiosk' }), 'page');
   });
 });
 
