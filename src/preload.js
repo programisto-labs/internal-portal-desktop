@@ -156,8 +156,18 @@ const portalOriginArg = process.argv.find((arg) => arg.startsWith(PORTAL_ORIGIN_
 const portalOrigin = portalOriginArg ? portalOriginArg.slice(PORTAL_ORIGIN_ARG_PREFIX.length) : null;
 /** internal-portal#2373: no agents (VM) ⇒ never a host bridge. */
 const noAgents = process.argv.includes('--lasco-no-agents');
+/** VM mode (docs/vm-mode.md): Desktop's own browser shell, loaded from a `file:` page of the app. */
+const vmMode = process.argv.includes('--lasco-vm');
+const exposeVmShell = vmMode && Boolean(globalThis.location) && globalThis.location.protocol === 'file:';
+const vmShellBridge = {
+  /** Tabs opened by the VM's browser daemon through the control endpoint: `{ tabId, url, active }`. */
+  onTabOpened: (callback) => subscribe('vm-shell-tab-opened', callback),
+  /** A tab the daemon activated: `{ tabId }`. */
+  onTabActivated: (callback) => subscribe('vm-shell-tab-activated', callback),
+  getInfo: () => ipcRenderer.invoke('vm-shell-info'),
+};
 const exposeHostOps =
-  !noAgents && Boolean(portalOrigin) && Boolean(globalThis.location) && globalThis.location.origin === portalOrigin;
+  !vmMode && !noAgents && Boolean(portalOrigin) && Boolean(globalThis.location) && globalThis.location.origin === portalOrigin;
 const hostOpsBridge = {
   getCapabilities: () => ipcRenderer.invoke('host-ops-capabilities'),
   execute: (request) => ipcRenderer.invoke('host-ops-execute', request),
@@ -344,6 +354,7 @@ const desktopBridge = {
     onCommand: (callback) => subscribe('tray-command', callback),
   },
   ...(noAgents && { noAgents: true }),
+  ...(exposeVmShell && { vm: vmShellBridge }),
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposePortalBridges && { downloads: downloadsBridge }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),

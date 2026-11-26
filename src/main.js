@@ -46,6 +46,16 @@ const { createHostOpsStore, createJournal } = require('./host-ops/store');
 const { createHostOpsService } = require('./host-ops/service');
 const { createConfirm } = require('./host-ops/confirm');
 const { isTrustedHostOpsSender } = require('./host-ops/trust');
+const {
+  isVmMode,
+  applyVmSettings,
+  controlPortFrom,
+  writeControlToken,
+  createVmControlServer,
+  cdpTargetIdOf,
+  VM_USER_AGENT_TOKEN,
+  VM_DISABLED_FEATURES,
+} = require('./vm-mode');
 const { createHostOpsWebSettings, buildEnableDialog } = require('./host-ops/web-settings');
 const { createInlineConfirm } = require('./host-ops/inline-confirm');
 const { createHarnessRunner } = require('./code-harness/runner');
@@ -144,7 +154,10 @@ const PORTAL_ORIGIN = new URL(PORTAL_URL).origin;
  * internal-portal#2373: Desktop launched without AI agents (e.g. inside a VM).
  * Host operations are then never exposed: the VM must not become a path to the physical computer.
  */
-const NO_AGENTS = process.argv.includes('--no-agents') || process.env.LASCO_DESKTOP_NO_AGENTS === '1';
+/** Lasco Desktop inside the Lasco computer (docs/vm-mode.md): web tabs only, no portal, no agents. */
+const VM_MODE = isVmMode();
+const NO_AGENTS = VM_MODE || process.argv.includes('--no-agents') || process.env.LASCO_DESKTOP_NO_AGENTS === '1';
+const VM_ARG_FOR_PRELOAD = '--lasco-vm';
 const PORTAL_ORIGIN_ARG_PREFIX = '--lasco-portal-origin=';
 const NO_AGENTS_ARG = '--lasco-no-agents';
 
@@ -568,6 +581,8 @@ function closeSettings() {
 }
 
 function openSettings(section = 'general') {
+  // VM mode: settings are forced, the shell lists them (« Gérée par Lasco »).
+  if (VM_MODE) return;
   const existing = settingsWebContents();
   if (existing) {
     existing.send('settings-modal-show', section);
@@ -652,12 +667,14 @@ function refreshSettings() {
 }
 
 function getSettings() {
-  return getSettingsStore().get();
+  const settings = getSettingsStore().get();
+  return VM_MODE ? applyVmSettings(settings, { downloadsDirectory: app.getPath('downloads') }) : settings;
 }
 
 /** Route a Lasco link (lasco:// or portal URL) to a portal tab when "open links in app" is on. */
 function routePortalLinkInApp(urlString) {
-  if (!getSettings().openLinksInApp) return false;
+  // VM mode: no portal in the window, a portal link is an ordinary web page of the tab.
+  if (VM_MODE || !getSettings().openLinksInApp) return false;
   const target = extractPortalTarget(urlString, isPortalNavigationUrl);
   const win = mainWindowRef;
   if (!target || !win || win.isDestroyed()) return false;
@@ -940,7 +957,8 @@ function buildLascoDesktopUserAgent(baseUserAgent) {
     app.getVersion() +
     ' lasco-desktop/' +
     app.getVersion() +
-    (NO_AGENTS ? ' LascoNoAgents/1' : '')
+    (NO_AGENTS ? ' LascoNoAgents/1' : '') +
+    (VM_MODE ? ` ${VM_USER_AGENT_TOKEN}` : '')
   );
 }
 
@@ -1219,6 +1237,14 @@ function flushPendingWebUrls() {
  * other site in a web tab. Never sent back to the default browser: Lasco may
  * be it, which would loop.
  */
+/** VM mode: a web link given to Desktop (command line, second instance) opens in a web tab of the shell. */
+function queueOrOpenWebUrl(urlString) {
+  const win = app.isReady() ? mainPortalWindow() : null;
+  if (win && !win.webContents.isLoading()) openExternalAsBrowserTab(urlString, win);
+  else pendingWebUrls.push(urlString);
+  if (app.isReady()) showMainWindow();
+}
+
 function handleIncomingWebUrl(urlString) {
   const target = parseLascoOpenTarget(urlString);
   const win = app.isReady() ? mainPortalWindow() : null;
@@ -1242,6 +1268,10 @@ function handleIncomingWebUrl(urlString) {
 /** Any URL the OS opens with Lasco (lasco://, http, https). */
 function handleIncomingUrl(urlString) {
   const kind = classifyIncomingUrl(urlString, LASCO_PROTOCOL);
+  if (VM_MODE) {
+    if (kind === 'web') queueOrOpenWebUrl(urlString);
+    return;
+  }
   if (kind === 'lasco') handleLascoDeepLink(urlString);
   else if (kind === 'web') handleIncomingWebUrl(urlString);
 }
@@ -1330,6 +1360,7 @@ function createWindow({
         `${PORTAL_ORIGIN_ARG_PREFIX}${PORTAL_ORIGIN}`,
         encodeTabWindowArg({ role, initialTab }),
         ...(NO_AGENTS ? [NO_AGENTS_ARG] : []),
+        ...(VM_MODE ? [VM_ARG_FOR_PRELOAD] : []),
       ]
     },
     ...(iconPath && { icon: iconPath })
@@ -1437,7 +1468,7 @@ function createWindow({
   });
 
   win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (!isMainFrame || win.isDestroyed()) return;
+    if (VM_MODE || !isMainFrame || win.isDestroyed()) return;
     // Don't show error page for aborted navigations (e.g. user navigated away)
     if (errorCode === -3) return;
     // A spare that failed to load is useless: the next detach opens a fresh window.
@@ -1457,6 +1488,12 @@ function createWindow({
   });
 
   win.webContents.on('will-navigate', (event, url) => {
+    // VM mode: the shell page never navigates (pages open in web tabs).
+    if (VM_MODE) {
+      event.preventDefault();
+      openExternalAsBrowserTab(url, win);
+      return;
+    }
     if (url === 'retry://reload') {
       event.preventDefault();
       stopAutoRetry();
@@ -1485,7 +1522,10 @@ function createWindow({
     }
   });
 
-  if (spareHref || startHref) {
+  if (VM_MODE) {
+    // Desktop's own browser shell: never the portal, so never a Lasco session in the VM.
+    win.loadFile(path.join(__dirname, 'vm-shell', 'index.html'));
+  } else if (spareHref || startHref) {
     loadMainPortalUrl(win, PORTAL_ORIGIN + (spareHref || startHref));
   } else if (role === 'detached' && initialTab) {
     loadMainPortalUrl(win, PORTAL_ORIGIN + initialTab.locationHref);
@@ -1496,6 +1536,10 @@ function createWindow({
   }
 
   win.webContents.setWindowOpenHandler(({ url }) => {
+    if (VM_MODE) {
+      openExternalAsBrowserTab(url, win);
+      return { action: 'deny' };
+    }
     if (isPortalNavigationUrl(url)) {
       try {
         const target = new URL(url);
@@ -2757,10 +2801,167 @@ function registerWindowIPC() {
   });
 }
 
+/**
+ * VM mode (docs/vm-mode.md): window with Desktop's browser shell, web tabs, downloads and the control endpoint
+ * of the VM's browser daemon. No portal, menu bar icon, update, login item, global shortcut or protocol client.
+ */
+let vmControl = null;
+
+function vmTabManager() {
+  return tabManagerFor(mainPortalWindow());
+}
+
+async function vmTabInfo(manager, tabId) {
+  const state = manager.stateOf(tabId);
+  return {
+    tabId,
+    url: state ? state.url : '',
+    title: state ? state.title : '',
+    active: manager.activeTabId() === tabId,
+    targetId: await cdpTargetIdOf(manager.webContentsOf(tabId)),
+  };
+}
+
+/** Wait until the shell has created the tab (its `browser-tab-open-request` handler). */
+function waitForVmTab(manager, predicate, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const tick = () => {
+      const found = manager.tabIds().find(predicate);
+      if (found) return resolve(found);
+      if (Date.now() - started > timeoutMs) return resolve(null);
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+let vmOpenSeq = 0;
+
+async function vmOpenTab({ url, activate }) {
+  const win = mainPortalWindow() || showMainWindow();
+  const manager = vmTabManager();
+  if (!win || !manager) return { ok: false, error: 'no-window' };
+  const safe = sanitizeBrowserUrl(url);
+  if (!safe) return { ok: false, error: 'invalid-url' };
+  vmOpenSeq += 1;
+  const tabId = `vm-${Date.now().toString(36)}-${vmOpenSeq}`;
+  const created = manager.create({ tabId, url: safe });
+  if (!created.ok) return created;
+  win.webContents.send('vm-shell-tab-opened', { tabId, url: safe, active: activate });
+  if (activate) manager.select({ tabId });
+  return { ok: true, ...(await vmTabInfo(manager, tabId)) };
+}
+
+async function vmActivateTab(tabId) {
+  const win = mainPortalWindow();
+  const manager = vmTabManager();
+  if (!win || !manager || !manager.has(tabId)) return { ok: false, error: 'unknown-tab' };
+  manager.select({ tabId });
+  win.webContents.send('vm-shell-tab-activated', { tabId });
+  return { ok: true, ...(await vmTabInfo(manager, tabId)) };
+}
+
+async function vmActiveTab() {
+  const manager = vmTabManager();
+  if (!manager) return { ok: false, error: 'no-window' };
+  const active = manager.activeTabId();
+  if (active && manager.has(active)) return { ok: true, ...(await vmTabInfo(manager, active)) };
+  // The shell opens its first tab as soon as it is ready: wait for it rather than opening a second one.
+  const existing = manager.tabIds()[0] || (await waitForVmTab(manager, () => true, 3000));
+  if (existing) return vmActivateTab(existing);
+  // No tab yet: open the home page, a page the daemon can drive.
+  return vmOpenTab({ url: vmHomeUrl(), activate: true });
+}
+
+async function vmListTabs() {
+  const manager = vmTabManager();
+  if (!manager) return [];
+  return Promise.all(manager.tabIds().map((tabId) => vmTabInfo(manager, tabId)));
+}
+
+/** First page of the VM browser and of a new tab (`LASCO_VM_HOME_URL`, http(s) only). */
+function vmHomeUrl() {
+  return sanitizeBrowserUrl(process.env.LASCO_VM_HOME_URL || '') || 'https://www.google.com/';
+}
+
+function vmControlTokenPath() {
+  return process.env.LASCO_VM_CONTROL_TOKEN_FILE || path.join(app.getPath('userData'), 'vm-control-token');
+}
+
+async function startVmControl() {
+  const token = writeControlToken(vmControlTokenPath());
+  vmControl = createVmControlServer({
+    token,
+    port: controlPortFrom(process.env),
+    browser: {
+      listTabs: vmListTabs,
+      openTab: vmOpenTab,
+      activateTab: vmActivateTab,
+      activeTab: vmActiveTab,
+    },
+  });
+  try {
+    const address = await vmControl.listen();
+    console.log(`[vm-mode] control endpoint on ${address.address}:${address.port}`);
+  } catch (error) {
+    console.error('[vm-mode] control endpoint unavailable:', error && error.message);
+    vmControl = null;
+  }
+}
+
+/** Same channel as the shortcuts typed in a web page (`browser-tab-shortcut`), run by the shell. */
+function sendVmShellShortcut(action) {
+  const win = mainPortalWindow();
+  if (win && !win.webContents.isDestroyed()) win.webContents.send('browser-tab-shortcut', { action });
+}
+
+function startVmMode() {
+  // Menu bar: Edit (copy / paste) and window commands only, no Réglages.
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
+      {
+        label: 'Fichier',
+        submenu: [
+          { label: 'Nouvel onglet', accelerator: 'CmdOrCtrl+T', click: () => sendVmShellShortcut('new-tab') },
+          { label: 'Fermer l’onglet', accelerator: 'CmdOrCtrl+W', click: () => sendVmShellShortcut('close-tab') },
+        ],
+      },
+      { role: 'editMenu' },
+      { role: 'windowMenu' },
+    ])
+  );
+  getDownloadService().attach(session.fromPartition(BROWSER_PARTITION), 'web');
+  registerWindowIPC();
+  ipcMain.handle('vm-shell-info', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return {
+      ok: true,
+      version: app.getVersion(),
+      downloadsDirectory: getSettings().downloadsDirectory,
+      homeUrl: vmHomeUrl(),
+      disabled: VM_DISABLED_FEATURES,
+    };
+  });
+  createWindow();
+  void startVmControl();
+  // Web links on the command line (`lasco-desktop --vm https://…`).
+  for (const arg of process.argv.slice(1)) {
+    if (classifyIncomingUrl(arg, LASCO_PROTOCOL) === 'web') queueOrOpenWebUrl(arg);
+  }
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', (_event, argv) => {
+    if (VM_MODE) {
+      const web = argv.find((s) => classifyIncomingUrl(s, LASCO_PROTOCOL) === 'web');
+      if (web) queueOrOpenWebUrl(web);
+      else showMainWindow();
+      return;
+    }
     const url = argv.find((s) => classifyIncomingUrl(s, LASCO_PROTOCOL) === 'lasco');
     if (url) handleLascoDeepLink(url);
     else showMainWindow();
@@ -2774,6 +2975,10 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     app.setName('Lasco');
     nativeTheme.themeSource = getSettings().themeSource;
+    if (VM_MODE) {
+      startVmMode();
+      return;
+    }
     registerLascoProtocolClient();
     installApplicationMenu();
 
@@ -2818,6 +3023,10 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    if (vmControl) {
+      void vmControl.close();
+      vmControl = null;
+    }
     if (trayController) {
       trayController.destroy();
       trayController = null;
