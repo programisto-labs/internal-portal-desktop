@@ -23,7 +23,7 @@ Les commandes exécutées dans la VM (`computer_exec`, page malveillante qui pou
 - téléchargements dans le dossier Téléchargements de la VM sans boîte de dialogue ;
 - thème clair, aucun raccourci global.
 
-Désactivés : mises à jour automatiques (l'image fixe la version), icône de la barre des menus, ouverture à la connexion, notifications, client `lasco:`, navigateur par défaut, gestionnaire de mots de passe et remplissage (ils dépendent du Coffre du portail), My Drive, fenêtres détachées, fenêtre Réglages. Le panneau « Ordinateur Lasco » de la coquille les rappelle.
+Désactivés : mises à jour dans la machine (la version suit l'image, reconstruite à chaque release : docs/updates.md), icône de la barre des menus, ouverture à la connexion, notifications, client `lasco:`, navigateur par défaut, gestionnaire de mots de passe et remplissage (ils dépendent du Coffre du portail), My Drive, fenêtres détachées, fenêtre Réglages. Le panneau « Ordinateur Lasco » de la coquille les rappelle.
 
 ## Point de contrôle (démon navigateur de la VM)
 

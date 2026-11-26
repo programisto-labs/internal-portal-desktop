@@ -46,6 +46,7 @@ const { createHostOpsStore, createJournal } = require('./host-ops/store');
 const { createHostOpsService } = require('./host-ops/service');
 const { createConfirm } = require('./host-ops/confirm');
 const { isTrustedHostOpsSender } = require('./host-ops/trust');
+const { createForcedUpdateScheduler } = require('./forced-update');
 const {
   isVmMode,
   applyVmSettings,
@@ -162,7 +163,8 @@ const PORTAL_ORIGIN_ARG_PREFIX = '--lasco-portal-origin=';
 const NO_AGENTS_ARG = '--lasco-no-agents';
 
 const AUTO_RETRY_INTERVAL_MS = 5000;
-const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** Mises à jour imposées (docs/updates.md) : une nouvelle version est vue dans l'heure. */
+const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const APP_VERSION_ARG_PREFIX = '--lasco-app-version=';
 
 const updateState = {
@@ -708,21 +710,43 @@ function setUpdateState(partialState) {
   }
 }
 
-async function promptRestartForUpdate(info) {
-  const versionLabel = info?.version || info?.releaseName || 'a new version';
-  const response = await dialog.showMessageBox({
-    type: 'info',
-    buttons: ['Restart now', 'Later'],
-    defaultId: 0,
-    cancelId: 1,
-    title: 'Lasco Update',
-    message: `Version ${versionLabel} has been downloaded.`,
-    detail: 'Restart the app now to install the update.'
-  });
-
-  if (response.response === 0) {
-    quitAndInstallUpdate();
+/**
+ * Mise à jour imposée (docs/updates.md) : une version téléchargée s'installe toute seule, après un préavis
+ * d'une minute, dès qu'aucun agent, harnais ou confirmation n'est en cours (au plus 2 h d'attente).
+ */
+let forcedUpdate = null;
+function getForcedUpdateScheduler() {
+  if (!forcedUpdate) {
+    forcedUpdate = createForcedUpdateScheduler({
+      isBusy: () => {
+        try {
+          return mainWindowNeedsFullPace(buildTrayView(traySources()));
+        } catch (_) {
+          return false;
+        }
+      },
+      install: () => quitAndInstallUpdate(),
+      notify: ({ version }) => {
+        try {
+          if (!Notification.isSupported()) return;
+          new Notification({
+            title: 'Mise à jour de Lasco',
+            body: version
+              ? `Lasco ${version} s'installe dans une minute : l'application va redémarrer.`
+              : "Une nouvelle version s'installe dans une minute : l'application va redémarrer.",
+            silent: true,
+          }).show();
+        } catch (_) {
+          // notification indisponible : l'installation a lieu quand même
+        }
+      },
+    });
   }
+  return forcedUpdate;
+}
+
+async function promptRestartForUpdate(info) {
+  getForcedUpdateScheduler().onDownloaded(info);
 }
 
 /**
