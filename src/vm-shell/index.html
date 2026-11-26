@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <!-- Desktop's own page (docs/vm-mode.md): no remote script, no frame, no network from the shell itself. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+  <title>Lasco</title>
+  <link rel="stylesheet" href="vm-shell.css" />
+</head>
+<body>
+  <header class="chrome">
+    <div class="tabstrip" role="tablist" aria-label="Onglets" id="tabs"></div>
+    <button class="icon new-tab" id="new-tab" type="button" title="Nouvel onglet (Ctrl+T)" aria-label="Nouvel onglet">+</button>
+    <div class="toolbar">
+      <button class="icon" id="back" type="button" title="Précédent" aria-label="Précédent">&#8592;</button>
+      <button class="icon" id="forward" type="button" title="Suivant" aria-label="Suivant">&#8594;</button>
+      <button class="icon" id="reload" type="button" title="Actualiser (Ctrl+R)" aria-label="Actualiser">&#8635;</button>
+      <form class="omnibox" id="omnibox" autocomplete="off">
+        <span class="lock" id="lock" aria-hidden="true"></span>
+        <input id="address" type="text" spellcheck="false" placeholder="Rechercher ou saisir une adresse" aria-label="Adresse" />
+      </form>
+      <button class="managed" id="managed" type="button" aria-haspopup="dialog" aria-expanded="false">Ordinateur Lasco</button>
+    </div>
+    <div class="managed-panel" id="managed-panel" role="dialog" aria-label="Navigateur géré par Lasco" hidden>
+      <p class="managed-title">Navigateur géré par Lasco</p>
+      <p>Ce navigateur tourne sur votre ordinateur Lasco. Vos agents et vous l'utilisez à distance.</p>
+      <ul>
+        <li>Pas de compte Lasco ouvert ici : vos données Lasco ne sont jamais sur cette machine.</li>
+        <li>Téléchargements : <span id="downloads-dir">dossier Téléchargements</span>, sans confirmation.</li>
+        <li>Réglages, mises à jour, notifications, mots de passe et remplissage automatique désactivés.</li>
+      </ul>
+      <p class="managed-version" id="version"></p>
+    </div>
+  </header>
+  <main class="content" id="content" aria-label="Page"></main>
+  <script src="vm-shell.js"></script>
+</body>
+</html>
