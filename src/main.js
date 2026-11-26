@@ -1320,6 +1320,17 @@ function registerLascoProtocolClient() {
   }
 }
 
+/** Work area of the primary display (the dock excluded when it reserves space), for the VM window. */
+function vmWindowBounds() {
+  try {
+    const { x, y, width, height } = screen.getPrimaryDisplay().workArea;
+    if (width > 0 && height > 0) return { x, y, width, height };
+  } catch (_) {
+    // Screen not ready: Electron's default size, fit-browser.py of the image resizes it.
+  }
+  return {};
+}
+
 /**
  * A portal window. `main` is the usual Lasco window; `detached` holds tabs moved out of
  * another window and opens on `initialTab` (docs/tab-windows.md).
@@ -1349,6 +1360,9 @@ function createWindow({
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
+    // VM mode: the window is the whole desktop of the Lasco computer (docs/vm-mode.md), never a 1280×800
+    // window floating over the wallpaper, also when the VM relaunches Desktop after its window was closed.
+    ...(VM_MODE && !bounds ? vmWindowBounds() : {}),
     ...(bounds || {}),
     /* Compact floor ~ Spotify desktop; sidebar auto-collapses in the web shell below ~1100px. */
     minWidth: 800,
