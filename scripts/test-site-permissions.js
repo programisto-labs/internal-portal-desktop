@@ -154,7 +154,15 @@ describe('autorisations des sites', () => {
       },
     });
     const meet = tab('https://meet.google.com/abc');
+    // Noms des appareils (enumerateDevices, sans embeddingOrigin) : cachés avant « Autoriser ».
     assert.equal(handlers.check(meet, 'media', 'https://meet.google.com', { mediaType: 'audio' }), false);
+    // navigator.permissions.query : « accordé » tant que rien n'est décidé, pour que le site
+    // appelle getUserMedia (sinon Meet conclut à un blocage et ne demande jamais).
+    const query = (wc, mediaType) =>
+      handlers.check(wc, 'media', 'https://meet.google.com', { mediaType, embeddingOrigin: 'https://meet.google.com/' });
+    assert.equal(query(meet, 'audio'), true);
+    assert.equal(query(meet, 'video'), true);
+    assert.equal(asked.length, 0);
     assert.equal(await request(handlers, meet, 'media', { mediaTypes: ['audio', 'video'] }), true);
     assert.equal(asked.length, 1);
     assert.equal(asked[0].label, 'utiliser votre micro et votre caméra');
@@ -172,11 +180,25 @@ describe('autorisations des sites', () => {
     store.set('https://visio.example', 'camera', 'block');
     assert.equal(await request(handlers, other, 'media', { mediaTypes: ['audio', 'video'] }), false);
     assert.equal(asked.length, 1);
+    const visioQuery = (mediaType) =>
+      handlers.check(other, 'media', 'https://visio.example', { mediaType, embeddingOrigin: 'https://visio.example/' });
+    assert.equal(visioQuery('video'), false);
+    assert.equal(visioQuery('audio'), true);
     answer = 'block';
     assert.equal(await request(handlers, other, 'media', { mediaTypes: ['audio'] }), false);
     assert.equal(asked.length, 2);
     assert.equal(asked[1].label, 'utiliser votre micro');
     assert.equal(store.get('https://visio.example', 'microphone'), 'block');
+    assert.equal(visioQuery('audio'), false);
+
+    // « Ignorer » : refusé jusqu'au redémarrage, la lecture synchrone aussi.
+    answer = 'dismiss';
+    const third = tab('https://call.example/');
+    assert.equal(await request(handlers, third, 'media', { mediaTypes: ['audio'] }), false);
+    assert.equal(
+      handlers.check(third, 'media', 'https://call.example', { mediaType: 'audio', embeddingOrigin: 'https://call.example/' }),
+      false,
+    );
   });
 
   it("refuse le micro si macOS le refuse à l'app, et une demande média sans type", async () => {

@@ -288,12 +288,24 @@ function createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess = as
       topOriginOf(webContents, null) ||
       siteOrigin(requestingOrigin);
     if (permission === 'media') {
-      // `mediaType` : `audio`, `video`, ou `unknown` (noms des appareils dans enumerateDevices).
+      // `mediaType` : `audio`, `video`, ou `unknown`.
       const site = origin();
       if (!site) return false;
       const type = details && details.mediaType;
       const wanted = MEDIA_TYPE_PERMISSIONS[type] ? [MEDIA_TYPE_PERMISSIONS[type]] : ['microphone', 'camera'];
-      return wanted.some((p) => store.get(site, p) === 'allow');
+      if (wanted.some((p) => store.get(site, p) === 'allow')) return true;
+      // `navigator.permissions.query({ name: 'camera' | 'microphone' })` (seul appel qui porte
+      // `embeddingOrigin`) : Electron ne sait répondre que « accordé » ou « refusé », jamais « à
+      // demander ». Sans décision, « refusé » faisait conclure à Google Meet que l'accès était
+      // bloqué : il n'appelait jamais getUserMedia, donc la question de Lasco n'apparaissait pas.
+      // Tant que rien n'est bloqué ni ignoré, on répond « accordé » : le site appelle getUserMedia
+      // et la demande passe par `request`, qui pose la question. Les noms des appareils
+      // (enumerateDevices, sans `embeddingOrigin`) restent cachés jusqu'à « Autoriser ».
+      if (!details || !details.embeddingOrigin || !MEDIA_TYPE_PERMISSIONS[type]) return false;
+      const target = MEDIA_TYPE_PERMISSIONS[type];
+      if (store.get(site, target) === 'block') return false;
+      if (store.isDismissed && store.isDismissed(site, target)) return false;
+      return true;
     }
     const policy = permissionPolicy(permission);
     if (policy !== 'ask') return policy === 'allow';
