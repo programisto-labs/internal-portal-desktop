@@ -88,6 +88,7 @@ function setup(overrides = {}) {
     emit: (e) => events.push(e),
     getSession: () => ({ downloadURL: (u) => downloadedUrls.push(u) }),
     setProgress: (f) => progress.push(f),
+    onStarted: overrides.onStarted,
     randomId: () => `d${++n}`,
   });
   return { service, existing, events, opened, shown, progress, downloadedUrls };
@@ -217,5 +218,25 @@ describe('download service', () => {
     blob.cancel();
     const blobId = service.list().items.find((r) => r.url.startsWith('blob:')).id;
     assert.equal(service.retry({ id: blobId }).error, 'not-retryable');
+  });
+});
+
+describe('download start in a page', () => {
+  it('tells which page started the download', () => {
+    const started = [];
+    const { service } = setup({ onStarted: (e) => started.push(e) });
+    const session = new EventEmitter();
+    service.attach(session, 'web');
+    const page = { id: 7 };
+    session.emit('will-download', {}, new FakeItem(), page);
+    assert.deepEqual(started, [{ webContents: page, source: 'web' }]);
+    assert.equal(service.list().items.length, 1);
+  });
+  it('keeps the download when the page hook throws', () => {
+    const { service } = setup({ onStarted: () => { throw new Error('boom'); } });
+    const session = new EventEmitter();
+    service.attach(session, 'web');
+    session.emit('will-download', {}, new FakeItem(), { id: 1 });
+    assert.equal(service.list().items.length, 1);
   });
 });
