@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.11.0](https://github.com/programisto-labs/internal-portal-desktop/compare/v2.10.3...v2.11.0) (2026-11-27)
+
+
+### Nouveautés
+
+* **onglets web:** réglages des autorisations des sites, comme Chrome / Brave ([c77865a](https://github.com/programisto-labs/internal-portal-desktop/commit/c77865ab257a423bf271a0aa3bb177aee5aa5ac3))
+* **onglets web:** réglages des autorisations des sites, comme Chrome / Brave ([7466f5c](https://github.com/programisto-labs/internal-portal-desktop/commit/7466f5ca0bbb065eda7a9f0ba43afd4e8927b908))
+
 ## [2.10.3](https://github.com/programisto-labs/internal-portal-desktop/compare/v2.10.2...v2.10.3) (2026-11-27)
 
 
