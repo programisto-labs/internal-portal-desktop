@@ -56,6 +56,12 @@ const {
 } = require('./search-engines');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const {
+  assertInMemoryPartition,
+  createPrivateSitePermissions,
+  PRIVATE_DENIED_TAB_METHODS,
+  wipePrivateSession,
+} = require('../private-window/rules');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
 const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.js');
@@ -272,15 +278,16 @@ function sharedSitePermissions() {
 /** webContents id d'un onglet web → fenêtre qui l'affiche (pour poser la question dans la bonne fenêtre). */
 const tabWindowGetters = new Map();
 
-async function askSitePermission({ origin, label, webContents }) {
+async function askSitePermission({ origin, label, webContents }, { privateMode = false } = {}) {
   const getWindow = webContents ? tabWindowGetters.get(webContents.id) : null;
   const candidate = (getWindow && getWindow()) || BrowserWindow.getFocusedWindow();
   const win = candidate && !candidate.isDestroyed() ? candidate : null;
   const options = {
     type: 'question',
     message: `${siteHost(origin)} souhaite ${label}`,
-    detail:
-      "Votre choix est retenu pour ce site. Vous pourrez le modifier depuis l'icône à gauche de l'adresse.",
+    detail: privateMode
+      ? "Fenêtre de navigation privée : votre choix vaut jusqu'à sa fermeture, il n'est pas retenu."
+      : "Votre choix est retenu pour ce site. Vous pourrez le modifier depuis l'icône à gauche de l'adresse.",
     buttons: ['Autoriser', 'Bloquer', 'Ignorer'],
     defaultId: 2,
     cancelId: 2,
@@ -299,11 +306,34 @@ function isBlankDownloadTab({ url, canGoBack }) {
   return !url || url === 'about:blank';
 }
 
-function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines }) {
-  const historyStore =
-    history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
+/**
+ * `partition` / `privateMode` : fenêtre de navigation privée (docs/private-browsing.md). Session en mémoire
+ * propre à la fenêtre, historique, autorisations et applications externes en mémoire, ni mots de passe,
+ * ni saisie automatique, ni pilotage par un agent. `onPortalUrl(url)` : une adresse de Lasco ouverte dans un
+ * onglet privé part dans la fenêtre principale (`isPortalUrl` la reconnaît), jamais dans l'onglet.
+ */
+function createBrowserTabManager({
+  getMainWindow,
+  history,
+  interceptLink,
+  searchEngines,
+  partition = BROWSER_PARTITION,
+  privateMode = false,
+  isPortalUrl = null,
+  onPortalUrl = null,
+}) {
+  const browserPartition = privateMode ? assertInMemoryPartition(partition) : partition;
+  const historyStore = privateMode
+    ? createHistoryStore({})
+    : history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
+  /** Onglet privé : une page de Lasco s'ouvre dans la fenêtre principale. Vrai si l'adresse a été déviée. */
+  const divertPortalUrl = (url) => {
+    if (!privateMode || typeof isPortalUrl !== 'function' || !isPortalUrl(url)) return false;
+    if (typeof onPortalUrl === 'function') onPortalUrl(url);
+    return true;
+  };
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
-  const externalAppPermissions = sharedExternalAppPermissions();
+  const externalAppPermissions = privateMode ? createExternalAppPermissionStore({}) : sharedExternalAppPermissions();
   const externalApps = createExternalAppLauncher({
     shell,
     showMessageBox: (...args) => dialog.showMessageBox(...args),
@@ -311,7 +341,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     getParentWindow: () => getMainWindow(),
     permissions: externalAppPermissions,
   });
-  const sitePermissions = sharedSitePermissions();
+  const sitePermissions = privateMode
+    ? createPrivateSitePermissions({ memory: createSitePermissionStore({}), base: sharedSitePermissions() })
+    : sharedSitePermissions();
   const userAgent = buildChromiumUserAgent();
   let sessionConfigured = false;
   /** Plein écran demandé par une page (vidéo) : la fenêtre était-elle déjà en plein écran ? */
@@ -473,7 +505,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function getBrowserSession() {
-    const browserSession = session.fromPartition(BROWSER_PARTITION);
+    const browserSession = session.fromPartition(browserPartition);
     if (!sessionConfigured) {
       sessionConfigured = true;
       browserSession.setUserAgent(userAgent, buildAcceptLanguages(app.getPreferredSystemLanguages()));
@@ -482,7 +514,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // Autorisations des sites : demandées puis retenues par site, jamais le micro ni la caméra.
       installSitePermissions(browserSession, {
         store: sitePermissions,
-        ask: askSitePermission,
+        ask: (request) => askSitePermission(request, { privateMode }),
         ensureSystemMediaAccess: (media) => ensureSystemMediaAccess(systemPreferences, media),
       });
       // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
@@ -836,6 +868,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
     wc.setWindowOpenHandler(({ url, disposition }) => {
       if (launchExternalApp(url)) return { action: 'deny' };
+      if (divertPortalUrl(url)) return { action: 'deny' };
       const safe = sanitizeBrowserUrl(url);
       if (safe && typeof interceptLink === 'function' && interceptLink(safe)) {
         return { action: 'deny' };
@@ -868,6 +901,10 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     });
 
     wc.on('will-navigate', (event, url) => {
+      if (divertPortalUrl(url)) {
+        event.preventDefault();
+        return;
+      }
       const safe = sanitizeBrowserUrl(url);
       if (!safe) {
         event.preventDefault();
@@ -876,6 +913,10 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     });
 
     wc.on('will-redirect', (event, url) => {
+      if (divertPortalUrl(url)) {
+        event.preventDefault();
+        return;
+      }
       const safe = sanitizeBrowserUrl(url);
       if (!safe) {
         event.preventDefault();
@@ -1190,8 +1231,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       sandbox: true,
       webSecurity: true,
       // Password manager runtime (main frame only, isolated world, exposes nothing to the
-      // page): untrusted web content never reaches Electron APIs.
-      preload: PASSWORD_PRELOAD,
+      // page): untrusted web content never reaches Electron APIs. Never in a private window.
+      ...(privateMode ? {} : { preload: PASSWORD_PRELOAD }),
       allowRunningInsecureContent: false,
       spellcheck: true,
     };
@@ -1288,6 +1329,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (typeof tabId !== 'string' || !tabId.trim()) {
       return { ok: false, error: 'invalid-tab-id' };
     }
+    if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
     const safe = sanitizeBrowserUrl(url);
     if (!safe) return { ok: false, error: 'invalid-url' };
 
@@ -1299,6 +1341,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function navigate({ tabId, url }) {
+    if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
     const entry = tabs.get(tabId);
     const safe = sanitizeBrowserUrl(url);
     if (!safe) return { ok: false, error: 'invalid-url' };
@@ -1740,7 +1783,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   /** Moteur déclaré par la page (OpenSearch), ajouté aux raccourcis de la barre d'adresse. */
   async function discoverSearchEngine(tabId, wc) {
-    if (!searchEngines || wc.isDestroyed()) return;
+    // Fenêtre privée : aucun site visité n'est retenu, même comme raccourci de recherche.
+    if (privateMode || !searchEngines || wc.isDestroyed()) return;
     const entry = tabs.get(tabId);
     const pageUrl = sanitizeBrowserUrl(wc.getURL());
     if (!pageUrl || (entry && entry.errorPage)) return;
@@ -1992,7 +2036,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     return true;
   }
 
-  return {
+  const api = {
     create,
     setAdoptPopups,
     navigate,
@@ -2050,6 +2094,19 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     },
     stateOf: (tabId) => buildState(tabId),
   };
+  if (privateMode) {
+    // Fenêtre privée : ni mots de passe, ni saisie automatique, ni agent, ni historique du navigateur normal.
+    for (const method of PRIVATE_DENIED_TAB_METHODS) {
+      if (typeof api[method] === 'function') api[method] = () => ({ ok: false, error: 'private-window' });
+    }
+  }
+  api.isPrivate = privateMode;
+  /** Fermeture d'une fenêtre privée : vues détruites, puis cookies, cache et stockage de sa session effacés. */
+  api.destroySession = async () => {
+    destroyAll();
+    if (privateMode) await wipePrivateSession(session.fromPartition(browserPartition));
+  };
+  return api;
 }
 
 module.exports = {

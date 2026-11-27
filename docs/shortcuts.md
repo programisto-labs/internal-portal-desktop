@@ -5,6 +5,7 @@ La page du portail gère ses raccourcis (`lib/portal-tabs/shortcuts.ts` du porta
 | Touches (macOS / Windows, Linux) | Action | Où |
 | --- | --- | --- |
 | ⌘N / Ctrl+N | Nouvelle fenêtre sur un nouvel onglet | Menu Fichier (vrai raccourci natif) |
+| ⌘⇧N / Ctrl+Maj+N | Nouvelle fenêtre de navigation privée (docs/private-browsing.md) | Menu Fichier (vrai raccourci natif) |
 | ⌘1–8, ⌘9 / Ctrl+1–8, Ctrl+9 | Onglet N, dernier onglet | Relayé |
 | ⌃Tab, ⌃⇧Tab, ⌘⌥→ / ⌘⌥←, ⌘⇧] / ⌘⇧[ | Onglet suivant / précédent | Relayé |
 | ⌘⌥1–9 / Ctrl+Maj+1–9 | Agent N de la colonne Lasco AI | Relayé |
