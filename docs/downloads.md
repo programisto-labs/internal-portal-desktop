@@ -9,6 +9,10 @@ Lasco Desktop enregistre lui-même les fichiers téléchargés depuis les onglet
 - `src/downloads/service.js` : `will-download` des sessions `persist:browser-tabs` (`source: 'web'`) et `persist:portal` (`source: 'portal'`), progression (envoi toutes les 250 ms au plus), actions par identifiant.
 - `src/main.js` : branchement, IPC, Réglages ; progression dans le Dock / la barre des tâches (`setProgressBar`), rebond de la pile Téléchargements (`app.dock.downloadFinished`).
 
+## Fichiers créés par Lasco
+
+Une capture d'écran (docs/page-capture.md) passe par `saveFile` du service : même dossier, même nommage sans écraser, ajoutée à la liste comme un téléchargement terminé.
+
 ## Onglet ouvert seulement pour un fichier
 
 Un lien `target="_blank"` vers un fichier (aperçu d'image du portail, lien S3…) ouvre un onglet web dont la navigation devient un téléchargement : aucune page ne s'y affiche. Comme Chrome, cet onglet est fermé dès le début du téléchargement (`closeIfBlankAfterDownload` du gestionnaire d'onglets, appelé par `onStarted` du service) et le portail revient à l'onglet d'origine (`browser-tab-closed`, comme un `window.close()`). Le téléchargement continue : il appartient à la session. Un onglet qui affichait déjà une page, ou qui en a une derrière (Précédent), reste ouvert.

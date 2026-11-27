@@ -30,6 +30,7 @@ const RETRY_PROTOCOLS = new Set(['http:', 'https:']);
  *   (docs/safe-browsing.md) → { verdict: 'safe' | 'dangerous' | 'check', threat?, check?() }.
  *   A dangerous file is never written: cancelled, listed with `error: 'dangerous'`, and only
  *   downloaded again by « Conserver quand même » (`keepDangerous`).
+ * - writeFile(path, data): file made by Lasco itself (screenshot, docs/page-capture.md)
  */
 function createDownloadService({
   store,
@@ -63,6 +64,7 @@ function createDownloadService({
   },
   now = () => Date.now(),
   randomId = () => crypto.randomUUID(),
+  writeFile = (p, data) => fs.writeFileSync(p, data, { flag: 'wx' }),
 }) {
   /** id → { item, record, timer } */
   const live = new Map();
@@ -318,6 +320,44 @@ function createDownloadService({
     });
   }
 
+  /**
+   * File made by Lasco (screenshot) : written in the downloads folder with the same naming
+   * (never overwrites) and added to the list as a finished download.
+   */
+  function saveFile({ name, data, mimeType = '', url = '', source = 'web' } = {}) {
+    const dir = chooseDirectory();
+    if (!dir || !data) return { ok: false, error: 'no-directory' };
+    const savePath = uniqueSavePath(dir, sanitizeFilename(name), (p) => reserved.has(p) || fileExists(p));
+    try {
+      writeFile(savePath, data);
+    } catch (_) {
+      return { ok: false, error: 'write-failed' };
+    }
+    const at = now();
+    const saved = store.upsert({
+      id: randomId(),
+      url,
+      filename: path.basename(savePath),
+      savePath,
+      mimeType,
+      totalBytes: data.length,
+      receivedBytes: data.length,
+      state: 'completed',
+      paused: false,
+      canResume: false,
+      bytesPerSecond: 0,
+      startTime: at,
+      endTime: at,
+      source,
+      error: null,
+    });
+    if (!saved) return { ok: false, error: 'write-failed' };
+    const item = publicRecord(saved);
+    emit({ type: 'upsert', item });
+    onFinished(savePath);
+    return { ok: true, item };
+  }
+
   // --- Actions of the page (by id: the page never names a path) ---
 
   function list(payload = {}) {
@@ -420,6 +460,7 @@ function createDownloadService({
   return {
     attach,
     handleDownload,
+    saveFile,
     list,
     pause,
     resume,

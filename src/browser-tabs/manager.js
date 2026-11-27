@@ -4,6 +4,7 @@ const {
   app,
   BrowserWindow,
   WebContentsView,
+  nativeImage,
   session,
   clipboard,
   ClipboardItem,
@@ -36,12 +37,28 @@ const {
 } = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
-const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
+const { createAdblockService } = require('./adblock');
+const { applyChromeIdentity, chromeUserAgentOverride, installClientHintHeaders } = require('./chrome-identity');
+const {
+  installDevtoolsResponsive,
+  registerResponsiveRoute,
+  unregisterResponsiveRoute,
+  createTabResponsive,
+} = require('./devtools-responsive');
 const { createPasswordController } = require('./passwords');
 const { createPasswordPopover } = require('./password-popover');
 const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-autofill');
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
+const { capturePageImage } = require('./page-capture');
+const {
+  PAGE_SLEEP_PROBE_SCRIPT,
+  PRELOAD_WORLD_ID,
+  resolveTabSleepDelayMs,
+  selectTabsToSleep,
+  tabSleepBlocker,
+  tabSleepCheckIntervalMs,
+} = require('./tab-sleep');
 const {
   BUILTIN_ENGINES,
   MAX_DESCRIPTION_BYTES,
@@ -51,12 +68,19 @@ const {
 } = require('./search-engines');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const {
+  assertInMemoryPartition,
+  createPrivateSitePermissions,
+  PRIVATE_DENIED_TAB_METHODS,
+  wipePrivateSession,
+} = require('../private-window/rules');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
 const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.js');
 const PASSWORD_POPOVER_PAGE = path.join(__dirname, 'password-popover.html');
 
 const BROWSER_PARTITION = 'persist:browser-tabs';
+const ADBLOCK_PUSH_DELAY_MS = 500;
 const STATE_CHANNEL = 'browser-tab-state';
 const OPEN_REQUEST_CHANNEL = 'browser-tab-open-request';
 const CLOSED_CHANNEL = 'browser-tab-closed';
@@ -68,6 +92,14 @@ const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1
 const AGENT_WORLD_ID = 1001;
 /** Monde isolé où Desktop lit la description OpenSearch d'une page (docs/search-engines.md). */
 const SEARCH_WORLD_ID = 1003;
+/** Monde isolé du défilement rétabli après la veille (le relevé tourne dans celui du preload). */
+const SLEEP_WORLD_ID = 1004;
+const SLEEP_PROBE_TIMEOUT_MS = 2000;
+/**
+ * webContents qui ont reçu le micro ou la caméra (session partagée par toutes les fenêtres) : une
+ * page en appel, même silencieuse, n'est jamais mise en veille. Oublié à la navigation suivante.
+ */
+const mediaCapturingWebContents = new Set();
 const SEARCH_DESCRIPTION_TIMEOUT_MS = 5000;
 const FALLBACK_SEARCH_ENGINE = BUILTIN_ENGINES[0];
 
@@ -264,18 +296,28 @@ function sharedSitePermissions() {
   return sitePermissionStore;
 }
 
+/** Bloqueur de pubs et de traqueurs (docs/adblock.md) : un moteur et une session pour toutes les fenêtres. */
+let adblockService = null;
+function sharedAdblock() {
+  if (!adblockService) {
+    adblockService = createAdblockService({ userDataDir: app.getPath('userData'), electron: require('electron') });
+  }
+  return adblockService;
+}
+
 /** webContents id d'un onglet web → fenêtre qui l'affiche (pour poser la question dans la bonne fenêtre). */
 const tabWindowGetters = new Map();
 
-async function askSitePermission({ origin, label, webContents }) {
+async function askSitePermission({ origin, label, webContents }, { privateMode = false } = {}) {
   const getWindow = webContents ? tabWindowGetters.get(webContents.id) : null;
   const candidate = (getWindow && getWindow()) || BrowserWindow.getFocusedWindow();
   const win = candidate && !candidate.isDestroyed() ? candidate : null;
   const options = {
     type: 'question',
     message: `${siteHost(origin)} souhaite ${label}`,
-    detail:
-      "Votre choix est retenu pour ce site. Vous pourrez le modifier depuis l'icône à gauche de l'adresse.",
+    detail: privateMode
+      ? "Fenêtre de navigation privée : votre choix vaut jusqu'à sa fermeture, il n'est pas retenu."
+      : "Votre choix est retenu pour ce site. Vous pourrez le modifier depuis l'icône à gauche de l'adresse.",
     buttons: ['Autoriser', 'Bloquer', 'Ignorer'],
     defaultId: 2,
     cancelId: 2,
@@ -297,11 +339,36 @@ function isBlankDownloadTab({ url, canGoBack }) {
 /** Textes de la page « Site dangereux », envoyés par le portail (communs à toutes les fenêtres). */
 let safeBrowsingTexts = null;
 
-function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines, safeBrowsing = null }) {
-  const historyStore =
-    history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
+/**
+ * `partition` / `privateMode` : fenêtre de navigation privée (docs/private-browsing.md). Session en mémoire
+ * propre à la fenêtre, historique, autorisations et applications externes en mémoire, ni mots de passe,
+ * ni saisie automatique, ni pilotage par un agent. `onPortalUrl(url)` : une adresse de Lasco ouverte dans un
+ * onglet privé part dans la fenêtre principale (`isPortalUrl` la reconnaît), jamais dans l'onglet.
+ */
+function createBrowserTabManager({
+  getMainWindow,
+  history,
+  interceptLink,
+  searchEngines,
+  getTabSleepSettings,
+  safeBrowsing = null,
+  partition = BROWSER_PARTITION,
+  privateMode = false,
+  isPortalUrl = null,
+  onPortalUrl = null,
+}) {
+  const browserPartition = privateMode ? assertInMemoryPartition(partition) : partition;
+  const historyStore = privateMode
+    ? createHistoryStore({})
+    : history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
+  /** Onglet privé : une page de Lasco s'ouvre dans la fenêtre principale. Vrai si l'adresse a été déviée. */
+  const divertPortalUrl = (url) => {
+    if (!privateMode || typeof isPortalUrl !== 'function' || !isPortalUrl(url)) return false;
+    if (typeof onPortalUrl === 'function') onPortalUrl(url);
+    return true;
+  };
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
-  const externalAppPermissions = sharedExternalAppPermissions();
+  const externalAppPermissions = privateMode ? createExternalAppPermissionStore({}) : sharedExternalAppPermissions();
   const externalApps = createExternalAppLauncher({
     shell,
     showMessageBox: (...args) => dialog.showMessageBox(...args),
@@ -309,7 +376,19 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     getParentWindow: () => getMainWindow(),
     permissions: externalAppPermissions,
   });
-  const sitePermissions = sharedSitePermissions();
+  const sitePermissions = privateMode
+    ? createPrivateSitePermissions({ memory: createSitePermissionStore({}), base: sharedSitePermissions() })
+    : sharedSitePermissions();
+  const adblock = sharedAdblock();
+  // Interrupteur ou exception changés (Réglages, informations du site) : l'état des onglets suit.
+  const stopAdblockListener = adblock.settings.onChange(() => {
+    // Fenêtre fermée : plus rien à mettre à jour.
+    if (!getMainWindow()) {
+      stopAdblockListener();
+      return;
+    }
+    for (const tabId of tabs.keys()) pushState(tabId);
+  });
   const userAgent = buildChromiumUserAgent();
   let sessionConfigured = false;
   /** Plein écran demandé par une page (vidéo) : la fenêtre était-elle déjà en plein écran ? */
@@ -332,6 +411,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   const agentControlled = new Set();
   /** webContents id → tab id, to route the password messages of a page to its tab. */
   const tabIdsByWebContents = new Map();
+  /**
+   * Onglets en veille (docs/tab-sleep.md) : leur vue est détruite, il reste de quoi les rouvrir à
+   * l'identique. tabId → { url, title, favicon, entries, index, scroll, zoomFactor, muted, sleptAt }.
+   */
+  const sleepingTabs = new Map();
+  let sleepTimer = null;
 
   const passwords = createPasswordController({
     emit: (channel, payload) => emitToRenderer(channel, payload),
@@ -471,7 +556,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function getBrowserSession() {
-    const browserSession = session.fromPartition(BROWSER_PARTITION);
+    const browserSession = session.fromPartition(browserPartition);
     if (!sessionConfigured) {
       sessionConfigured = true;
       browserSession.setUserAgent(userAgent, buildAcceptLanguages(app.getPreferredSystemLanguages()));
@@ -480,9 +565,16 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // Autorisations des sites : demandées puis retenues par site, jamais le micro ni la caméra.
       installSitePermissions(browserSession, {
         store: sitePermissions,
-        ask: askSitePermission,
+        ask: (request) => askSitePermission(request, { privateMode }),
         ensureSystemMediaAccess: (media) => ensureSystemMediaAccess(systemPreferences, media),
+        onMediaGranted: (webContents) => {
+          if (webContents && !webContents.isDestroyed()) mediaCapturingWebContents.add(webContents.id);
+        },
       });
+      // Bloqueur de pubs et de traqueurs : cette session seulement, jamais persist:portal.
+      adblock.install(browserSession);
+      // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
+      void installDevtoolsResponsive(browserSession);
     }
     return browserSession;
   }
@@ -521,6 +613,36 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // Son de l'onglet (icône haut-parleur de la barre d'onglets, comme Chrome).
       audible: wc.isCurrentlyAudible(),
       muted: wc.isAudioMuted(),
+      // Bloqueur (docs/adblock.md) : actif sur cette page, requêtes bloquées depuis son chargement.
+      adblock: { active: adblock.isActiveFor(url), blocked: entry.adblockBlocked || 0 },
+      // Mis en veille pour libérer la mémoire (lune sur l'onglet) : voir sleepingState.
+      discarded: false,
+    };
+  }
+
+  /** État d'un onglet en veille : la barre d'onglets garde titre, icône et adresse. */
+  function sleepingState(tabId) {
+    const slept = sleepingTabs.get(tabId);
+    if (!slept) return null;
+    const count = Array.isArray(slept.entries) ? slept.entries.length : 0;
+    return {
+      tabId,
+      url: slept.url,
+      title: slept.title || slept.url,
+      favicon: slept.favicon || null,
+      canGoBack: slept.index > 0,
+      canGoForward: count > 0 && slept.index < count - 1,
+      isLoading: false,
+      zoomFactor: slept.zoomFactor || 1,
+      security: securityStateOf(slept.url, null),
+      pageError: null,
+      htmlFullscreen: false,
+      agentControlled: false,
+      audible: false,
+      muted: Boolean(slept.muted),
+      discarded: true,
+      sleptAt: slept.sleptAt,
+      adblock: { active: adblock.isActiveFor(slept.url), blocked: 0 },
     };
   }
 
@@ -567,12 +689,17 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       view.setVisible(false);
       return;
     }
-    view.setBounds({
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.round(width),
-      height: Math.round(height),
-    });
+    // Mode responsive : la vue prend la taille de l'appareil, centrée sur son fond.
+    if (fullscreenEntry && fullscreenEntry.responsive && fullscreenEntry.responsive.active()) {
+      fullscreenEntry.responsive.layout(lastBounds);
+    } else {
+      view.setBounds({
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(width),
+        height: Math.round(height),
+      });
+    }
     let abortedBlank = false;
     for (const entry of tabs.values()) {
       if (entry.view === view) {
@@ -589,6 +716,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   function detachView(view) {
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
+    const responsive = entryOfView(view)?.responsive;
+    if (responsive) responsive.detachFrom(win);
     try {
       win.contentView.removeChildView(view);
     } catch (_) {
@@ -600,6 +729,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
     try {
+      // Mode responsive : le fond gris passe juste sous la vue.
+      const responsive = entryOfView(view)?.responsive;
+      if (responsive) responsive.attachTo(win);
       // Re-adding moves the view to the top of the stacking order.
       win.contentView.addChildView(view);
     } catch (_) {
@@ -623,6 +755,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (entry.hangDialog) entry.hangDialog.abort();
     const { view } = entry;
     detachView(view);
+    if (entry.responsive) entry.responsive.dispose();
+    if (!view.webContents.isDestroyed()) unregisterResponsiveRoute(view.webContents.id);
     const wc = view.webContents;
     if (!wc.isDestroyed()) {
       try {
@@ -665,6 +799,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function destroyAll() {
+    if (sleepTimer) clearTimeout(sleepTimer);
+    sleepTimer = null;
+    sleepingTabs.clear();
     for (const tabId of [...tabs.keys()]) {
       destroyTab(tabId);
     }
@@ -921,12 +1058,35 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const webContentsId = wc.id;
     tabIdsByWebContents.set(webContentsId, tabId);
     tabWindowGetters.set(webContentsId, getMainWindow);
+    // Requêtes bloquées par le bloqueur : comptées par page, état poussé au plus deux fois par seconde.
+    adblock.trackTab(webContentsId, () => {
+      const entry = tabs.get(tabId);
+      if (!entry || entry.view !== view) return;
+      entry.adblockBlocked = (entry.adblockBlocked || 0) + 1;
+      if (entry.adblockPushTimer) return;
+      entry.adblockPushTimer = setTimeout(() => {
+        entry.adblockPushTimer = null;
+        if (!wc.isDestroyed()) pushState(tabId);
+      }, ADBLOCK_PUSH_DELAY_MS);
+    });
+    wc.on('did-start-navigation', (details) => {
+      if (!details || !details.isMainFrame || details.isSameDocument) return;
+      const entry = tabs.get(tabId);
+      if (entry && entry.view === view) entry.adblockBlocked = 0;
+    });
+    registerResponsiveRoute(webContentsId, (message) => handleResponsiveMessage(tabId, message));
+    wc.once('destroyed', () => unregisterResponsiveRoute(webContentsId));
+    // Comme le mode appareil de Chrome : fermer les DevTools rend la page à tout l'onglet.
+    wc.on('devtools-closed', () => {
+      void setResponsive(tabId, null);
+    });
 
     const launchExternalApp = (url) =>
       externalApps.launch({ url, pageUrl: wc.getURL(), key: `tab:${tabId}` });
 
     wc.setWindowOpenHandler(({ url, disposition }) => {
       if (launchExternalApp(url)) return { action: 'deny' };
+      if (divertPortalUrl(url)) return { action: 'deny' };
       const safe = sanitizeBrowserUrl(url);
       if (safe && typeof interceptLink === 'function' && interceptLink(safe)) {
         return { action: 'deny' };
@@ -959,6 +1119,10 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     });
 
     wc.on('will-navigate', (event, url) => {
+      if (divertPortalUrl(url)) {
+        event.preventDefault();
+        return;
+      }
       const safe = sanitizeBrowserUrl(url);
       if (!safe) {
         event.preventDefault();
@@ -967,6 +1131,10 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     });
 
     wc.on('will-redirect', (event, url) => {
+      if (divertPortalUrl(url)) {
+        event.preventDefault();
+        return;
+      }
       const safe = sanitizeBrowserUrl(url);
       if (!safe) {
         event.preventDefault();
@@ -1043,6 +1211,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       }
       passwords.onNavigate(tabId, url);
       formAutofill.onNavigate(tabId, url);
+      mediaCapturingWebContents.delete(webContentsId);
       historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
     });
@@ -1081,7 +1250,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       if (isCurrentTabView(tabs, tabId, view)) leavePageFullscreen(tabId);
     });
     wc.on('destroyed', () => {
+      adblock.untrackTab(webContentsId);
+      const adblockEntry = tabs.get(tabId);
+      if (adblockEntry && adblockEntry.view === view && adblockEntry.adblockPushTimer) {
+        clearTimeout(adblockEntry.adblockPushTimer);
+        adblockEntry.adblockPushTimer = null;
+      }
       tabIdsByWebContents.delete(webContentsId);
+      mediaCapturingWebContents.delete(webContentsId);
       tabWindowGetters.delete(webContentsId);
       // `create` on a live tab id (shell reloaded, e.g. workspace switch) closes the old
       // view and registers the new one at once; the old view's `destroyed` comes later
@@ -1162,6 +1338,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         t: () => forwardToPortalField('new-tab'),
         // Téléchargements : ⌘⇧J (macOS), Ctrl+J (Windows / Linux), comme Chrome.
         j: () => forward('downloads'),
+        // ⌘⇧S / Ctrl+Shift+S : capture de la page entière (docs/page-capture.md).
+        s: () => captureReady && forward('capture-full-page'),
         p: () => print({ tabId }),
         r: () => reload({ tabId }),
         '=': () => zoom({ tabId, direction: 'in' }),
@@ -1172,7 +1350,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         ']': () => goForward({ tabId }),
       };
       const handler = handlers[key];
-      if (!handler || (input.shift && !['g', 'j', '=', '+'].includes(key))) return;
+      if (!handler || (input.shift && !['g', 'j', 's', '=', '+'].includes(key))) return;
+      // ⌘S seul reste à la page (enregistrer dans un éditeur web).
+      if (key === 's' && (!input.shift || !captureReady)) return;
       event.preventDefault();
       handler();
     });
@@ -1193,6 +1373,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
           });
         }
       };
+
+      const forwardCapture = (action) => emitToRenderer(SHORTCUT_CHANNEL, { tabId, action });
 
       // Téléchargement géré par Lasco (docs/downloads.md) : dossier choisi dans les Réglages.
       const download = (url) => {
@@ -1290,6 +1472,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         { label: 'Actualiser', click: () => reload({ tabId }) },
         separator,
         { label: 'Imprimer…', click: () => print({ tabId }) },
+        // Capture d'écran (docs/page-capture.md) : le portail enregistre et affiche la notification.
+        ...(captureReady
+          ? [
+              { label: 'Capturer la page entière', click: () => forwardCapture('capture-full-page') },
+              { label: 'Capturer la partie visible', click: () => forwardCapture('capture-visible') },
+            ]
+          : []),
+        separator,
         {
           label: 'Inspecter',
           click: () => {
@@ -1316,25 +1506,29 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       sandbox: true,
       webSecurity: true,
       // Password manager runtime (main frame only, isolated world, exposes nothing to the
-      // page): untrusted web content never reaches Electron APIs.
-      preload: PASSWORD_PRELOAD,
+      // page): untrusted web content never reaches Electron APIs. Never in a private window.
+      ...(privateMode ? {} : { preload: PASSWORD_PRELOAD }),
       allowRunningInsecureContent: false,
       spellcheck: true,
     };
   }
 
-  function createView(tabId, initialUrl) {
+  function createView(tabId, initialUrl, { restore = null } = {}) {
     const view = new WebContentsView({ webPreferences: browserTabWebPreferences() });
     view.setBackgroundColor('#ffffff');
     const entry = {
       tabId,
       view,
       url: initialUrl,
-      title: '',
-      favicon: null,
+      title: restore ? restore.title || '' : '',
+      favicon: restore ? restore.favicon || null : null,
       abortedBlank: false,
+      // Créée cachée : elle ne compte pour la veille qu'à partir de maintenant (select l'efface).
+      hiddenSince: Date.now(),
+      restore,
     };
     tabs.set(tabId, entry);
+    ensureSleepTimer();
     wireWebContents(tabId, view);
 
     view.webContents.setUserAgent(userAgent);
@@ -1354,26 +1548,270 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     try {
       // Never let the identity step hold the tab: past the limit, the page
       // still opens (plain Chrome user agent only).
-      const blank = await withTimeout(
-        wc.loadURL('about:blank').then(
-          () => true,
-          () => true,
-        ),
-        IDENTITY_STEP_TIMEOUT_MS,
-      );
+      // Sortie de veille : `about:blank` est la première entrée de l'historique rouvert (restore
+      // n'est possible que sur une vue neuve), la page est atteinte ensuite par goToIndex.
+      const restore = entry.restore;
+      const history = wc.navigationHistory;
+      const canRestore =
+        restore &&
+        Array.isArray(restore.entries) &&
+        restore.entries.length > 0 &&
+        history &&
+        typeof history.restore === 'function';
+      const firstLoad = canRestore
+        ? history.restore({ entries: [{ url: 'about:blank', title: '' }, ...restore.entries], index: 0 }).then(
+            () => {
+              restore.historyRestored = true;
+              return true;
+            },
+            (error) => {
+              console.warn('[browser-tabs] history restore after sleep failed:', error && error.message);
+              return true;
+            },
+          )
+        : wc.loadURL('about:blank').then(
+            () => true,
+            () => true,
+          );
+      const blank = await withTimeout(firstLoad, IDENTITY_STEP_TIMEOUT_MS);
       if (!blank) console.warn('[browser-tabs] about:blank did not finish loading');
       if (wc.isDestroyed()) return;
       const applied = await withTimeout(applyChromeIdentity(wc, userAgent), IDENTITY_STEP_TIMEOUT_MS);
       if (!applied) console.warn(`[browser-tabs] chrome identity not applied after ${Date.now() - startedAt} ms`);
     } finally {
       entry.identityPending = false;
+      const restore = entry.restore;
+      entry.restore = null;
       if (!wc.isDestroyed() && !entry.abortedBlank) {
         const load = () => {
-          if (!wc.isDestroyed()) void wc.loadURL(entry.url);
+          if (wc.isDestroyed()) return;
+          if (restore && restore.url === entry.url) void restoreSleptPage(wc, restore, entry);
+          else void wc.loadURL(entry.url);
         };
         if (!guardMainNavigation(entry.tabId, entry.url, load)) load();
       }
     }
+  }
+
+  /**
+   * Rouvre un onglet sorti de veille : son historique (retour / avancer) et l'état de la page
+   * (défilement, champs) via `navigationHistory.restore`. Sinon, l'adresse puis le défilement relevé.
+   */
+  async function restoreSleptPage(wc, slept, entry) {
+    if (typeof slept.muted === 'boolean') wc.setAudioMuted(slept.muted);
+    const history = wc.navigationHistory;
+    if (slept.historyRestored && history && typeof history.goToIndex === 'function') {
+      try {
+        // Entrée 0 = about:blank : la page est à index + 1, avec son état (défilement, champs).
+        wc.once('did-navigate', () => {
+          if (!wc.isDestroyed() && typeof history.removeEntryAtIndex === 'function') {
+            try {
+              history.removeEntryAtIndex(0);
+            } catch (_) {
+              // L'entrée blanche reste en tête : sans gravité.
+            }
+          }
+        });
+        history.goToIndex(slept.index + 1);
+        wc.once('did-finish-load', () => {
+          if (wc.isDestroyed()) return;
+          if (slept.zoomFactor && slept.zoomFactor !== 1) wc.setZoomFactor(slept.zoomFactor);
+          // État de page sans défilement (pas encore enregistré par Chromium) : position relevée.
+          const scroll = slept.scroll;
+          if (scroll && scroll.y > 0) {
+            const code = `if ((window.scrollY || 0) < 1) window.scrollTo(${Number(scroll.x) || 0}, ${Number(scroll.y) || 0})`;
+            setTimeout(() => {
+              if (!wc.isDestroyed()) void wc.executeJavaScriptInIsolatedWorld(SLEEP_WORLD_ID, [{ code }]).catch(() => {});
+            }, 300);
+          }
+        });
+        return;
+      } catch (error) {
+        console.warn('[browser-tabs] history entry after sleep failed:', error && error.message);
+      }
+    }
+    if (wc.isDestroyed()) return;
+    try {
+      await wc.loadURL(entry.url);
+    } catch (_) {
+      // Échec de chargement : la page d'erreur de Lasco prend le relais (did-fail-load).
+    }
+    if (wc.isDestroyed()) return;
+    const scroll = slept.scroll;
+    if (scroll && (scroll.x > 0 || scroll.y > 0)) {
+      const code = `window.scrollTo(${Number(scroll.x) || 0}, ${Number(scroll.y) || 0})`;
+      // Contenu chargé tard (images, listes) : on réessaie un peu, sans insister.
+      for (const wait of [0, 300, 1200]) {
+        await delay(wait);
+        if (wc.isDestroyed()) return;
+        void wc.executeJavaScriptInIsolatedWorld(SLEEP_WORLD_ID, [{ code }]).catch(() => {});
+      }
+    }
+    if (slept.zoomFactor && slept.zoomFactor !== 1 && !wc.isDestroyed()) wc.setZoomFactor(slept.zoomFactor);
+  }
+
+  // --- Mise en veille des onglets (docs/tab-sleep.md) ---
+
+  function tabSleepDelayMs() {
+    let settings = null;
+    try {
+      settings = typeof getTabSleepSettings === 'function' ? getTabSleepSettings() : null;
+    } catch (_) {
+      settings = null;
+    }
+    // `getTabSleepSettings` renvoie null quand la veille est coupée (mode VM).
+    if (settings === null && typeof getTabSleepSettings === 'function') return 0;
+    return resolveTabSleepDelayMs(settings);
+  }
+
+  function neverSleepSites() {
+    try {
+      const settings = typeof getTabSleepSettings === 'function' ? getTabSleepSettings() : null;
+      return (settings && settings.tabSleepNeverSites) || [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function ensureSleepTimer() {
+    if (sleepTimer || typeof getTabSleepSettings !== 'function') return;
+    const tick = () => {
+      sleepTimer = null;
+      const delayMs = tabSleepDelayMs();
+      if (delayMs > 0) void runSleepCheck(delayMs);
+      if (tabs.size > 0 || delayMs > 0) {
+        sleepTimer = setTimeout(tick, tabSleepCheckIntervalMs(delayMs > 0 ? delayMs : 60_000));
+        if (sleepTimer.unref) sleepTimer.unref();
+      }
+    };
+    sleepTimer = setTimeout(tick, tabSleepCheckIntervalMs(tabSleepDelayMs() || 60_000));
+    if (sleepTimer.unref) sleepTimer.unref();
+  }
+
+  function sleepCandidate(tabId, entry) {
+    const wc = entry.view.webContents;
+    return {
+      tabId,
+      url: wc.isDestroyed() ? '' : sanitizeBrowserUrl(wc.getURL()) || '',
+      hiddenSince: entry.hiddenSince,
+      audible: !wc.isDestroyed() && wc.isCurrentlyAudible(),
+      htmlFullscreen: Boolean(entry.htmlFullscreen),
+      agentControlled: agentControlled.has(tabId),
+      hasOpener: Boolean(entry.hasOpener),
+      devToolsOpened: !wc.isDestroyed() && wc.isDevToolsOpened(),
+      loading: wc.isDestroyed() || wc.isLoading() || Boolean(entry.identityPending) || Boolean(entry.errorPage),
+      capturingMedia: mediaCapturingWebContents.has(wc.id),
+      discarded: false,
+    };
+  }
+
+  /** Onglet affiché : celui sélectionné, tant que les vues sont visibles (pas une page du portail). */
+  function shownTabId() {
+    return viewsVisible ? activeTabId : null;
+  }
+
+  async function runSleepCheck(delayMs) {
+    const now = Date.now();
+    const candidates = [];
+    for (const [tabId, entry] of tabs) {
+      if (!entry.view.webContents.isDestroyed()) candidates.push(sleepCandidate(tabId, entry));
+    }
+    const ids = selectTabsToSleep(candidates, {
+      now,
+      delayMs,
+      activeTabId: shownTabId(),
+      neverSites: neverSleepSites(),
+    });
+    for (const tabId of ids) await sleepTab(tabId, { delayMs });
+  }
+
+  /**
+   * Met un onglet en veille : relève défilement et formulaire, garde son historique, détruit sa vue.
+   * Refusé (false) si une raison de le garder éveillé apparaît entre-temps.
+   */
+  async function sleepTab(tabId, { delayMs = tabSleepDelayMs(), force = false } = {}) {
+    const entry = liveEntry(tabId);
+    if (!entry || entry.sleepPending) return { ok: false, error: 'unknown-tab' };
+    entry.sleepPending = true;
+    try {
+      const wc = entry.view.webContents;
+      let probe = null;
+      try {
+        probe = await withTimeout(
+          wc.executeJavaScriptInIsolatedWorld(PRELOAD_WORLD_ID, [{ code: PAGE_SLEEP_PROBE_SCRIPT }]),
+          SLEEP_PROBE_TIMEOUT_MS,
+        );
+      } catch (_) {
+        probe = null;
+      }
+      if (tabs.get(tabId) !== entry || wc.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+      // Saisie en cours : on attend un nouveau délai avant de réessayer.
+      if (probe && probe.dirty) {
+        entry.hiddenSince = Date.now();
+        return { ok: false, error: 'dirty-form' };
+      }
+      if (!force) {
+        const blocker = tabSleepBlocker(sleepCandidate(tabId, entry), {
+          now: Date.now(),
+          delayMs,
+          activeTabId: shownTabId(),
+          neverSites: neverSleepSites(),
+        });
+        if (blocker) return { ok: false, error: blocker };
+      } else if (tabId === shownTabId()) {
+        return { ok: false, error: 'active' };
+      }
+      const history = wc.navigationHistory;
+      let entries = [];
+      let index = 0;
+      try {
+        entries = history && typeof history.getAllEntries === 'function' ? history.getAllEntries() : [];
+        index = history && typeof history.getActiveIndex === 'function' ? history.getActiveIndex() : entries.length - 1;
+      } catch (_) {
+        entries = [];
+      }
+      // Pas de première page `about:blank` (chargée pour l'identité Chrome) dans l'historique rouvert.
+      const firstReal = entries.findIndex((item) => sanitizeBrowserUrl(item && item.url));
+      if (firstReal > 0) {
+        entries = entries.slice(firstReal);
+        index = Math.max(0, index - firstReal);
+      }
+      const state = buildState(tabId);
+      if (!state || !sanitizeBrowserUrl(state.url)) return { ok: false, error: 'not-web' };
+      sleepingTabs.set(tabId, {
+        url: state.url,
+        title: state.title,
+        favicon: entry.favicon,
+        entries: entries.every((item) => item && typeof item.url === 'string') ? entries : [],
+        index: Math.min(Math.max(0, index), Math.max(0, entries.length - 1)),
+        scroll: probe ? { x: Number(probe.scrollX) || 0, y: Number(probe.scrollY) || 0 } : null,
+        zoomFactor: wc.getZoomFactor(),
+        muted: wc.isAudioMuted(),
+        sleptAt: Date.now(),
+      });
+      destroyTab(tabId);
+      emitToRenderer(STATE_CHANNEL, sleepingState(tabId));
+      return { ok: true, tabId };
+    } finally {
+      entry.sleepPending = false;
+    }
+  }
+
+  /** Sort un onglet de veille : nouvelle vue, page et historique rouverts. Null s'il ne dort pas. */
+  function wakeTab(tabId) {
+    const slept = sleepingTabs.get(tabId);
+    if (!slept) return null;
+    const state = sleepingState(tabId);
+    sleepingTabs.delete(tabId);
+    const entry = createView(tabId, slept.url, { restore: slept });
+    // Le portail affiche tout de suite l'onglet en chargement, sans lune.
+    emitToRenderer(STATE_CHANNEL, { ...state, isLoading: true, discarded: false });
+    return entry;
+  }
+
+  /** Onglet vivant, réveillé au besoin (agent, rechargement). */
+  function liveOrWokenEntry(tabId) {
+    return liveEntry(tabId) || (wakeTab(tabId) && liveEntry(tabId));
   }
 
   /**
@@ -1402,7 +1840,18 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       webPreferences: options.webPreferences,
     });
     view.setBackgroundColor('#ffffff');
-    tabs.set(tabId, { view, url, title: '', favicon: null, abortedBlank: false, identityPending: false });
+    tabs.set(tabId, {
+      view,
+      url,
+      title: '',
+      favicon: null,
+      abortedBlank: false,
+      identityPending: false,
+      hiddenSince: Date.now(),
+      // Fenêtre fille d'une page : jamais mise en veille (la détruire couperait `opener`).
+      hasOpener: true,
+    });
+    ensureSleepTimer();
     wireWebContents(tabId, view);
     const wc = view.webContents;
     wc.setUserAgent(userAgent);
@@ -1420,21 +1869,31 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (typeof tabId !== 'string' || !tabId.trim()) {
       return { ok: false, error: 'invalid-tab-id' };
     }
+    if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
     const safe = sanitizeBrowserUrl(url);
     if (!safe) return { ok: false, error: 'invalid-url' };
 
     if (tabs.has(tabId)) {
       destroyTab(tabId);
     }
+    // Coquille rechargée : un onglet en veille pour la même adresse se rouvre avec son historique.
+    const slept = sleepingTabs.get(tabId);
+    if (slept && slept.url === safe) {
+      wakeTab(tabId);
+      return { ok: true, tabId, url: safe };
+    }
+    sleepingTabs.delete(tabId);
     createView(tabId, safe);
     return { ok: true, tabId, url: safe };
   }
 
   function navigate({ tabId, url }) {
+    if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
     const entry = tabs.get(tabId);
     const safe = sanitizeBrowserUrl(url);
     if (!safe) return { ok: false, error: 'invalid-url' };
     if (!entry) {
+      sleepingTabs.delete(tabId);
       return create({ tabId, url: safe });
     }
     entry.url = safe;
@@ -1456,6 +1915,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function select({ tabId }) {
+    if (typeof tabId === 'string' && !tabs.has(tabId)) wakeTab(tabId);
     if (typeof tabId !== 'string' || !tabs.has(tabId)) {
       return { ok: false, error: 'unknown-tab' };
     }
@@ -1463,8 +1923,11 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     activeTabId = tabId;
     viewsVisible = true;
     overlayActive = false;
+    const now = Date.now();
     for (const [id, entry] of tabs) {
       const isActive = id === tabId;
+      if (isActive) entry.hiddenSince = null;
+      else if (typeof entry.hiddenSince !== 'number') entry.hiddenSince = now;
       if (isActive) {
         attachView(entry.view);
         entry.view.setVisible(true);
@@ -1483,7 +1946,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     hideFieldPopovers();
     viewsVisible = false;
     activeTabId = null;
+    const now = Date.now();
     for (const entry of tabs.values()) {
+      if (typeof entry.hiddenSince !== 'number') entry.hiddenSince = now;
       exitPageFullscreen(entry);
       entry.view.setVisible(false);
       detachView(entry.view);
@@ -1492,12 +1957,27 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function close({ tabId }) {
+    sleepingTabs.delete(tabId);
     if (!tabs.has(tabId)) return { ok: true, tabId };
     destroyTab(tabId);
     return { ok: true, tabId };
   }
 
+  /** Retour / avancer sur un onglet en veille : il se rouvre directement sur la page voulue. */
+  function wakeAtOffset(tabId, offset) {
+    const slept = sleepingTabs.get(tabId);
+    if (!slept || !Array.isArray(slept.entries)) return false;
+    const target = slept.index + offset;
+    if (target < 0 || target >= slept.entries.length) return false;
+    slept.index = target;
+    slept.url = sanitizeBrowserUrl(slept.entries[target].url) || slept.url;
+    slept.scroll = null;
+    wakeTab(tabId);
+    return true;
+  }
+
   function goBack({ tabId }) {
+    if (wakeAtOffset(tabId, -1)) return { ok: true };
     const entry = tabs.get(tabId);
     if (!entry || entry.view.webContents.isDestroyed()) {
       return { ok: false, error: 'unknown-tab' };
@@ -1512,6 +1992,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function goForward({ tabId }) {
+    if (wakeAtOffset(tabId, 1)) return { ok: true };
     const entry = tabs.get(tabId);
     if (!entry || entry.view.webContents.isDestroyed()) {
       return { ok: false, error: 'unknown-tab' };
@@ -1527,6 +2008,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   /** Couper ou réactiver le son d'un onglet (icône haut-parleur, clic droit). */
   function setMuted({ tabId, muted }) {
+    const slept = sleepingTabs.get(tabId);
+    if (slept) {
+      slept.muted = muted === true;
+      emitToRenderer(STATE_CHANNEL, sleepingState(tabId));
+      return { ok: true, muted: slept.muted };
+    }
     const entry = tabs.get(tabId);
     if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
     entry.view.webContents.setAudioMuted(muted === true);
@@ -1535,6 +2022,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function reload({ tabId }) {
+    if (!tabs.has(tabId) && wakeTab(tabId)) return { ok: true };
     const entry = tabs.get(tabId);
     if (!entry || entry.view.webContents.isDestroyed()) {
       return { ok: false, error: 'unknown-tab' };
@@ -1633,7 +2121,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function getState({ tabId }) {
-    return buildState(tabId);
+    return buildState(tabId) || sleepingState(tabId);
   }
 
   function liveEntry(tabId) {
@@ -1725,6 +2213,30 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     }
   }
 
+  /** Le portail sait enregistrer une capture : menu contextuel et ⌘⇧S la proposent. */
+  let captureReady = false;
+  function setCaptureReady() {
+    captureReady = true;
+    return { ok: true };
+  }
+
+  /**
+   * Capture d'écran en PNG (docs/page-capture.md) : `mode` 'full' (page entière, protocole
+   * DevTools) ou 'visible'. Renvoie l'image au main, qui l'enregistre et la copie.
+   */
+  async function captureImage({ tabId, mode }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    try {
+      const result = await capturePageImage(wc, { mode: mode === 'visible' ? 'visible' : 'full', nativeImage });
+      if (!result.ok) return result;
+      return { ...result, url: sanitizeBrowserUrl(wc.getURL()) || entry.url || '', title: wc.getTitle() || '' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'capture-failed' };
+    }
+  }
+
   async function openExternal({ tabId }) {
     const entry = liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
@@ -1732,6 +2244,47 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (!url) return { ok: false, error: 'invalid-url' };
     await shell.openExternal(url);
     return { ok: true };
+  }
+
+  /**
+   * Message du panneau « Responsive » des DevTools (docs/devtools-responsive.md) : seulement
+   * pour un onglet de cette fenêtre dont les DevTools sont ouverts.
+   */
+  async function handleResponsiveMessage(tabId, message) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    if (!wc.isDevToolsOpened()) return { ok: false, error: 'devtools-closed' };
+    if (message.op === 'set') await setResponsive(tabId, message.settings || {});
+    else if (message.op === 'off') await setResponsive(tabId, null);
+    else if (message.op !== 'get') return { ok: false, error: 'invalid' };
+    return responsiveOf(entry).state();
+  }
+
+  function responsiveOf(entry) {
+    if (!entry.responsive) {
+      const wc = entry.view.webContents;
+      entry.responsive = createTabResponsive({
+        view: entry.view,
+        getWindow: getMainWindow,
+        restoreIdentity: () =>
+          wc.isDestroyed()
+            ? Promise.resolve()
+            : wc.debugger.sendCommand('Emulation.setUserAgentOverride', chromeUserAgentOverride(userAgent)).catch(() => {}),
+      });
+    }
+    return entry.responsive;
+  }
+
+  async function setResponsive(tabId, settings) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return;
+    if (!settings && !entry.responsive) return;
+    const responsive = responsiveOf(entry);
+    if (settings) await responsive.set(settings);
+    else await responsive.off();
+    if (entry.view.webContents.isDestroyed()) return;
+    applyBounds(entry.view);
   }
 
   function openDevTools({ tabId }) {
@@ -1784,7 +2337,35 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       security: state.security,
       threat: state.threat,
       permissions: describeSitePermissions(sitePermissions, origin),
+      adblock: describeSiteAdblock(tabId, origin, state.url),
     };
+  }
+
+  /**
+   * Ligne « Bloqueur » des informations du site. `enabled` : interrupteur global ; `siteEnabled` :
+   * pas d'exception pour ce site ; `available` : false pour une page Lasco (jamais filtrée).
+   */
+  function describeSiteAdblock(tabId, origin, url) {
+    const entry = tabs.get(tabId);
+    return {
+      available: !adblock.isProtected(url),
+      enabled: adblock.settings.isEnabled(),
+      siteEnabled: !adblock.settings.isSiteAllowed(origin),
+      active: adblock.isActiveFor(url),
+      blocked: (entry && entry.adblockBlocked) || 0,
+    };
+  }
+
+  /** `enabled` false : exception pour le site (bloqueur coupé) ; la page est rechargée, comme Brave. */
+  function setSiteAdblock({ tabId, enabled } = {}) {
+    const origin = tabOrigin(tabId);
+    if (!origin) return { ok: false, error: 'unknown-tab' };
+    if (typeof enabled !== 'boolean') return { ok: false, error: 'invalid-value' };
+    const before = adblock.settings.isSiteAllowed(origin);
+    if (!adblock.settings.setSiteAllowed(origin, !enabled)) return { ok: false, error: 'invalid-site' };
+    const entry = liveEntry(tabId);
+    if (entry && before === enabled && !entry.errorPage) entry.view.webContents.reload();
+    return siteInfo({ tabId });
   }
 
   /** `decision` : 'allow' | 'block' | null (redemander). */
@@ -1815,7 +2396,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   /** Moteur déclaré par la page (OpenSearch), ajouté aux raccourcis de la barre d'adresse. */
   async function discoverSearchEngine(tabId, wc) {
-    if (!searchEngines || wc.isDestroyed()) return;
+    // Fenêtre privée : aucun site visité n'est retenu, même comme raccourci de recherche.
+    if (privateMode || !searchEngines || wc.isDestroyed()) return;
     const entry = tabs.get(tabId);
     const pageUrl = sanitizeBrowserUrl(wc.getURL());
     if (!pageUrl || (entry && entry.errorPage)) return;
@@ -1942,7 +2524,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
    * captures impossibles), et elle garde la taille de la zone des onglets pour que la mise en page reste juste.
    */
   function setAgentControl({ tabId, active }) {
-    const entry = liveEntry(tabId);
+    // Un agent reprend un onglet en veille : il se réveille (caché) pour être piloté.
+    const entry = active === true ? liveOrWokenEntry(tabId) : liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
     const wc = entry.view.webContents;
     if (active === true) {
@@ -1966,7 +2549,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   async function agentAction(payload) {
     const { tabId, action } = payload || {};
-    const entry = liveEntry(tabId);
+    const entry = liveOrWokenEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
     const wc = entry.view.webContents;
 
@@ -2067,7 +2650,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     return true;
   }
 
-  return {
+  const api = {
     create,
     setAdoptPopups,
     navigate,
@@ -2088,12 +2671,15 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     print,
     capture,
     copyScreenshot,
+    captureImage,
+    setCaptureReady,
     openExternal,
     openDevTools,
     clearBrowsingData,
     siteInfo,
     setSitePermission,
     resetSitePermissions,
+    setSiteAdblock,
     historySuggest,
     historyList,
     historyRemove,
@@ -2123,12 +2709,34 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       return entry && !entry.view.webContents.isDestroyed() ? entry.view.webContents : null;
     },
     stateOf: (tabId) => buildState(tabId),
+    /** Mise en veille (docs/tab-sleep.md) : `sleep` met un onglet en veille tout de suite (menu, tests). */
+    sleep: ({ tabId } = {}) => sleepTab(tabId, { force: true }),
+    isSleeping: (tabId) => sleepingTabs.has(tabId),
+    sleepingTabIds: () => [...sleepingTabs.keys()],
+    runSleepCheck: () => {
+      const delayMs = tabSleepDelayMs();
+      return delayMs > 0 ? runSleepCheck(delayMs) : Promise.resolve();
+    },
   };
+  if (privateMode) {
+    // Fenêtre privée : ni mots de passe, ni saisie automatique, ni agent, ni historique du navigateur normal.
+    for (const method of PRIVATE_DENIED_TAB_METHODS) {
+      if (typeof api[method] === 'function') api[method] = () => ({ ok: false, error: 'private-window' });
+    }
+  }
+  api.isPrivate = privateMode;
+  /** Fermeture d'une fenêtre privée : vues détruites, puis cookies, cache et stockage de sa session effacés. */
+  api.destroySession = async () => {
+    destroyAll();
+    if (privateMode) await wipePrivateSession(session.fromPartition(browserPartition));
+  };
+  return api;
 }
 
 module.exports = {
   createBrowserTabManager,
   sharedSitePermissions,
+  sharedAdblock,
   STATE_CHANNEL,
   OPEN_REQUEST_CHANNEL,
   FIND_RESULT_CHANNEL,

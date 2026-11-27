@@ -99,6 +99,15 @@ const browserTabsBridge = {
   print: (payload) => invokeBrowserTab('browser-tab-print', payload),
   capture: (payload) => invokeBrowserTab('browser-tab-capture', payload),
   copyScreenshot: (payload) => invokeBrowserTab('browser-tab-copy-screenshot', payload),
+  // Capture d'écran enregistrée dans les Téléchargements et copiée (docs/page-capture.md).
+  screenshots: {
+    /** Le portail traite `capture-full-page` / `capture-visible` (menu contextuel, ⌘⇧S). */
+    ready: () => invokeBrowserTab('browser-tab-capture-ready'),
+    /** `{ tabId, mode: 'full' | 'visible', target?: 'file' | 'assistant' }` : onglet web. */
+    captureTab: (payload) => invokeBrowserTab('browser-tab-capture-save', payload),
+    /** `{ rect, title, target? }` : partie visible d'une page du portail (rect dans la fenêtre). */
+    capturePortal: (payload) => invokeBrowserTab('browser-portal-capture-save', payload),
+  },
   openExternal: (payload) => invokeBrowserTab('browser-tab-open-external', payload),
   openDevTools: (payload) => invokeBrowserTab('browser-tab-open-devtools', payload),
   clearBrowsingData: () => invokeBrowserTab('browser-tab-clear-data'),
@@ -106,6 +115,8 @@ const browserTabsBridge = {
   siteInfo: (payload) => invokeBrowserTab('browser-tab-site-info', payload),
   setSitePermission: (payload) => invokeBrowserTab('browser-tab-set-site-permission', payload),
   resetSitePermissions: (payload) => invokeBrowserTab('browser-tab-reset-site-permissions', payload),
+  /** `{ tabId, enabled }` : bloqueur de pubs sur le site de l'onglet (docs/adblock.md) ; la page est rechargée. */
+  setSiteAdblock: (payload) => invokeBrowserTab('browser-tab-set-site-adblock', payload),
   openSiteSettings: () => invokeBrowserTab('browser-tab-open-site-settings'),
   historySuggest: (payload) => invokeBrowserTab('browser-history-suggest', payload),
   historyList: (payload) => invokeBrowserTab('browser-history-list', payload),
@@ -117,6 +128,14 @@ const browserTabsBridge = {
     markUsed: (payload) => invokeBrowserTab('browser-search-engines-mark-used', payload),
     manage: () => invokeBrowserTab('browser-search-engines-manage'),
     onChange: (callback) => subscribe('browser-search-engines-changed', callback),
+  },
+  // Économiseur de mémoire (docs/tab-sleep.md) : délai réglé dans Lasco > Réglages…, repris par le portail.
+  sleep: {
+    get: () => invokeBrowserTab('browser-tab-sleep-get'),
+    onChange: (callback) => subscribe('browser-tab-sleep-changed', callback),
+    manage: () => invokeBrowserTab('browser-tab-sleep-manage'),
+    /** `{ tabId }` : met l'onglet en veille tout de suite (hors onglet affiché). */
+    now: (payload) => invokeBrowserTab('browser-tab-sleep', payload),
   },
   setOverlay: (payload) => invokeBrowserTab('browser-tab-set-overlay', payload),
   showTabContextMenu: (payload) => invokeBrowserTab('browser-tab-show-context-menu', payload),
@@ -273,6 +292,11 @@ const tabWindowsBridge = {
   prewarm: (payload) => ipcRenderer.invoke('tab-window-prewarm', payload),
   /** ⌘N: open a new window on the new-tab page (`{ href }`: the portal's new-tab path). */
   openWindow: (payload) => ipcRenderer.invoke('tab-window-open', payload),
+  // Recherche dans les onglets (⌘⇧A) : onglets des autres fenêtres Lasco.
+  publishTabs: (payload) => ipcRenderer.invoke('tab-window-publish-tabs', payload),
+  listTabs: () => ipcRenderer.invoke('tab-window-list-tabs'),
+  activateTab: (payload) => ipcRenderer.invoke('tab-window-activate-tab', payload),
+  onTabAction: (callback) => subscribe('tab-window-tab-action', callback),
 };
 
 /**
@@ -314,6 +338,21 @@ const downloadsBridge = {
   openDirectory: () => ipcRenderer.invoke('downloads-open-directory'),
   openSettings: () => ipcRenderer.invoke('downloads-open-settings'),
   onChanged: (callback) => subscribe('downloads-changed', callback),
+};
+
+/** Import from another browser of this computer (docs/browser-import.md). Portal windows only. */
+const browserImportBridge = {
+  list: () => ipcRenderer.invoke('browser-import-list'),
+  /** `{ importId, browserId, profileId, kinds: { bookmarks, history, passwords } }`. */
+  run: (payload) => ipcRenderer.invoke('browser-import-run', payload),
+  /** Native open dialog, then reads the password CSV exported by a browser. */
+  importPasswordsCsv: () => ipcRenderer.invoke('browser-import-passwords-csv'),
+  /** `{ token }` → `{ ok, items: [{ url, username, password }] }`, once. */
+  takePasswords: (payload) => ipcRenderer.invoke('browser-import-take-passwords', payload),
+  discardPasswords: (payload) => ipcRenderer.invoke('browser-import-discard-passwords', payload),
+  /** System Settings > Privacy > Full Disk Access (Safari). */
+  openFullDiskAccessSettings: () => ipcRenderer.invoke('browser-import-open-full-disk-access'),
+  onProgress: (callback) => subscribe('browser-import-progress', callback),
 };
 
 const desktopBridge = {
@@ -366,6 +405,11 @@ const desktopBridge = {
   ...(exposeVmShell && { vm: vmShellBridge }),
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposePortalBridges && { downloads: downloadsBridge }),
+  ...(exposePortalBridges && !vmMode && { browserImport: browserImportBridge }),
+  /** Navigation privée (docs/private-browsing.md) : menu ☰ du navigateur du portail. */
+  ...(exposePortalBridges && !vmMode && {
+    privateBrowsing: { openWindow: () => ipcRenderer.invoke('private-window-open') },
+  }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),

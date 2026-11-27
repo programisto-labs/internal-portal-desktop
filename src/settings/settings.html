@@ -179,6 +179,10 @@
         <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
         Téléchargements
       </button>
+      <button data-section="memory">
+        <svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        Mémoire
+      </button>
       <button data-section="drive">
         <svg viewBox="0 0 24 24"><path d="M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01"/></svg>
         My Drive
@@ -186,6 +190,10 @@
       <button data-section="sites">
         <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         Autorisations des sites
+      </button>
+      <button data-section="adblock">
+        <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m4.9 4.9 14.2 14.2"/></svg>
+        Bloqueur de pubs
       </button>
       <button data-section="computer" data-agents>
         <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
@@ -324,6 +332,26 @@
         </div>
       </section>
 
+      <section data-panel="memory" hidden>
+        <p class="intro">Comme Chrome : un onglet que vous n’avez pas regardé depuis un moment est mis en veille pour libérer la mémoire. Il garde son titre, son adresse et sa position, une lune s’affiche sur son icône, et il se recharge quand vous cliquez dessus.</p>
+        <div class="group">
+          <div class="row">
+            <div class="text">
+              <div class="label">Mettre en veille les onglets inactifs</div>
+              <div class="hint" id="tabSleepHint">Onglets web et pages de Lasco. Jamais l’onglet affiché, un onglet qui joue du son, en plein écran, en appel, piloté par un agent, avec une saisie en cours, ni Lasco Code.</div>
+            </div>
+            <select id="tabSleepMinutes" aria-label="Mettre en veille les onglets inactifs"></select>
+          </div>
+        </div>
+        <h2>Ne jamais mettre en veille ces sites</h2>
+        <div class="site-toolbar">
+          <div class="field site-search"><input type="text" id="tabSleepSite" placeholder="Ajouter un site, par exemple figma.com" aria-label="Ajouter un site à ne jamais mettre en veille" autocomplete="off" spellcheck="false"></div>
+          <button class="btn" id="tabSleepAdd">Ajouter</button>
+        </div>
+        <div class="hint error" id="tabSleepError" hidden style="margin: 0 0 8px 2px;"></div>
+        <div class="group" id="tabSleepSites"></div>
+      </section>
+
       <section data-panel="drive" hidden>
         <p class="intro">Copie vos fichiers My Drive dans un dossier de cet ordinateur, toutes les minutes tant que Lasco est ouvert et connecté. Rien n’est écrasé ni supprimé : un fichier modifié des deux côtés est gardé en double, un fichier retiré de My Drive reste sur l’ordinateur.</p>
         <div class="group">
@@ -364,6 +392,21 @@
           <button class="btn danger" id="siteResetAll">Tout réinitialiser</button>
         </div>
         <div class="group" id="siteList"></div>
+      </section>
+      <section data-panel="adblock" hidden>
+        <p class="intro">Bloque les publicités et les traqueurs des sites ouverts dans les onglets web (listes EasyList et EasyPrivacy, mises à jour une fois par jour). Les pages de Lasco ne sont jamais filtrées.</p>
+        <div class="group">
+          <div class="row">
+            <div class="text">
+              <div class="label">Bloquer les pubs et les traqueurs</div>
+              <div class="hint" id="adblockHint">Le nombre de requêtes bloquées s’affiche dans les informations du site, à gauche de l’adresse.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="adblockEnabled" aria-label="Bloquer les pubs et les traqueurs"><span></span></label>
+          </div>
+        </div>
+        <h2>Sites autorisés</h2>
+        <p class="intro" style="margin: 0 0 8px 2px; font-size: 12px;">Le bloqueur est coupé sur ces sites. Pour en ajouter un : informations du site, à gauche de l’adresse.</p>
+        <div class="group" id="adblockSites"></div>
       </section>
       <section data-panel="computer" data-agents hidden>
         <p class="intro">Opérations des agents IA sur cet ordinateur, après votre confirmation. Désactivé par défaut. Sans lien avec la machine virtuelle.</p>

@@ -1,0 +1,73 @@
+/*
+ * Fenêtre de navigation privée (docs/private-browsing.md) : la coquille de vm-shell.css, en thème sombre
+ * violet / anthracite pour qu'on ne la confonde jamais avec une fenêtre normale (comme Chrome et Brave).
+ */
+:root {
+  --background: 258 18% 13%;
+  --foreground: 260 30% 94%;
+  --muted: 258 16% 19%;
+  --muted-foreground: 260 12% 68%;
+  --accent: 262 22% 24%;
+  --border: 260 16% 26%;
+  --ring: 266 80% 74%;
+  --popover: 258 18% 15%;
+  --destructive: 0 72% 64%;
+  --portal-rail-surface: 260 22% 9%;
+  --private-accent: 266 80% 74%;
+  --glass-tint: 260 20% 22%;
+  --glass-fill: 0.6;
+  --glass-fill-hover: 0.95;
+  --glass-edge: 0 0% 100% / 0.08;
+  --glass-shadow: 0 0% 0% / 0.4;
+  color-scheme: dark;
+}
+
+/* Barre d'onglets : déplace la fenêtre ; feux de macOS à gauche, boutons de Windows / Linux à droite. */
+.tabbar { -webkit-app-region: drag; padding-left: 8px; }
+body[data-platform='darwin'] .tabbar { padding-left: 78px; }
+body:not([data-platform='darwin']) .tabbar { padding-right: 148px; }
+.tab, .tabbar button, .private-badge { -webkit-app-region: no-drag; }
+
+.private-badge {
+  display: flex; align-items: center; gap: 6px; flex: none; align-self: center; height: 28px; padding: 0 10px;
+  margin-right: 4px; border-radius: 9999px; font-size: 12px; font-weight: 600; letter-spacing: 0.01em;
+  color: hsl(var(--private-accent)); background: hsl(var(--private-accent) / 0.12);
+  border: 1px solid hsl(var(--private-accent) / 0.25); white-space: nowrap; user-select: none;
+}
+.private-badge svg.icon { width: 15px; height: 15px; }
+@media (max-width: 760px) {
+  .private-badge span { display: none; }
+}
+
+.tab-icon svg.icon { color: hsl(var(--private-accent)); }
+.tab.active { box-shadow: inset 0 2px 0 hsl(var(--private-accent) / 0.7); }
+
+/* ---- Page du nouvel onglet ------------------------------------------------------------------------------------ */
+.private-intro {
+  position: absolute; inset: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center;
+  padding: 8vh 24px 48px; user-select: text;
+  background:
+    radial-gradient(60rem 30rem at 50% -10%, hsl(var(--private-accent) / 0.16), transparent 70%),
+    hsl(var(--background));
+}
+.private-intro-inner { width: 100%; max-width: 620px; }
+.private-intro-icon {
+  display: grid; place-items: center; width: 64px; height: 64px; margin-bottom: 20px; border-radius: 20px;
+  color: hsl(var(--private-accent)); background: hsl(var(--private-accent) / 0.14);
+  border: 1px solid hsl(var(--private-accent) / 0.3);
+}
+.private-intro-icon svg.icon { width: 34px; height: 34px; stroke-width: 1.6; }
+.private-intro h1 { margin: 0 0 8px; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+.private-intro .lead { margin: 0 0 24px; color: hsl(var(--muted-foreground)); font-size: 15px; line-height: 1.55; }
+.private-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 640px) {
+  .private-columns { grid-template-columns: 1fr; }
+}
+.private-card {
+  padding: 16px; border-radius: 14px; background: hsl(var(--muted) / 0.7); border: 1px solid hsl(var(--border) / 0.8);
+}
+.private-card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+.private-card ul { margin: 0; padding-left: 18px; color: hsl(var(--muted-foreground)); font-size: 13px; line-height: 1.6; }
+.private-card.kept h2 { color: hsl(38 90% 70%); }
+.private-card.not-kept h2 { color: hsl(var(--private-accent)); }
+.private-note { margin: 18px 0 0; font-size: 12px; line-height: 1.55; color: hsl(var(--muted-foreground)); }

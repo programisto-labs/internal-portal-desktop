@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Children</key>
+	<array>
+		<dict>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>URIDictionary</key>
+					<dict><key>title</key><string>Apple &amp; Co</string></dict>
+					<key>URLString</key>
+					<string>https://www.apple.com/</string>
+					<key>WebBookmarkType</key>
+					<string>WebBookmarkTypeLeaf</string>
+				</dict>
+				<dict>
+					<key>Children</key>
+					<array>
+						<dict>
+							<key>URIDictionary</key>
+							<dict><key>title</key><string>Wiki</string></dict>
+							<key>URLString</key>
+							<string>https://fr.wikipedia.org/</string>
+							<key>WebBookmarkType</key>
+							<string>WebBookmarkTypeLeaf</string>
+						</dict>
+					</array>
+					<key>Title</key>
+					<string>Lectures</string>
+					<key>WebBookmarkType</key>
+					<string>WebBookmarkTypeList</string>
+				</dict>
+			</array>
+			<key>Title</key>
+			<string>BookmarksBar</string>
+			<key>WebBookmarkType</key>
+			<string>WebBookmarkTypeList</string>
+		</dict>
+		<dict>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>URIDictionary</key>
+					<dict><key>title</key><string>Plus tard</string></dict>
+					<key>URLString</key>
+					<string>https://later.example.com/</string>
+					<key>WebBookmarkType</key>
+					<string>WebBookmarkTypeLeaf</string>
+				</dict>
+			</array>
+			<key>Title</key>
+			<string>com.apple.ReadingList</string>
+			<key>WebBookmarkType</key>
+			<string>WebBookmarkTypeList</string>
+		</dict>
+		<dict>
+			<key>Children</key>
+			<array/>
+			<key>Title</key>
+			<string>BookmarksMenu</string>
+			<key>WebBookmarkType</key>
+			<string>WebBookmarkTypeList</string>
+		</dict>
+	</array>
+	<key>WebBookmarkFileVersion</key>
+	<integer>1</integer>
+	<key>Sync</key>
+	<dict><key>Data</key><data>
+	AAEC
+	</data><key>Flag</key><true/></dict>
+</dict>
+</plist>
