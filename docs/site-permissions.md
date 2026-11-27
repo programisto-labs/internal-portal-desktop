@@ -12,15 +12,27 @@ Code : `src/browser-tabs/site-permissions.js`, branché par `manager.js` sur la 
 - **Toujours refusées** : appareils (HID, USB, série), ouverture d'applications par permission (`openExternal`, passé par la confirmation des liens d'app), toute permission inconnue.
 - La décision porte sur le **site affiché** (origine du document principal) : un cadre intégré n'obtient une permission que si Chromium l'a déjà autorisée par la délégation Permissions-Policy.
 - Lecture synchrone (`Notification.permission`, `navigator.permissions.query`) : « accordé » seulement après Autoriser. Sans décision elle répond « refusé » (Electron ne sait pas répondre « à demander ») : `Notification.requestPermission()` pose bien la question, mais un site qui lit `Notification.permission` avant de demander croira les notifications bloquées.
-- Fichier : `userData/browser-site-permissions.json` (`{ version: 1, origins: { "https://x": { "geolocation": "allow" } } }`), entrées invalides ignorées. « Effacer les données de navigation » le vide.
+- **Réglage par défaut** (Réglages > Autorisations des sites) : pour chaque permission demandable, « Demander » (défaut) ou « Bloquer » (refusé sans question, lecture synchrone « refusé », caméra et micro compris). Une décision du site l'emporte toujours.
+- Fichier : `userData/browser-site-permissions.json` (`{ version: 1, origins: { "https://x": { "geolocation": "allow" } }, defaults: { "camera": "block" } }`, `defaults` ne garde que « Bloquer »), entrées invalides ignorées. « Effacer les données de navigation » vide les décisions des sites et garde les réglages par défaut.
+
+## Réglages > Autorisations des sites
+
+Lasco > Réglages… (⌘,), section `sites` (`src/settings/`), comme `brave://settings/content` :
+
+- **Par défaut** : une ligne par permission demandable, Demander / Bloquer.
+- **Sites** : chaque site avec une décision retenue ou un « Ignorer » en cours, trié par hôte, avec un résumé (« Caméra : autorisé · Position : ignoré »). Recherche dans les adresses. « Modifier » déplie toutes les permissions du site (Autoriser / Bloquer / « Demander (par défaut) » ou « Bloquer (par défaut) »), « Redemander » lève un « Ignorer ». « Supprimer » oublie le site ; « Tout réinitialiser » oublie tous les sites après confirmation native.
+- Canaux (vérifiés `fromSettings`) : `settings-modal-site-set-default`, `settings-modal-site-set`, `settings-modal-site-remove`, `settings-modal-site-reset-all` ; état dans `settings-modal-state.sitePermissions` (`names`, `defaults`, `sites`).
 
 ## Informations du site (pont `lascoDesktop.browserTabs`)
 
 | Méthode | Effet |
 | --- | --- |
-| `siteInfo({ tabId })` | `{ ok, origin, host, security, permissions: [{ permission, decision }] }` du site affiché par l'onglet (même derrière une page d'erreur) |
-| `setSitePermission({ tabId, permission, decision })` | `decision` : `allow`, `block` ou `null` (redemander) ; renvoie les informations à jour |
-| `resetSitePermissions({ tabId })` | oublie toutes les décisions du site |
+| `siteInfo({ tabId })` | `{ ok, origin, host, security, permissions }` du site affiché par l'onglet (même derrière une page d'erreur). `permissions` : **toutes** les permissions demandables, dans l'ordre d'affichage : `{ permission, decision: 'allow' \| 'block' \| 'ask', dismissed, defaultDecision: 'ask' \| 'block' }` (`ask` = aucune décision ; `dismissed` = « Ignorer » en mémoire jusqu'au redémarrage) |
+| `setSitePermission({ tabId, permission, decision })` | `decision` : `allow`, `block`, `ask` ou `null` (aucune décision : redemander, lève aussi un « Ignorer ») ; renvoie les informations à jour |
+| `resetSitePermissions({ tabId })` | oublie toutes les décisions et les « Ignorer » du site |
+| `openSiteSettings()` | ouvre Réglages > Autorisations des sites (fenêtres du portail seulement) |
+
+Avant cette version, `permissions` ne contenait que les décisions retenues : le portail complète la liste lui-même.
 
 Un changement vaut pour les prochaines demandes du site ; une page déjà ouverte garde ce qu'elle a obtenu jusqu'au rechargement.
 

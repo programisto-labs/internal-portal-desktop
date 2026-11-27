@@ -5,7 +5,8 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { autoUpdater } = require('electron-updater');
-const { createBrowserTabManager, BROWSER_PARTITION } = require('./browser-tabs/manager');
+const { createBrowserTabManager, sharedSitePermissions, BROWSER_PARTITION } = require('./browser-tabs/manager');
+const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
 const {
@@ -581,6 +582,16 @@ function closeSettings() {
   surface.dispose();
   const win = mainPortalWindow();
   if (win && !win.webContents.isDestroyed()) win.webContents.focus();
+}
+
+/** Réglages > Autorisations des sites : libellés, réglages par défaut, sites retenus. */
+function sitePermissionsSettingsState() {
+  const store = sharedSitePermissions();
+  return {
+    names: PERMISSION_NAMES,
+    defaults: store.listDefaults(),
+    sites: store.listSites(),
+  };
 }
 
 function openSettings(section = 'general') {
@@ -2430,6 +2441,7 @@ function registerWindowIPC() {
       update: buildUpdateSnapshot(),
       driveSync: driveSyncSettingsState(getDriveSyncStore()),
       searchEngines: getSearchEngineStore().list(),
+      sitePermissions: sitePermissionsSettingsState(),
       downloads: {
         directory: downloadsDirectory(),
         isDefault: !settings.downloadsDirectory || downloadsDirectory() !== settings.downloadsDirectory,
@@ -2550,6 +2562,43 @@ function registerWindowIPC() {
     getSettingsStore().set({ downloadsAskWhere: value });
     return true;
   });
+  // Réglages > Autorisations des sites (docs/site-permissions.md).
+  ipcMain.handle('settings-modal-site-set-default', (event, permission, value) => {
+    if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
+    return { ok: sharedSitePermissions().setDefault(permission, value) };
+  });
+  ipcMain.handle('settings-modal-site-set', (event, origin, permission, decision) => {
+    if (!fromSettings(event) || typeof origin !== 'string' || siteOrigin(origin) !== origin) {
+      return { ok: false, error: 'forbidden' };
+    }
+    const next = decision === 'ask' || decision === null ? null : decision;
+    return { ok: sharedSitePermissions().set(origin, permission, next) };
+  });
+  ipcMain.handle('settings-modal-site-remove', (event, origin) => {
+    if (!fromSettings(event) || typeof origin !== 'string' || siteOrigin(origin) !== origin) {
+      return { ok: false, error: 'forbidden' };
+    }
+    sharedSitePermissions().clearOrigin(origin);
+    return { ok: true };
+  });
+  ipcMain.handle('settings-modal-site-reset-all', async (event) => {
+    if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
+    const win = settingsSurface && settingsSurface.window ? settingsSurface.window : mainPortalWindow();
+    const options = {
+      type: 'question',
+      message: 'Réinitialiser les autorisations de tous les sites ?',
+      detail: 'Les sites vous redemanderont leurs autorisations. Les réglages par défaut ne changent pas.',
+      buttons: ['Réinitialiser', 'Annuler'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    };
+    const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+    if (response !== 0) return { ok: false, cancelled: true };
+    sharedSitePermissions().clear();
+    return { ok: true };
+  });
+
   // Réglages > Moteur de recherche (docs/search-engines.md).
   ipcMain.handle('settings-modal-search-set-default', (event, id) => {
     if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
@@ -2816,6 +2865,12 @@ function registerWindowIPC() {
   ipcMain.handle('browser-search-engines-mark-used', (event, payload) => {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
     return getSearchEngineStore().markUsed(payload && payload.id);
+  });
+  // Informations du site > « Réglages des autorisations » (docs/site-permissions.md).
+  ipcMain.handle('browser-tab-open-site-settings', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    openSettings('sites');
+    return { ok: true };
   });
   ipcMain.handle('browser-search-engines-manage', (event) => {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };

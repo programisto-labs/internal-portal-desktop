@@ -9,6 +9,8 @@ const {
   createSitePermissionHandlers,
   installSitePermissions,
   describeSitePermissions,
+  PROMPTABLE_PERMISSIONS,
+  PERMISSION_NAMES,
 } = require('../src/browser-tabs/site-permissions');
 
 function memoryFs(initial = {}) {
@@ -270,10 +272,19 @@ describe('autorisations des sites', () => {
     assert.equal(store.set('https://a.example', 'geolocation', 'maybe'), false);
     const reloaded = createSitePermissionStore({ filePath: '/p.json', fsImpl });
     assert.deepEqual(reloaded.list('https://a.example'), { geolocation: 'allow', notifications: 'block' });
-    assert.deepEqual(describeSitePermissions(reloaded, 'https://a.example'), [
-      { permission: 'geolocation', decision: 'allow' },
-      { permission: 'notifications', decision: 'block' },
-    ]);
+    const described = describeSitePermissions(reloaded, 'https://a.example');
+    assert.deepEqual(
+      described.map((p) => p.permission),
+      PROMPTABLE_PERMISSIONS,
+    );
+    assert.deepEqual(described.find((p) => p.permission === 'geolocation'), {
+      permission: 'geolocation',
+      decision: 'allow',
+      dismissed: false,
+      defaultDecision: 'ask',
+    });
+    assert.equal(described.find((p) => p.permission === 'notifications').decision, 'block');
+    assert.equal(described.find((p) => p.permission === 'camera').decision, 'ask');
     reloaded.set('https://a.example', 'geolocation', null);
     assert.deepEqual(reloaded.list('https://a.example'), { notifications: 'block' });
     reloaded.clearOrigin('https://a.example');
@@ -288,6 +299,76 @@ describe('autorisations des sites', () => {
     const fromTampered = createSitePermissionStore({ filePath: '/t.json', fsImpl: tampered });
     assert.deepEqual(fromTampered.list('https://ok.example'), { geolocation: 'allow' });
     assert.deepEqual(fromTampered.list('javascript:x'), {});
+  });
+
+  it('nomme chaque permission demandable', () => {
+    for (const permission of PROMPTABLE_PERMISSIONS) assert.ok(PERMISSION_NAMES[permission], permission);
+  });
+
+  it('montre « Ignorer » dans les informations du site et le lève sur demande', () => {
+    const store = createSitePermissionStore({});
+    store.dismiss('https://a.example', 'geolocation');
+    const row = () => describeSitePermissions(store, 'https://a.example').find((p) => p.permission === 'geolocation');
+    assert.equal(row().dismissed, true);
+    assert.equal(row().decision, 'ask');
+    assert.deepEqual(store.listSites(), [
+      { origin: 'https://a.example', host: 'a.example', decisions: {}, dismissed: ['geolocation'] },
+    ]);
+    // « Demander » (décision null) lève l'Ignorer.
+    store.set('https://a.example', 'geolocation', null);
+    assert.equal(row().dismissed, false);
+    assert.deepEqual(store.listSites(), []);
+  });
+
+  it('liste les sites retenus, triés par hôte', () => {
+    const store = createSitePermissionStore({});
+    store.set('https://zeta.example', 'camera', 'allow');
+    store.set('https://alpha.example', 'notifications', 'block');
+    store.dismiss('https://beta.example', 'microphone');
+    assert.deepEqual(
+      store.listSites().map((s) => s.host),
+      ['alpha.example', 'beta.example', 'zeta.example'],
+    );
+    store.clearOrigin('https://beta.example');
+    assert.deepEqual(store.listSites().map((s) => s.host), ['alpha.example', 'zeta.example']);
+  });
+
+  it('applique le réglage par défaut « Bloquer » sans poser de question', async () => {
+    const fsImpl = memoryFs();
+    const store = createSitePermissionStore({ filePath: '/d.json', fsImpl });
+    assert.equal(store.getDefault('geolocation'), 'ask');
+    assert.equal(store.setDefault('geolocation', 'block'), true);
+    assert.equal(store.setDefault('geolocation', 'allow'), false);
+    assert.equal(store.setDefault('fullscreen', 'block'), false);
+    store.setDefault('camera', 'block');
+    const asked = [];
+    const handlers = createSitePermissionHandlers({
+      store,
+      ask: async ({ permission }) => {
+        asked.push(permission);
+        return 'allow';
+      },
+    });
+    const wc = tab('https://maps.example/x');
+    assert.equal(await request(handlers, wc, 'geolocation'), false);
+    assert.equal(await request(handlers, wc, 'media', { mediaTypes: ['video'] }), false);
+    assert.equal(handlers.check(wc, 'media', 'https://maps.example', { embeddingOrigin: 'https://maps.example', mediaType: 'video' }), false);
+    assert.deepEqual(asked, []);
+    // Une décision du site l'emporte sur le réglage par défaut.
+    store.set('https://maps.example', 'geolocation', 'allow');
+    assert.equal(await request(handlers, wc, 'geolocation'), true);
+    assert.equal(
+      describeSitePermissions(store, 'https://maps.example').find((p) => p.permission === 'camera').defaultDecision,
+      'block',
+    );
+    // Persisté ; « Effacer les données » garde les réglages par défaut.
+    const reloaded = createSitePermissionStore({ filePath: '/d.json', fsImpl });
+    assert.equal(reloaded.getDefault('geolocation'), 'block');
+    reloaded.clear();
+    assert.equal(createSitePermissionStore({ filePath: '/d.json', fsImpl }).getDefault('camera'), 'block');
+    assert.deepEqual(reloaded.listSites(), []);
+    reloaded.setDefault('camera', 'ask');
+    assert.equal(createSitePermissionStore({ filePath: '/d.json', fsImpl }).getDefault('camera'), 'ask');
   });
 
   it('installe les gestionnaires une seule fois par session', () => {

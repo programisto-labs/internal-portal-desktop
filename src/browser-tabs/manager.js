@@ -1610,7 +1610,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const origin = tabOrigin(tabId);
     if (!origin) return { ok: false, error: 'unknown-tab' };
     if (permissionPolicy(permission) !== 'ask') return { ok: false, error: 'invalid-permission' };
-    if (!sitePermissions.set(origin, permission, decision === undefined ? null : decision)) {
+    const next = decision === undefined || decision === 'ask' ? null : decision;
+    if (!sitePermissions.set(origin, permission, next)) {
       return { ok: false, error: 'invalid-decision' };
     }
     return siteInfo({ tabId });
@@ -1944,6 +1945,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
 module.exports = {
   createBrowserTabManager,
+  sharedSitePermissions,
   STATE_CHANNEL,
   OPEN_REQUEST_CHANNEL,
   FIND_RESULT_CHANNEL,

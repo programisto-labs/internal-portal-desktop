@@ -104,6 +104,7 @@ const browserTabsBridge = {
   siteInfo: (payload) => invokeBrowserTab('browser-tab-site-info', payload),
   setSitePermission: (payload) => invokeBrowserTab('browser-tab-set-site-permission', payload),
   resetSitePermissions: (payload) => invokeBrowserTab('browser-tab-reset-site-permissions', payload),
+  openSiteSettings: () => invokeBrowserTab('browser-tab-open-site-settings'),
   historySuggest: (payload) => invokeBrowserTab('browser-history-suggest', payload),
   historyList: (payload) => invokeBrowserTab('browser-history-list', payload),
   historyRemove: (payload) => invokeBrowserTab('browser-history-remove', payload),

@@ -554,8 +554,10 @@
       row.append(label, select);
       list.append(row);
     }
-    el('site-empty').hidden = permissions.length > 0;
-    el('site-reset').hidden = permissions.length === 0;
+    // Desktop renvoie toutes les permissions demandables : « rien de retenu » = aucune décision ni « Ignorer ».
+    const retained = permissions.some((p) => p.decision === 'allow' || p.decision === 'block' || p.dismissed);
+    el('site-empty').hidden = retained;
+    el('site-reset').hidden = !retained;
     el('site-changed').hidden = !siteChanged;
   }
 
