@@ -467,6 +467,35 @@ function siteSummary(site, names) {
   return parts.join(' · ');
 }
 
+function renderAdblock(ab) {
+  if (!ab) return;
+  $('adblockEnabled').checked = ab.enabled;
+  const updated = ab.updatedAt
+    ? `Listes mises à jour le ${new Date(ab.updatedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}.`
+    : 'Listes en cours de téléchargement.';
+  $('adblockHint').textContent = `${updated} Le nombre de requêtes bloquées s’affiche dans les informations du site, à gauche de l’adresse.`;
+  const list = $('adblockSites');
+  list.replaceChildren();
+  if (!ab.sites.length) {
+    list.append(el('div', 'empty', 'Aucun site pour l’instant.'));
+    return;
+  }
+  for (const site of ab.sites) {
+    const row = el('div', 'row');
+    const text = el('div', 'text');
+    text.append(el('div', 'label', site.host));
+    if (!site.origin.startsWith('https:')) text.append(el('div', 'hint mono', site.origin));
+    const on = el('button', 'btn', 'Réactiver le bloqueur');
+    on.setAttribute('aria-label', `Réactiver le bloqueur sur ${site.host}`);
+    on.onclick = async () => {
+      await ipcRenderer.invoke('settings-modal-adblock-set-site', site.origin, true);
+      render();
+    };
+    row.append(text, on);
+    list.append(row);
+  }
+}
+
 function renderSites(sp) {
   if (!sp) return;
   const names = sp.names || {};
@@ -598,6 +627,7 @@ async function render() {
   renderDownloads(s.downloads);
   renderSearch(s.searchEngines);
   renderSites(s.sitePermissions);
+  renderAdblock(s.adblock);
 
   if (!s.hostOps) return;
   const h = s.hostOps;
@@ -698,6 +728,7 @@ window.addEventListener('DOMContentLoaded', () => {
     $('searchDefault').blur();
     render();
   };
+  bindSwitch('adblockEnabled', 'settings-modal-adblock-set-enabled');
   $('siteSearch').oninput = () => render();
   $('siteResetAll').onclick = async () => {
     const res = await ipcRenderer.invoke('settings-modal-site-reset-all');

@@ -250,7 +250,8 @@ describe('private window: browser tab manager', () => {
   it('never writes history, permissions or anything else to disk', async () => {
     manager.setSitePermission({ tabId: 't1', permission: 'geolocation', decision: 'allow' });
     await new Promise((resolve) => setTimeout(resolve, 1200));
-    assert.deepEqual(fs.readdirSync(userData), []);
+    // Seul le cache des listes du bloqueur (partagé par toutes les fenêtres, aucune donnée de navigation) peut exister.
+    assert.deepEqual(fs.readdirSync(userData).filter((name) => name !== 'adblock'), []);
   });
 
   it('sends Lasco addresses to the main window', () => {

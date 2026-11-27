@@ -34,6 +34,7 @@ const {
 } = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
+const { createAdblockService } = require('./adblock');
 const { applyChromeIdentity, chromeUserAgentOverride, installClientHintHeaders } = require('./chrome-identity');
 const {
   installDevtoolsResponsive,
@@ -68,6 +69,7 @@ const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.
 const PASSWORD_POPOVER_PAGE = path.join(__dirname, 'password-popover.html');
 
 const BROWSER_PARTITION = 'persist:browser-tabs';
+const ADBLOCK_PUSH_DELAY_MS = 500;
 const STATE_CHANNEL = 'browser-tab-state';
 const OPEN_REQUEST_CHANNEL = 'browser-tab-open-request';
 const CLOSED_CHANNEL = 'browser-tab-closed';
@@ -275,6 +277,15 @@ function sharedSitePermissions() {
   return sitePermissionStore;
 }
 
+/** Bloqueur de pubs et de traqueurs (docs/adblock.md) : un moteur et une session pour toutes les fenêtres. */
+let adblockService = null;
+function sharedAdblock() {
+  if (!adblockService) {
+    adblockService = createAdblockService({ userDataDir: app.getPath('userData'), electron: require('electron') });
+  }
+  return adblockService;
+}
+
 /** webContents id d'un onglet web → fenêtre qui l'affiche (pour poser la question dans la bonne fenêtre). */
 const tabWindowGetters = new Map();
 
@@ -344,6 +355,16 @@ function createBrowserTabManager({
   const sitePermissions = privateMode
     ? createPrivateSitePermissions({ memory: createSitePermissionStore({}), base: sharedSitePermissions() })
     : sharedSitePermissions();
+  const adblock = sharedAdblock();
+  // Interrupteur ou exception changés (Réglages, informations du site) : l'état des onglets suit.
+  const stopAdblockListener = adblock.settings.onChange(() => {
+    // Fenêtre fermée : plus rien à mettre à jour.
+    if (!getMainWindow()) {
+      stopAdblockListener();
+      return;
+    }
+    for (const tabId of tabs.keys()) pushState(tabId);
+  });
   const userAgent = buildChromiumUserAgent();
   let sessionConfigured = false;
   /** Plein écran demandé par une page (vidéo) : la fenêtre était-elle déjà en plein écran ? */
@@ -517,6 +538,8 @@ function createBrowserTabManager({
         ask: (request) => askSitePermission(request, { privateMode }),
         ensureSystemMediaAccess: (media) => ensureSystemMediaAccess(systemPreferences, media),
       });
+      // Bloqueur de pubs et de traqueurs : cette session seulement, jamais persist:portal.
+      adblock.install(browserSession);
       // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
       void installDevtoolsResponsive(browserSession);
     }
@@ -555,6 +578,8 @@ function createBrowserTabManager({
       // Son de l'onglet (icône haut-parleur de la barre d'onglets, comme Chrome).
       audible: wc.isCurrentlyAudible(),
       muted: wc.isAudioMuted(),
+      // Bloqueur (docs/adblock.md) : actif sur cette page, requêtes bloquées depuis son chargement.
+      adblock: { active: adblock.isActiveFor(url), blocked: entry.adblockBlocked || 0 },
     };
   }
 
@@ -856,6 +881,22 @@ function createBrowserTabManager({
     const webContentsId = wc.id;
     tabIdsByWebContents.set(webContentsId, tabId);
     tabWindowGetters.set(webContentsId, getMainWindow);
+    // Requêtes bloquées par le bloqueur : comptées par page, état poussé au plus deux fois par seconde.
+    adblock.trackTab(webContentsId, () => {
+      const entry = tabs.get(tabId);
+      if (!entry || entry.view !== view) return;
+      entry.adblockBlocked = (entry.adblockBlocked || 0) + 1;
+      if (entry.adblockPushTimer) return;
+      entry.adblockPushTimer = setTimeout(() => {
+        entry.adblockPushTimer = null;
+        if (!wc.isDestroyed()) pushState(tabId);
+      }, ADBLOCK_PUSH_DELAY_MS);
+    });
+    wc.on('did-start-navigation', (details) => {
+      if (!details || !details.isMainFrame || details.isSameDocument) return;
+      const entry = tabs.get(tabId);
+      if (entry && entry.view === view) entry.adblockBlocked = 0;
+    });
     registerResponsiveRoute(webContentsId, (message) => handleResponsiveMessage(tabId, message));
     wc.once('destroyed', () => unregisterResponsiveRoute(webContentsId));
     // Comme le mode appareil de Chrome : fermer les DevTools rend la page à tout l'onglet.
@@ -982,6 +1023,12 @@ function createBrowserTabManager({
       if (isCurrentTabView(tabs, tabId, view)) leavePageFullscreen(tabId);
     });
     wc.on('destroyed', () => {
+      adblock.untrackTab(webContentsId);
+      const adblockEntry = tabs.get(tabId);
+      if (adblockEntry && adblockEntry.view === view && adblockEntry.adblockPushTimer) {
+        clearTimeout(adblockEntry.adblockPushTimer);
+        adblockEntry.adblockPushTimer = null;
+      }
       tabIdsByWebContents.delete(webContentsId);
       tabWindowGetters.delete(webContentsId);
       // `create` on a live tab id (shell reloaded, e.g. workspace switch) closes the old
@@ -1752,7 +1799,35 @@ function createBrowserTabManager({
       host: siteHost(origin),
       security: state.security,
       permissions: describeSitePermissions(sitePermissions, origin),
+      adblock: describeSiteAdblock(tabId, origin, state.url),
     };
+  }
+
+  /**
+   * Ligne « Bloqueur » des informations du site. `enabled` : interrupteur global ; `siteEnabled` :
+   * pas d'exception pour ce site ; `available` : false pour une page Lasco (jamais filtrée).
+   */
+  function describeSiteAdblock(tabId, origin, url) {
+    const entry = tabs.get(tabId);
+    return {
+      available: !adblock.isProtected(url),
+      enabled: adblock.settings.isEnabled(),
+      siteEnabled: !adblock.settings.isSiteAllowed(origin),
+      active: adblock.isActiveFor(url),
+      blocked: (entry && entry.adblockBlocked) || 0,
+    };
+  }
+
+  /** `enabled` false : exception pour le site (bloqueur coupé) ; la page est rechargée, comme Brave. */
+  function setSiteAdblock({ tabId, enabled } = {}) {
+    const origin = tabOrigin(tabId);
+    if (!origin) return { ok: false, error: 'unknown-tab' };
+    if (typeof enabled !== 'boolean') return { ok: false, error: 'invalid-value' };
+    const before = adblock.settings.isSiteAllowed(origin);
+    if (!adblock.settings.setSiteAllowed(origin, !enabled)) return { ok: false, error: 'invalid-site' };
+    const entry = liveEntry(tabId);
+    if (entry && before === enabled && !entry.errorPage) entry.view.webContents.reload();
+    return siteInfo({ tabId });
   }
 
   /** `decision` : 'allow' | 'block' | null (redemander). */
@@ -2064,6 +2139,7 @@ function createBrowserTabManager({
     siteInfo,
     setSitePermission,
     resetSitePermissions,
+    setSiteAdblock,
     historySuggest,
     historyList,
     historyRemove,
@@ -2112,6 +2188,7 @@ function createBrowserTabManager({
 module.exports = {
   createBrowserTabManager,
   sharedSitePermissions,
+  sharedAdblock,
   STATE_CHANNEL,
   OPEN_REQUEST_CHANNEL,
   FIND_RESULT_CHANNEL,
