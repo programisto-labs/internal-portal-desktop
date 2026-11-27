@@ -97,6 +97,15 @@ const browserTabsBridge = {
   print: (payload) => invokeBrowserTab('browser-tab-print', payload),
   capture: (payload) => invokeBrowserTab('browser-tab-capture', payload),
   copyScreenshot: (payload) => invokeBrowserTab('browser-tab-copy-screenshot', payload),
+  // Capture d'écran enregistrée dans les Téléchargements et copiée (docs/page-capture.md).
+  screenshots: {
+    /** Le portail traite `capture-full-page` / `capture-visible` (menu contextuel, ⌘⇧S). */
+    ready: () => invokeBrowserTab('browser-tab-capture-ready'),
+    /** `{ tabId, mode: 'full' | 'visible', target?: 'file' | 'assistant' }` : onglet web. */
+    captureTab: (payload) => invokeBrowserTab('browser-tab-capture-save', payload),
+    /** `{ rect, title, target? }` : partie visible d'une page du portail (rect dans la fenêtre). */
+    capturePortal: (payload) => invokeBrowserTab('browser-portal-capture-save', payload),
+  },
   openExternal: (payload) => invokeBrowserTab('browser-tab-open-external', payload),
   openDevTools: (payload) => invokeBrowserTab('browser-tab-open-devtools', payload),
   clearBrowsingData: () => invokeBrowserTab('browser-tab-clear-data'),

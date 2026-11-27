@@ -4,6 +4,7 @@ const {
   app,
   BrowserWindow,
   WebContentsView,
+  nativeImage,
   session,
   clipboard,
   ClipboardItem,
@@ -39,6 +40,7 @@ const { createPasswordPopover } = require('./password-popover');
 const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-autofill');
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
+const { capturePageImage } = require('./page-capture');
 const {
   BUILTIN_ENGINES,
   MAX_DESCRIPTION_BYTES,
@@ -994,6 +996,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         t: () => forwardToPortalField('new-tab'),
         // Téléchargements : ⌘⇧J (macOS), Ctrl+J (Windows / Linux), comme Chrome.
         j: () => forward('downloads'),
+        // ⌘⇧S / Ctrl+Shift+S : capture de la page entière (docs/page-capture.md).
+        s: () => captureReady && forward('capture-full-page'),
         p: () => print({ tabId }),
         r: () => reload({ tabId }),
         '=': () => zoom({ tabId, direction: 'in' }),
@@ -1004,7 +1008,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         ']': () => goForward({ tabId }),
       };
       const handler = handlers[key];
-      if (!handler || (input.shift && !['g', 'j', '=', '+'].includes(key))) return;
+      if (!handler || (input.shift && !['g', 'j', 's', '=', '+'].includes(key))) return;
+      // ⌘S seul reste à la page (enregistrer dans un éditeur web).
+      if (key === 's' && (!input.shift || !captureReady)) return;
       event.preventDefault();
       handler();
     });
@@ -1025,6 +1031,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
           });
         }
       };
+
+      const forwardCapture = (action) => emitToRenderer(SHORTCUT_CHANNEL, { tabId, action });
 
       // Téléchargement géré par Lasco (docs/downloads.md) : dossier choisi dans les Réglages.
       const download = (url) => {
@@ -1122,6 +1130,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         { label: 'Actualiser', click: () => reload({ tabId }) },
         separator,
         { label: 'Imprimer…', click: () => print({ tabId }) },
+        // Capture d'écran (docs/page-capture.md) : le portail enregistre et affiche la notification.
+        ...(captureReady
+          ? [
+              { label: 'Capturer la page entière', click: () => forwardCapture('capture-full-page') },
+              { label: 'Capturer la partie visible', click: () => forwardCapture('capture-visible') },
+            ]
+          : []),
+        separator,
         {
           label: 'Inspecter',
           click: () => {
@@ -1544,6 +1560,30 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     }
   }
 
+  /** Le portail sait enregistrer une capture : menu contextuel et ⌘⇧S la proposent. */
+  let captureReady = false;
+  function setCaptureReady() {
+    captureReady = true;
+    return { ok: true };
+  }
+
+  /**
+   * Capture d'écran en PNG (docs/page-capture.md) : `mode` 'full' (page entière, protocole
+   * DevTools) ou 'visible'. Renvoie l'image au main, qui l'enregistre et la copie.
+   */
+  async function captureImage({ tabId, mode }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    try {
+      const result = await capturePageImage(wc, { mode: mode === 'visible' ? 'visible' : 'full', nativeImage });
+      if (!result.ok) return result;
+      return { ...result, url: sanitizeBrowserUrl(wc.getURL()) || entry.url || '', title: wc.getTitle() || '' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'capture-failed' };
+    }
+  }
+
   async function openExternal({ tabId }) {
     const entry = liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
@@ -1905,6 +1945,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     print,
     capture,
     copyScreenshot,
+    captureImage,
+    setCaptureReady,
     openExternal,
     openDevTools,
     clearBrowsingData,

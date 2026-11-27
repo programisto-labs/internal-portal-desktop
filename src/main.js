@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, globalShortcut, session, systemPreferences } = require('electron');
+const { app, BrowserWindow, WebContentsView, clipboard, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, globalShortcut, session, systemPreferences } = require('electron');
 const { installPortalMediaPermissions } = require('./media-permissions');
 const fs = require('fs');
 const path = require('path');
@@ -6,6 +6,7 @@ const http = require('http');
 const https = require('https');
 const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager, sharedSitePermissions, BROWSER_PARTITION } = require('./browser-tabs/manager');
+const { captureFilename, captureVisible } = require('./browser-tabs/page-capture');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
@@ -2016,6 +2017,67 @@ function registerWindowIPC() {
     if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
     openSettings('downloads');
     return { ok: true };
+  });
+
+  // --- Capture d'écran (docs/page-capture.md) : même fenêtres que les téléchargements ---
+  /**
+   * `target: 'file'` (défaut) : enregistrée dans les Téléchargements et copiée dans le
+   * presse-papiers ; `'assistant'` : PNG renvoyé à la page (pièce jointe du chat), rien sur le disque.
+   */
+  const deliverCapture = (shot, { target, url, title, source }) => {
+    if (!shot || !shot.ok) return shot || { ok: false, error: 'capture-failed' };
+    const filename = captureFilename({ url, title });
+    const meta = { width: shot.width, height: shot.height, mode: shot.mode, truncated: Boolean(shot.truncated), fallback: Boolean(shot.fallback), filename };
+    if (target === 'assistant') return { ok: true, ...meta, data: new Uint8Array(shot.png) };
+    const saved = getDownloadService().saveFile({ name: filename, data: shot.png, mimeType: 'image/png', url: source === 'web' ? url : '', source });
+    let copied = false;
+    try {
+      clipboard.writeImage(nativeImage.createFromBuffer(shot.png));
+      copied = true;
+    } catch (_) {
+      // Image trop grande pour le presse-papiers : le fichier reste.
+    }
+    if (!saved.ok && !copied) return { ok: false, error: saved.error || 'capture-failed' };
+    return { ok: true, ...meta, copied, item: saved.ok ? saved.item : null };
+  };
+  ipcMain.handle('browser-tab-capture-ready', (event) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    return manager ? manager.setCaptureReady() : { ok: false, error: 'forbidden' };
+  });
+  ipcMain.handle('browser-tab-capture-save', async (event, payload) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const shot = await manager.captureImage({ tabId: p.tabId, mode: p.mode });
+    return deliverCapture(shot, { target: p.target, url: shot && shot.url, title: shot && shot.title, source: 'web' });
+  });
+  // Page du portail (iframe de l'onglet) : partie visible, découpée dans la fenêtre elle-même.
+  ipcMain.handle('browser-portal-capture-save', async (event, payload) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const r = p.rect && typeof p.rect === 'object' ? p.rect : null;
+    const [cw, ch] = win.getContentSize();
+    // Le cadre est en pixels CSS de la page ; `capturePage` attend des points de la fenêtre.
+    const zoom = win.webContents.getZoomFactor() || 1;
+    const rect = r
+      ? {
+          x: Math.max(0, Math.round((Number(r.x) || 0) * zoom)),
+          y: Math.max(0, Math.round((Number(r.y) || 0) * zoom)),
+          width: Math.floor((Number(r.width) || 0) * zoom),
+          height: Math.floor((Number(r.height) || 0) * zoom),
+        }
+      : null;
+    if (rect) {
+      rect.width = Math.min(rect.width, cw - rect.x);
+      rect.height = Math.min(rect.height, ch - rect.y);
+      if (rect.width <= 0 || rect.height <= 0) return { ok: false, error: 'invalid-rect' };
+    }
+    const shot = await captureVisible(win.webContents, rect || undefined);
+    const title = typeof p.title === 'string' ? p.title.slice(0, 120) : '';
+    return deliverCapture(shot, { target: p.target, url: '', title, source: 'portal' });
   });
 
   // --- Host operations: bridge for the web app (strictly validated natively) ---
