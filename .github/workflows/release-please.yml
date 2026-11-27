@@ -1,0 +1,54 @@
+name: Release Please (desktop)
+
+# Every push to main updates one release PR ("chore(release): vX.Y.Z"): version in package.json,
+# CHANGELOG.md, computed from Conventional Commits (feat → minor, fix → patch, "!" → major).
+# Merging that PR creates the tag and the GitHub release, then builds and publishes Lasco Desktop.
+# Commits under mobile/ do not count: the mobile app has its own tags (mobile-v*).
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR / release
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # The release exists before its installers: hide it (draft) so electron-updater never sees
+      # a "latest" release without latest-mac.yml / latest.yml. The publish workflow makes it
+      # public again once macOS and Windows are both uploaded. The tag stays in place.
+      - name: Hold the release as a draft until its artifacts are uploaded
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true
+
+  publish:
+    name: Build and publish
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    # A tag pushed with the Actions token does not trigger other workflows: call the publish workflow here.
+    uses: ./.github/workflows/release-auto-update.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit

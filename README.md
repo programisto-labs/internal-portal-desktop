@@ -56,17 +56,27 @@ This app uses `electron-updater` with GitHub Releases as the update provider.
 These commands require `GH_TOKEN` and publish to GitHub Releases on
 `programisto-labs/internal-portal-desktop` (GitHub repo name; npm package is `lasco-desktop`).
 
-### CI release workflow
+### CI release workflow (release-please)
 
-GitHub Actions workflow: `.github/workflows/release-auto-update.yml`
+Releases are automated with [release-please](https://github.com/googleapis/release-please-action):
 
-- Triggers on tags matching `v*` and on manual dispatch.
-- Builds and publishes macOS + Windows artifacts to GitHub Releases.
-- Required repository secrets:
-  - `GH_TOKEN`
-  - `APPLE_ID`
-  - `APPLE_APP_SPECIFIC_PASSWORD`
-  - `APPLE_TEAM_ID` (optional if only one team)
+1. Every push to `main` updates one release PR, `chore(release): vX.Y.Z` (`.github/workflows/release-please.yml`).
+   The version comes from Conventional Commits since the last release: `feat` → minor, `fix` / `perf` → patch,
+   `feat!` or a `BREAKING CHANGE:` footer → major. `docs`, `chore`, `ci`… alone do not trigger a release.
+   Commits under `mobile/` are ignored (the mobile app has its own `mobile-v*` tags).
+2. Merging that PR bumps `package.json` / `package-lock.json`, writes `CHANGELOG.md`, creates the `vX.Y.Z` tag
+   and the GitHub release, held as a draft.
+3. The same run calls `.github/workflows/release-auto-update.yml`: macOS (signed and notarized), Windows and Linux
+   are built and uploaded to the draft. The `finalize` job checks that `latest-mac.yml`, `latest.yml` and
+   `latest-linux.yml` are there, then publishes the release: installed apps update from that moment.
+
+Never edit the version by hand: release-please owns it (`.release-please-manifest.json`).
+To hold a release, simply do not merge the release PR. Fallback: pushing a `v*` tag by hand, or running
+"Release Lasco (desktop)" manually with an existing tag, still publishes.
+
+Repository settings: Actions must be allowed to create pull requests (Settings → Actions → General).
+Required secrets: `MAC_CERTS`, `MAC_CERTS_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`.
+`GH_TOKEN` is optional (defaults to the Actions token).
 
 ### End-to-end update validation (N -> N+1)
 
