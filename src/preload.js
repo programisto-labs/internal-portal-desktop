@@ -104,6 +104,8 @@ const browserTabsBridge = {
   siteInfo: (payload) => invokeBrowserTab('browser-tab-site-info', payload),
   setSitePermission: (payload) => invokeBrowserTab('browser-tab-set-site-permission', payload),
   resetSitePermissions: (payload) => invokeBrowserTab('browser-tab-reset-site-permissions', payload),
+  /** `{ tabId, enabled }` : bloqueur de pubs sur le site de l'onglet (docs/adblock.md) ; la page est rechargée. */
+  setSiteAdblock: (payload) => invokeBrowserTab('browser-tab-set-site-adblock', payload),
   openSiteSettings: () => invokeBrowserTab('browser-tab-open-site-settings'),
   historySuggest: (payload) => invokeBrowserTab('browser-history-suggest', payload),
   historyList: (payload) => invokeBrowserTab('browser-history-list', payload),

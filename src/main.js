@@ -5,7 +5,12 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { autoUpdater } = require('electron-updater');
-const { createBrowserTabManager, sharedSitePermissions, BROWSER_PARTITION } = require('./browser-tabs/manager');
+const {
+  createBrowserTabManager,
+  sharedSitePermissions,
+  sharedAdblock,
+  BROWSER_PARTITION,
+} = require('./browser-tabs/manager');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
@@ -591,6 +596,16 @@ function sitePermissionsSettingsState() {
     names: PERMISSION_NAMES,
     defaults: store.listDefaults(),
     sites: store.listSites(),
+  };
+}
+
+/** Réglages > Bloqueur de pubs (docs/adblock.md). */
+function adblockSettingsState() {
+  const adblock = sharedAdblock();
+  return {
+    enabled: adblock.settings.isEnabled(),
+    updatedAt: adblock.loader.getFetchedAt() || null,
+    sites: adblock.settings.listSites(),
   };
 }
 
@@ -2442,6 +2457,7 @@ function registerWindowIPC() {
       driveSync: driveSyncSettingsState(getDriveSyncStore()),
       searchEngines: getSearchEngineStore().list(),
       sitePermissions: sitePermissionsSettingsState(),
+      adblock: adblockSettingsState(),
       downloads: {
         directory: downloadsDirectory(),
         isDefault: !settings.downloadsDirectory || downloadsDirectory() !== settings.downloadsDirectory,
@@ -2561,6 +2577,18 @@ function registerWindowIPC() {
     if (!fromSettings(event) || typeof value !== 'boolean') return false;
     getSettingsStore().set({ downloadsAskWhere: value });
     return true;
+  });
+  // Réglages > Bloqueur de pubs (docs/adblock.md).
+  ipcMain.handle('settings-modal-adblock-set-enabled', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return { ok: false, error: 'forbidden' };
+    return { ok: sharedAdblock().settings.setEnabled(enabled) };
+  });
+  ipcMain.handle('settings-modal-adblock-set-site', (event, origin, enabled) => {
+    if (!fromSettings(event) || typeof origin !== 'string' || siteOrigin(origin) !== origin) {
+      return { ok: false, error: 'forbidden' };
+    }
+    if (typeof enabled !== 'boolean') return { ok: false, error: 'invalid-value' };
+    return { ok: sharedAdblock().settings.setSiteAllowed(origin, !enabled) };
   });
   // Réglages > Autorisations des sites (docs/site-permissions.md).
   ipcMain.handle('settings-modal-site-set-default', (event, permission, value) => {
@@ -2831,6 +2859,7 @@ function registerWindowIPC() {
     'browser-tab-site-info': 'siteInfo',
     'browser-tab-set-site-permission': 'setSitePermission',
     'browser-tab-reset-site-permissions': 'resetSitePermissions',
+    'browser-tab-set-site-adblock': 'setSiteAdblock',
     'browser-history-suggest': 'historySuggest',
     'browser-history-list': 'historyList',
     'browser-history-remove': 'historyRemove',
@@ -3132,6 +3161,8 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     app.setName('Lasco');
     nativeTheme.themeSource = getSettings().themeSource;
+    // Bloqueur de pubs (docs/adblock.md) : jamais sur les pages de Lasco (portail, API, connexion).
+    sharedAdblock().setProtectedUrlMatcher((url) => isPortalNavigationUrl(url) || isApiHostNavigationUrl(url));
     if (VM_MODE) {
       startVmMode();
       return;
