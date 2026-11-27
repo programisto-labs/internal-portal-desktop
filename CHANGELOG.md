@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.10.3](https://github.com/programisto-labs/internal-portal-desktop/compare/v2.10.2...v2.10.3) (2026-11-27)
+
+
+### Corrections
+
+* **onglets web:** Meet demande la caméra (vérification pan/tilt/zoom) ([4fe3ace](https://github.com/programisto-labs/internal-portal-desktop/commit/4fe3acef73f40d0337a991b5ec9faa717014d72f))
+* **onglets web:** Meet demande la caméra (vérification pan/tilt/zoom) ([a55cedf](https://github.com/programisto-labs/internal-portal-desktop/commit/a55cedfe8f3387adfacf881e5cf38e363e4dbbfd))
+
 ## [2.10.2](https://github.com/programisto-labs/internal-portal-desktop/compare/v2.10.1...v2.10.2) (2026-11-27)
 
 
