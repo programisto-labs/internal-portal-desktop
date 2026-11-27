@@ -1,13 +1,29 @@
 name: Release Lasco (desktop)
 
+# Normally called by release-please.yml once the release PR is merged (tag and draft release already exist).
+# A tag pushed by hand (v*) or a manual run on an existing tag still publish.
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v2.11.0)"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v2.11.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   publish-macos:
@@ -16,6 +32,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      # electron-builder names the release after package.json: it must match the tag.
+      - name: Check package version matches the tag
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$RELEASE_TAG" ]; then
+            echo "::error::package.json is $version but the tag is $RELEASE_TAG."
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -110,6 +138,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      # electron-builder names the release after package.json: it must match the tag.
+      - name: Check package version matches the tag
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$RELEASE_TAG" ]; then
+            echo "::error::package.json is $version but the tag is $RELEASE_TAG."
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -133,6 +173,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      # electron-builder names the release after package.json: it must match the tag.
+      - name: Check package version matches the tag
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$RELEASE_TAG" ]; then
+            echo "::error::package.json is $version but the tag is $RELEASE_TAG."
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -158,4 +210,26 @@ jobs:
           deb=$(ls *.deb | head -n1)
           sha256sum "$deb" > "$deb.sha256"
           cat "$deb.sha256"
-          gh release upload "$GITHUB_REF_NAME" "$deb.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" "$deb.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Make the release public only once every platform is uploaded (electron-updater reads latest-mac.yml,
+  # latest.yml and latest-linux.yml from the latest release). electron-builder only warns when it cannot
+  # upload to an existing release, so check the assets here instead of trusting the build steps.
+  finalize:
+    name: Publish the release
+    needs: [publish-macos, publish-windows, publish-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check assets and publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for name in latest-mac.yml latest.yml latest-linux.yml; do
+            grep -qx "$name" <<<"$assets" || { echo "::error::$name missing from release $RELEASE_TAG."; exit 1; }
+          done
+          grep -q -- "-arm64-mac\.zip$" <<<"$assets" || { echo "::error::Apple Silicon zip missing."; exit 1; }
+          grep -q -- "\.exe$" <<<"$assets" || { echo "::error::Windows installer missing."; exit 1; }
+          grep -q -- "\.deb\.sha256$" <<<"$assets" || { echo "::error::.deb checksum missing."; exit 1; }
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
