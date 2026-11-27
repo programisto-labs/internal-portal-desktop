@@ -1,0 +1,28 @@
+{
+  "checksum": "0",
+  "roots": {
+    "bookmark_bar": {
+      "children": [
+        { "type": "url", "name": "Exemple", "url": "https://example.com/" },
+        {
+          "type": "folder",
+          "name": "Docs",
+          "children": [
+            { "type": "url", "name": "MDN", "url": "https://developer.mozilla.org/" },
+            { "type": "url", "name": "Script", "url": "javascript:alert(1)" },
+            { "type": "folder", "name": "Profond", "children": [{ "type": "url", "name": "", "url": "http://deep.example.org/a" }] }
+          ]
+        }
+      ],
+      "name": "Bookmarks bar",
+      "type": "folder"
+    },
+    "other": {
+      "children": [{ "type": "url", "name": "Autre", "url": "https://other.example.net/" }],
+      "name": "Other bookmarks",
+      "type": "folder"
+    },
+    "synced": { "children": [], "name": "Mobile bookmarks", "type": "folder" }
+  },
+  "version": 1
+}
