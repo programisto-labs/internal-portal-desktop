@@ -232,8 +232,48 @@ function isSpareWindowUsable({ url, href, origin }) {
   }
 }
 
+const MAX_SUMMARY_TABS = 200;
+
+function cleanText(value, max) {
+  return typeof value === 'string' ? value.replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, max) : '';
+}
+
+/**
+ * Tabs a portal window publishes for the tab search of the other windows (⌘⇧A): only what the
+ * list shows (title, address, icon). Returns a clean list, never more than 200 tabs.
+ */
+function sanitizeTabSummary(raw) {
+  const list = raw && typeof raw === 'object' && Array.isArray(raw.tabs) ? raw.tabs : [];
+  const out = [];
+  for (const item of list) {
+    if (out.length >= MAX_SUMMARY_TABS) break;
+    if (!item || typeof item !== 'object') continue;
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id || id.length > MAX_ID_LENGTH || !/^[\w:.-]+$/.test(id)) continue;
+    const href = cleanText(item.href, MAX_HREF_LENGTH);
+    let favicon = null;
+    if (
+      typeof item.favicon === 'string' &&
+      item.favicon.length <= MAX_FAVICON_LENGTH &&
+      (/^https?:\/\//i.test(item.favicon) || isPortalPath(item.favicon))
+    ) {
+      favicon = item.favicon;
+    }
+    out.push({
+      id,
+      kind: item.kind === 'external' ? 'external' : 'internal',
+      title: cleanText(item.title, MAX_TITLE_LENGTH),
+      href,
+      favicon,
+      active: item.active === true,
+    });
+  }
+  return out;
+}
+
 module.exports = {
   TAB_WINDOW_ARG_PREFIX,
+  sanitizeTabSummary,
   isSpareWindowUsable,
   isPortalPath,
   sanitizeTabDescriptor,

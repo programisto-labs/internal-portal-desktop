@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, globalShortcut, session, systemPreferences } = require('electron');
+const { app, BrowserWindow, WebContentsView, clipboard, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, globalShortcut, session, systemPreferences } = require('electron');
 const { installPortalMediaPermissions } = require('./media-permissions');
 const fs = require('fs');
 const path = require('path');
@@ -6,6 +6,7 @@ const http = require('http');
 const https = require('https');
 const { autoUpdater } = require('electron-updater');
 const { createBrowserTabManager, sharedSitePermissions, BROWSER_PARTITION } = require('./browser-tabs/manager');
+const { captureFilename, captureVisible } = require('./browser-tabs/page-capture');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
@@ -25,6 +26,7 @@ const { FORM_AUTOFILL_PAGE_CHANNELS } = require('./browser-tabs/form-autofill');
 const { createVaultAuth } = require('./vault-auth');
 const {
   sanitizeTabDescriptor,
+  sanitizeTabSummary,
   encodeTabWindowArg,
   findWindowAtPoint,
   buildDetachedWindowBounds,
@@ -2159,6 +2161,67 @@ function registerWindowIPC() {
     return { ok: true };
   });
 
+  // --- Capture d'écran (docs/page-capture.md) : même fenêtres que les téléchargements ---
+  /**
+   * `target: 'file'` (défaut) : enregistrée dans les Téléchargements et copiée dans le
+   * presse-papiers ; `'assistant'` : PNG renvoyé à la page (pièce jointe du chat), rien sur le disque.
+   */
+  const deliverCapture = (shot, { target, url, title, source }) => {
+    if (!shot || !shot.ok) return shot || { ok: false, error: 'capture-failed' };
+    const filename = captureFilename({ url, title });
+    const meta = { width: shot.width, height: shot.height, mode: shot.mode, truncated: Boolean(shot.truncated), fallback: Boolean(shot.fallback), filename };
+    if (target === 'assistant') return { ok: true, ...meta, data: new Uint8Array(shot.png) };
+    const saved = getDownloadService().saveFile({ name: filename, data: shot.png, mimeType: 'image/png', url: source === 'web' ? url : '', source });
+    let copied = false;
+    try {
+      clipboard.writeImage(nativeImage.createFromBuffer(shot.png));
+      copied = true;
+    } catch (_) {
+      // Image trop grande pour le presse-papiers : le fichier reste.
+    }
+    if (!saved.ok && !copied) return { ok: false, error: saved.error || 'capture-failed' };
+    return { ok: true, ...meta, copied, item: saved.ok ? saved.item : null };
+  };
+  ipcMain.handle('browser-tab-capture-ready', (event) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    return manager ? manager.setCaptureReady() : { ok: false, error: 'forbidden' };
+  });
+  ipcMain.handle('browser-tab-capture-save', async (event, payload) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const shot = await manager.captureImage({ tabId: p.tabId, mode: p.mode });
+    return deliverCapture(shot, { target: p.target, url: shot && shot.url, title: shot && shot.title, source: 'web' });
+  });
+  // Page du portail (iframe de l'onglet) : partie visible, découpée dans la fenêtre elle-même.
+  ipcMain.handle('browser-portal-capture-save', async (event, payload) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const r = p.rect && typeof p.rect === 'object' ? p.rect : null;
+    const [cw, ch] = win.getContentSize();
+    // Le cadre est en pixels CSS de la page ; `capturePage` attend des points de la fenêtre.
+    const zoom = win.webContents.getZoomFactor() || 1;
+    const rect = r
+      ? {
+          x: Math.max(0, Math.round((Number(r.x) || 0) * zoom)),
+          y: Math.max(0, Math.round((Number(r.y) || 0) * zoom)),
+          width: Math.floor((Number(r.width) || 0) * zoom),
+          height: Math.floor((Number(r.height) || 0) * zoom),
+        }
+      : null;
+    if (rect) {
+      rect.width = Math.min(rect.width, cw - rect.x);
+      rect.height = Math.min(rect.height, ch - rect.y);
+      if (rect.width <= 0 || rect.height <= 0) return { ok: false, error: 'invalid-rect' };
+    }
+    const shot = await captureVisible(win.webContents, rect || undefined);
+    const title = typeof p.title === 'string' ? p.title.slice(0, 120) : '';
+    return deliverCapture(shot, { target: p.target, url: '', title, source: 'portal' });
+  });
+
   // --- Host operations: bridge for the web app (strictly validated natively) ---
   /** Cadre principal de la fenêtre principale, chargé depuis l'origine exacte du portail. */
   const trustedPortalSender = (event) => {
@@ -2528,6 +2591,46 @@ function registerWindowIPC() {
       if (process.platform === 'darwin') kept.floating.moveTop();
     }
     return { ok: true, action: 'detached' };
+  });
+  // Recherche dans les onglets (⌘⇧A) : chaque fenêtre publie ses onglets (titre, adresse, icône),
+  // la bulle d'une fenêtre liste ceux des autres et peut y aller ou les fermer.
+  ipcMain.handle('tab-window-publish-tabs', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    entry.tabSummary = sanitizeTabSummary(payload);
+    return { ok: true };
+  });
+  ipcMain.handle('tab-window-list-tabs', (event) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, windows: [] };
+    const windows = portalWindowsFrontToBack()
+      .filter((other) => other !== entry && Array.isArray(other.tabSummary) && other.tabSummary.length > 0)
+      .map((other) => ({ windowId: other.win.id, role: other.role, tabs: other.tabSummary }));
+    return { ok: true, windows };
+  });
+  ipcMain.handle('tab-window-activate-tab', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const target = Number.isInteger(p.windowId) ? portalWindows.get(p.windowId) : null;
+    if (!target || target === entry || target.spare || target.win.isDestroyed()) {
+      return { ok: false, error: 'no-window' };
+    }
+    const tabId = typeof p.tabId === 'string' ? p.tabId : '';
+    if (!Array.isArray(target.tabSummary) || !target.tabSummary.some((tab) => tab.id === tabId)) {
+      return { ok: false, error: 'no-tab' };
+    }
+    const action = p.action === 'close' ? 'close' : 'select';
+    if (action === 'select') {
+      if (target.win.isMinimized()) target.win.restore();
+      target.win.show();
+      target.win.focus();
+    } else {
+      // Optimiste : la liste suivante ne le montre plus, la fenêtre republiera ses onglets.
+      target.tabSummary = target.tabSummary.filter((tab) => tab.id !== tabId);
+    }
+    target.win.webContents.send('tab-window-tab-action', { tabId, action });
+    return { ok: true };
   });
   // A detached window whose last tab left (closed, attached or dragged away).
   ipcMain.handle('tab-window-close', (event) => {

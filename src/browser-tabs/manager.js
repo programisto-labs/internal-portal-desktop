@@ -4,6 +4,7 @@ const {
   app,
   BrowserWindow,
   WebContentsView,
+  nativeImage,
   session,
   clipboard,
   ClipboardItem,
@@ -33,12 +34,19 @@ const {
 } = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
-const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
+const { applyChromeIdentity, chromeUserAgentOverride, installClientHintHeaders } = require('./chrome-identity');
+const {
+  installDevtoolsResponsive,
+  registerResponsiveRoute,
+  unregisterResponsiveRoute,
+  createTabResponsive,
+} = require('./devtools-responsive');
 const { createPasswordController } = require('./passwords');
 const { createPasswordPopover } = require('./password-popover');
 const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-autofill');
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
+const { capturePageImage } = require('./page-capture');
 const {
   BUILTIN_ENGINES,
   MAX_DESCRIPTION_BYTES,
@@ -509,6 +517,8 @@ function createBrowserTabManager({
         ask: (request) => askSitePermission(request, { privateMode }),
         ensureSystemMediaAccess: (media) => ensureSystemMediaAccess(systemPreferences, media),
       });
+      // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
+      void installDevtoolsResponsive(browserSession);
     }
     return browserSession;
   }
@@ -591,12 +601,17 @@ function createBrowserTabManager({
       view.setVisible(false);
       return;
     }
-    view.setBounds({
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.round(width),
-      height: Math.round(height),
-    });
+    // Mode responsive : la vue prend la taille de l'appareil, centrée sur son fond.
+    if (fullscreenEntry && fullscreenEntry.responsive && fullscreenEntry.responsive.active()) {
+      fullscreenEntry.responsive.layout(lastBounds);
+    } else {
+      view.setBounds({
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(width),
+        height: Math.round(height),
+      });
+    }
     let abortedBlank = false;
     for (const entry of tabs.values()) {
       if (entry.view === view) {
@@ -613,6 +628,8 @@ function createBrowserTabManager({
   function detachView(view) {
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
+    const responsive = entryOfView(view)?.responsive;
+    if (responsive) responsive.detachFrom(win);
     try {
       win.contentView.removeChildView(view);
     } catch (_) {
@@ -624,6 +641,9 @@ function createBrowserTabManager({
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
     try {
+      // Mode responsive : le fond gris passe juste sous la vue.
+      const responsive = entryOfView(view)?.responsive;
+      if (responsive) responsive.attachTo(win);
       // Re-adding moves the view to the top of the stacking order.
       win.contentView.addChildView(view);
     } catch (_) {
@@ -647,6 +667,8 @@ function createBrowserTabManager({
     if (entry.hangDialog) entry.hangDialog.abort();
     const { view } = entry;
     detachView(view);
+    if (entry.responsive) entry.responsive.dispose();
+    if (!view.webContents.isDestroyed()) unregisterResponsiveRoute(view.webContents.id);
     const wc = view.webContents;
     if (!wc.isDestroyed()) {
       try {
@@ -834,6 +856,12 @@ function createBrowserTabManager({
     const webContentsId = wc.id;
     tabIdsByWebContents.set(webContentsId, tabId);
     tabWindowGetters.set(webContentsId, getMainWindow);
+    registerResponsiveRoute(webContentsId, (message) => handleResponsiveMessage(tabId, message));
+    wc.once('destroyed', () => unregisterResponsiveRoute(webContentsId));
+    // Comme le mode appareil de Chrome : fermer les DevTools rend la page à tout l'onglet.
+    wc.on('devtools-closed', () => {
+      void setResponsive(tabId, null);
+    });
 
     const launchExternalApp = (url) =>
       externalApps.launch({ url, pageUrl: wc.getURL(), key: `tab:${tabId}` });
@@ -1035,6 +1063,8 @@ function createBrowserTabManager({
         t: () => forwardToPortalField('new-tab'),
         // Téléchargements : ⌘⇧J (macOS), Ctrl+J (Windows / Linux), comme Chrome.
         j: () => forward('downloads'),
+        // ⌘⇧S / Ctrl+Shift+S : capture de la page entière (docs/page-capture.md).
+        s: () => captureReady && forward('capture-full-page'),
         p: () => print({ tabId }),
         r: () => reload({ tabId }),
         '=': () => zoom({ tabId, direction: 'in' }),
@@ -1045,7 +1075,9 @@ function createBrowserTabManager({
         ']': () => goForward({ tabId }),
       };
       const handler = handlers[key];
-      if (!handler || (input.shift && !['g', 'j', '=', '+'].includes(key))) return;
+      if (!handler || (input.shift && !['g', 'j', 's', '=', '+'].includes(key))) return;
+      // ⌘S seul reste à la page (enregistrer dans un éditeur web).
+      if (key === 's' && (!input.shift || !captureReady)) return;
       event.preventDefault();
       handler();
     });
@@ -1066,6 +1098,8 @@ function createBrowserTabManager({
           });
         }
       };
+
+      const forwardCapture = (action) => emitToRenderer(SHORTCUT_CHANNEL, { tabId, action });
 
       // Téléchargement géré par Lasco (docs/downloads.md) : dossier choisi dans les Réglages.
       const download = (url) => {
@@ -1163,6 +1197,14 @@ function createBrowserTabManager({
         { label: 'Actualiser', click: () => reload({ tabId }) },
         separator,
         { label: 'Imprimer…', click: () => print({ tabId }) },
+        // Capture d'écran (docs/page-capture.md) : le portail enregistre et affiche la notification.
+        ...(captureReady
+          ? [
+              { label: 'Capturer la page entière', click: () => forwardCapture('capture-full-page') },
+              { label: 'Capturer la partie visible', click: () => forwardCapture('capture-visible') },
+            ]
+          : []),
+        separator,
         {
           label: 'Inspecter',
           click: () => {
@@ -1587,6 +1629,30 @@ function createBrowserTabManager({
     }
   }
 
+  /** Le portail sait enregistrer une capture : menu contextuel et ⌘⇧S la proposent. */
+  let captureReady = false;
+  function setCaptureReady() {
+    captureReady = true;
+    return { ok: true };
+  }
+
+  /**
+   * Capture d'écran en PNG (docs/page-capture.md) : `mode` 'full' (page entière, protocole
+   * DevTools) ou 'visible'. Renvoie l'image au main, qui l'enregistre et la copie.
+   */
+  async function captureImage({ tabId, mode }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    try {
+      const result = await capturePageImage(wc, { mode: mode === 'visible' ? 'visible' : 'full', nativeImage });
+      if (!result.ok) return result;
+      return { ...result, url: sanitizeBrowserUrl(wc.getURL()) || entry.url || '', title: wc.getTitle() || '' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'capture-failed' };
+    }
+  }
+
   async function openExternal({ tabId }) {
     const entry = liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
@@ -1594,6 +1660,47 @@ function createBrowserTabManager({
     if (!url) return { ok: false, error: 'invalid-url' };
     await shell.openExternal(url);
     return { ok: true };
+  }
+
+  /**
+   * Message du panneau « Responsive » des DevTools (docs/devtools-responsive.md) : seulement
+   * pour un onglet de cette fenêtre dont les DevTools sont ouverts.
+   */
+  async function handleResponsiveMessage(tabId, message) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    if (!wc.isDevToolsOpened()) return { ok: false, error: 'devtools-closed' };
+    if (message.op === 'set') await setResponsive(tabId, message.settings || {});
+    else if (message.op === 'off') await setResponsive(tabId, null);
+    else if (message.op !== 'get') return { ok: false, error: 'invalid' };
+    return responsiveOf(entry).state();
+  }
+
+  function responsiveOf(entry) {
+    if (!entry.responsive) {
+      const wc = entry.view.webContents;
+      entry.responsive = createTabResponsive({
+        view: entry.view,
+        getWindow: getMainWindow,
+        restoreIdentity: () =>
+          wc.isDestroyed()
+            ? Promise.resolve()
+            : wc.debugger.sendCommand('Emulation.setUserAgentOverride', chromeUserAgentOverride(userAgent)).catch(() => {}),
+      });
+    }
+    return entry.responsive;
+  }
+
+  async function setResponsive(tabId, settings) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return;
+    if (!settings && !entry.responsive) return;
+    const responsive = responsiveOf(entry);
+    if (settings) await responsive.set(settings);
+    else await responsive.off();
+    if (entry.view.webContents.isDestroyed()) return;
+    applyBounds(entry.view);
   }
 
   function openDevTools({ tabId }) {
@@ -1949,6 +2056,8 @@ function createBrowserTabManager({
     print,
     capture,
     copyScreenshot,
+    captureImage,
+    setCaptureReady,
     openExternal,
     openDevTools,
     clearBrowsingData,
