@@ -33,7 +33,13 @@ const {
 } = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
-const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
+const { applyChromeIdentity, chromeUserAgentOverride, installClientHintHeaders } = require('./chrome-identity');
+const {
+  installDevtoolsResponsive,
+  registerResponsiveRoute,
+  unregisterResponsiveRoute,
+  createTabResponsive,
+} = require('./devtools-responsive');
 const { createPasswordController } = require('./passwords');
 const { createPasswordPopover } = require('./password-popover');
 const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-autofill');
@@ -477,6 +483,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         ask: askSitePermission,
         ensureSystemMediaAccess: (media) => ensureSystemMediaAccess(systemPreferences, media),
       });
+      // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
+      void installDevtoolsResponsive(browserSession);
     }
     return browserSession;
   }
@@ -559,12 +567,17 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       view.setVisible(false);
       return;
     }
-    view.setBounds({
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.round(width),
-      height: Math.round(height),
-    });
+    // Mode responsive : la vue prend la taille de l'appareil, centrée sur son fond.
+    if (fullscreenEntry && fullscreenEntry.responsive && fullscreenEntry.responsive.active()) {
+      fullscreenEntry.responsive.layout(lastBounds);
+    } else {
+      view.setBounds({
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(width),
+        height: Math.round(height),
+      });
+    }
     let abortedBlank = false;
     for (const entry of tabs.values()) {
       if (entry.view === view) {
@@ -581,6 +594,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   function detachView(view) {
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
+    const responsive = entryOfView(view)?.responsive;
+    if (responsive) responsive.detachFrom(win);
     try {
       win.contentView.removeChildView(view);
     } catch (_) {
@@ -592,6 +607,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
     try {
+      // Mode responsive : le fond gris passe juste sous la vue.
+      const responsive = entryOfView(view)?.responsive;
+      if (responsive) responsive.attachTo(win);
       // Re-adding moves the view to the top of the stacking order.
       win.contentView.addChildView(view);
     } catch (_) {
@@ -615,6 +633,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (entry.hangDialog) entry.hangDialog.abort();
     const { view } = entry;
     detachView(view);
+    if (entry.responsive) entry.responsive.dispose();
+    if (!view.webContents.isDestroyed()) unregisterResponsiveRoute(view.webContents.id);
     const wc = view.webContents;
     if (!wc.isDestroyed()) {
       try {
@@ -802,6 +822,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const webContentsId = wc.id;
     tabIdsByWebContents.set(webContentsId, tabId);
     tabWindowGetters.set(webContentsId, getMainWindow);
+    registerResponsiveRoute(webContentsId, (message) => handleResponsiveMessage(tabId, message));
+    wc.once('destroyed', () => unregisterResponsiveRoute(webContentsId));
+    // Comme le mode appareil de Chrome : fermer les DevTools rend la page à tout l'onglet.
+    wc.on('devtools-closed', () => {
+      void setResponsive(tabId, null);
+    });
 
     const launchExternalApp = (url) =>
       externalApps.launch({ url, pageUrl: wc.getURL(), key: `tab:${tabId}` });
@@ -1551,6 +1577,47 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (!url) return { ok: false, error: 'invalid-url' };
     await shell.openExternal(url);
     return { ok: true };
+  }
+
+  /**
+   * Message du panneau « Responsive » des DevTools (docs/devtools-responsive.md) : seulement
+   * pour un onglet de cette fenêtre dont les DevTools sont ouverts.
+   */
+  async function handleResponsiveMessage(tabId, message) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    if (!wc.isDevToolsOpened()) return { ok: false, error: 'devtools-closed' };
+    if (message.op === 'set') await setResponsive(tabId, message.settings || {});
+    else if (message.op === 'off') await setResponsive(tabId, null);
+    else if (message.op !== 'get') return { ok: false, error: 'invalid' };
+    return responsiveOf(entry).state();
+  }
+
+  function responsiveOf(entry) {
+    if (!entry.responsive) {
+      const wc = entry.view.webContents;
+      entry.responsive = createTabResponsive({
+        view: entry.view,
+        getWindow: getMainWindow,
+        restoreIdentity: () =>
+          wc.isDestroyed()
+            ? Promise.resolve()
+            : wc.debugger.sendCommand('Emulation.setUserAgentOverride', chromeUserAgentOverride(userAgent)).catch(() => {}),
+      });
+    }
+    return entry.responsive;
+  }
+
+  async function setResponsive(tabId, settings) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return;
+    if (!settings && !entry.responsive) return;
+    const responsive = responsiveOf(entry);
+    if (settings) await responsive.set(settings);
+    else await responsive.off();
+    if (entry.view.webContents.isDestroyed()) return;
+    applyBounds(entry.view);
   }
 
   function openDevTools({ tabId }) {
