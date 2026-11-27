@@ -40,6 +40,14 @@ const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-au
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
 const {
+  PAGE_SLEEP_PROBE_SCRIPT,
+  PRELOAD_WORLD_ID,
+  resolveTabSleepDelayMs,
+  selectTabsToSleep,
+  tabSleepBlocker,
+  tabSleepCheckIntervalMs,
+} = require('./tab-sleep');
+const {
   BUILTIN_ENGINES,
   MAX_DESCRIPTION_BYTES,
   OPENSEARCH_LINK_SCRIPT,
@@ -65,6 +73,14 @@ const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1
 const AGENT_WORLD_ID = 1001;
 /** Monde isolé où Desktop lit la description OpenSearch d'une page (docs/search-engines.md). */
 const SEARCH_WORLD_ID = 1003;
+/** Monde isolé du défilement rétabli après la veille (le relevé tourne dans celui du preload). */
+const SLEEP_WORLD_ID = 1004;
+const SLEEP_PROBE_TIMEOUT_MS = 2000;
+/**
+ * webContents qui ont reçu le micro ou la caméra (session partagée par toutes les fenêtres) : une
+ * page en appel, même silencieuse, n'est jamais mise en veille. Oublié à la navigation suivante.
+ */
+const mediaCapturingWebContents = new Set();
 const SEARCH_DESCRIPTION_TIMEOUT_MS = 5000;
 const FALLBACK_SEARCH_ENGINE = BUILTIN_ENGINES[0];
 
@@ -291,7 +307,7 @@ function isBlankDownloadTab({ url, canGoBack }) {
   return !url || url === 'about:blank';
 }
 
-function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines }) {
+function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines, getTabSleepSettings }) {
   const historyStore =
     history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
@@ -326,6 +342,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   const agentControlled = new Set();
   /** webContents id → tab id, to route the password messages of a page to its tab. */
   const tabIdsByWebContents = new Map();
+  /**
+   * Onglets en veille (docs/tab-sleep.md) : leur vue est détruite, il reste de quoi les rouvrir à
+   * l'identique. tabId → { url, title, favicon, entries, index, scroll, zoomFactor, muted, sleptAt }.
+   */
+  const sleepingTabs = new Map();
+  let sleepTimer = null;
 
   const passwords = createPasswordController({
     emit: (channel, payload) => emitToRenderer(channel, payload),
@@ -476,6 +498,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         store: sitePermissions,
         ask: askSitePermission,
         ensureSystemMediaAccess: (media) => ensureSystemMediaAccess(systemPreferences, media),
+        onMediaGranted: (webContents) => {
+          if (webContents && !webContents.isDestroyed()) mediaCapturingWebContents.add(webContents.id);
+        },
       });
     }
     return browserSession;
@@ -513,6 +538,33 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // Son de l'onglet (icône haut-parleur de la barre d'onglets, comme Chrome).
       audible: wc.isCurrentlyAudible(),
       muted: wc.isAudioMuted(),
+      // Mis en veille pour libérer la mémoire (lune sur l'onglet) : voir sleepingState.
+      discarded: false,
+    };
+  }
+
+  /** État d'un onglet en veille : la barre d'onglets garde titre, icône et adresse. */
+  function sleepingState(tabId) {
+    const slept = sleepingTabs.get(tabId);
+    if (!slept) return null;
+    const count = Array.isArray(slept.entries) ? slept.entries.length : 0;
+    return {
+      tabId,
+      url: slept.url,
+      title: slept.title || slept.url,
+      favicon: slept.favicon || null,
+      canGoBack: slept.index > 0,
+      canGoForward: count > 0 && slept.index < count - 1,
+      isLoading: false,
+      zoomFactor: slept.zoomFactor || 1,
+      security: securityStateOf(slept.url, null),
+      pageError: null,
+      htmlFullscreen: false,
+      agentControlled: false,
+      audible: false,
+      muted: Boolean(slept.muted),
+      discarded: true,
+      sleptAt: slept.sleptAt,
     };
   }
 
@@ -657,6 +709,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function destroyAll() {
+    if (sleepTimer) clearTimeout(sleepTimer);
+    sleepTimer = null;
+    sleepingTabs.clear();
     for (const tabId of [...tabs.keys()]) {
       destroyTab(tabId);
     }
@@ -876,6 +931,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       if (entry && entry.errorPage && sanitizeBrowserUrl(url)) entry.errorPage = null;
       passwords.onNavigate(tabId, url);
       formAutofill.onNavigate(tabId, url);
+      mediaCapturingWebContents.delete(webContentsId);
       historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
     });
@@ -914,6 +970,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     });
     wc.on('destroyed', () => {
       tabIdsByWebContents.delete(webContentsId);
+      mediaCapturingWebContents.delete(webContentsId);
       tabWindowGetters.delete(webContentsId);
       // `create` on a live tab id (shell reloaded, e.g. workspace switch) closes the old
       // view and registers the new one at once; the old view's `destroyed` comes later
@@ -1155,17 +1212,21 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     };
   }
 
-  function createView(tabId, initialUrl) {
+  function createView(tabId, initialUrl, { restore = null } = {}) {
     const view = new WebContentsView({ webPreferences: browserTabWebPreferences() });
     view.setBackgroundColor('#ffffff');
     const entry = {
       view,
       url: initialUrl,
-      title: '',
-      favicon: null,
+      title: restore ? restore.title || '' : '',
+      favicon: restore ? restore.favicon || null : null,
       abortedBlank: false,
+      // Créée cachée : elle ne compte pour la veille qu'à partir de maintenant (select l'efface).
+      hiddenSince: Date.now(),
+      restore,
     };
     tabs.set(tabId, entry);
+    ensureSleepTimer();
     wireWebContents(tabId, view);
 
     view.webContents.setUserAgent(userAgent);
@@ -1185,21 +1246,266 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     try {
       // Never let the identity step hold the tab: past the limit, the page
       // still opens (plain Chrome user agent only).
-      const blank = await withTimeout(
-        wc.loadURL('about:blank').then(
-          () => true,
-          () => true,
-        ),
-        IDENTITY_STEP_TIMEOUT_MS,
-      );
+      // Sortie de veille : `about:blank` est la première entrée de l'historique rouvert (restore
+      // n'est possible que sur une vue neuve), la page est atteinte ensuite par goToIndex.
+      const restore = entry.restore;
+      const history = wc.navigationHistory;
+      const canRestore =
+        restore &&
+        Array.isArray(restore.entries) &&
+        restore.entries.length > 0 &&
+        history &&
+        typeof history.restore === 'function';
+      const firstLoad = canRestore
+        ? history.restore({ entries: [{ url: 'about:blank', title: '' }, ...restore.entries], index: 0 }).then(
+            () => {
+              restore.historyRestored = true;
+              return true;
+            },
+            (error) => {
+              console.warn('[browser-tabs] history restore after sleep failed:', error && error.message);
+              return true;
+            },
+          )
+        : wc.loadURL('about:blank').then(
+            () => true,
+            () => true,
+          );
+      const blank = await withTimeout(firstLoad, IDENTITY_STEP_TIMEOUT_MS);
       if (!blank) console.warn('[browser-tabs] about:blank did not finish loading');
       if (wc.isDestroyed()) return;
       const applied = await withTimeout(applyChromeIdentity(wc, userAgent), IDENTITY_STEP_TIMEOUT_MS);
       if (!applied) console.warn(`[browser-tabs] chrome identity not applied after ${Date.now() - startedAt} ms`);
     } finally {
       entry.identityPending = false;
-      if (!wc.isDestroyed() && !entry.abortedBlank) void wc.loadURL(entry.url);
+      const restore = entry.restore;
+      entry.restore = null;
+      if (!wc.isDestroyed() && !entry.abortedBlank) {
+        if (restore && restore.url === entry.url) void restoreSleptPage(wc, restore, entry);
+        else void wc.loadURL(entry.url);
+      }
     }
+  }
+
+  /**
+   * Rouvre un onglet sorti de veille : son historique (retour / avancer) et l'état de la page
+   * (défilement, champs) via `navigationHistory.restore`. Sinon, l'adresse puis le défilement relevé.
+   */
+  async function restoreSleptPage(wc, slept, entry) {
+    if (typeof slept.muted === 'boolean') wc.setAudioMuted(slept.muted);
+    const history = wc.navigationHistory;
+    if (slept.historyRestored && history && typeof history.goToIndex === 'function') {
+      try {
+        // Entrée 0 = about:blank : la page est à index + 1, avec son état (défilement, champs).
+        wc.once('did-navigate', () => {
+          if (!wc.isDestroyed() && typeof history.removeEntryAtIndex === 'function') {
+            try {
+              history.removeEntryAtIndex(0);
+            } catch (_) {
+              // L'entrée blanche reste en tête : sans gravité.
+            }
+          }
+        });
+        history.goToIndex(slept.index + 1);
+        wc.once('did-finish-load', () => {
+          if (wc.isDestroyed()) return;
+          if (slept.zoomFactor && slept.zoomFactor !== 1) wc.setZoomFactor(slept.zoomFactor);
+          // État de page sans défilement (pas encore enregistré par Chromium) : position relevée.
+          const scroll = slept.scroll;
+          if (scroll && scroll.y > 0) {
+            const code = `if ((window.scrollY || 0) < 1) window.scrollTo(${Number(scroll.x) || 0}, ${Number(scroll.y) || 0})`;
+            setTimeout(() => {
+              if (!wc.isDestroyed()) void wc.executeJavaScriptInIsolatedWorld(SLEEP_WORLD_ID, [{ code }]).catch(() => {});
+            }, 300);
+          }
+        });
+        return;
+      } catch (error) {
+        console.warn('[browser-tabs] history entry after sleep failed:', error && error.message);
+      }
+    }
+    if (wc.isDestroyed()) return;
+    try {
+      await wc.loadURL(entry.url);
+    } catch (_) {
+      // Échec de chargement : la page d'erreur de Lasco prend le relais (did-fail-load).
+    }
+    if (wc.isDestroyed()) return;
+    const scroll = slept.scroll;
+    if (scroll && (scroll.x > 0 || scroll.y > 0)) {
+      const code = `window.scrollTo(${Number(scroll.x) || 0}, ${Number(scroll.y) || 0})`;
+      // Contenu chargé tard (images, listes) : on réessaie un peu, sans insister.
+      for (const wait of [0, 300, 1200]) {
+        await delay(wait);
+        if (wc.isDestroyed()) return;
+        void wc.executeJavaScriptInIsolatedWorld(SLEEP_WORLD_ID, [{ code }]).catch(() => {});
+      }
+    }
+    if (slept.zoomFactor && slept.zoomFactor !== 1 && !wc.isDestroyed()) wc.setZoomFactor(slept.zoomFactor);
+  }
+
+  // --- Mise en veille des onglets (docs/tab-sleep.md) ---
+
+  function tabSleepDelayMs() {
+    let settings = null;
+    try {
+      settings = typeof getTabSleepSettings === 'function' ? getTabSleepSettings() : null;
+    } catch (_) {
+      settings = null;
+    }
+    // `getTabSleepSettings` renvoie null quand la veille est coupée (mode VM).
+    if (settings === null && typeof getTabSleepSettings === 'function') return 0;
+    return resolveTabSleepDelayMs(settings);
+  }
+
+  function neverSleepSites() {
+    try {
+      const settings = typeof getTabSleepSettings === 'function' ? getTabSleepSettings() : null;
+      return (settings && settings.tabSleepNeverSites) || [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function ensureSleepTimer() {
+    if (sleepTimer || typeof getTabSleepSettings !== 'function') return;
+    const tick = () => {
+      sleepTimer = null;
+      const delayMs = tabSleepDelayMs();
+      if (delayMs > 0) void runSleepCheck(delayMs);
+      if (tabs.size > 0 || delayMs > 0) {
+        sleepTimer = setTimeout(tick, tabSleepCheckIntervalMs(delayMs > 0 ? delayMs : 60_000));
+        if (sleepTimer.unref) sleepTimer.unref();
+      }
+    };
+    sleepTimer = setTimeout(tick, tabSleepCheckIntervalMs(tabSleepDelayMs() || 60_000));
+    if (sleepTimer.unref) sleepTimer.unref();
+  }
+
+  function sleepCandidate(tabId, entry) {
+    const wc = entry.view.webContents;
+    return {
+      tabId,
+      url: wc.isDestroyed() ? '' : sanitizeBrowserUrl(wc.getURL()) || '',
+      hiddenSince: entry.hiddenSince,
+      audible: !wc.isDestroyed() && wc.isCurrentlyAudible(),
+      htmlFullscreen: Boolean(entry.htmlFullscreen),
+      agentControlled: agentControlled.has(tabId),
+      hasOpener: Boolean(entry.hasOpener),
+      devToolsOpened: !wc.isDestroyed() && wc.isDevToolsOpened(),
+      loading: wc.isDestroyed() || wc.isLoading() || Boolean(entry.identityPending) || Boolean(entry.errorPage),
+      capturingMedia: mediaCapturingWebContents.has(wc.id),
+      discarded: false,
+    };
+  }
+
+  /** Onglet affiché : celui sélectionné, tant que les vues sont visibles (pas une page du portail). */
+  function shownTabId() {
+    return viewsVisible ? activeTabId : null;
+  }
+
+  async function runSleepCheck(delayMs) {
+    const now = Date.now();
+    const candidates = [];
+    for (const [tabId, entry] of tabs) {
+      if (!entry.view.webContents.isDestroyed()) candidates.push(sleepCandidate(tabId, entry));
+    }
+    const ids = selectTabsToSleep(candidates, {
+      now,
+      delayMs,
+      activeTabId: shownTabId(),
+      neverSites: neverSleepSites(),
+    });
+    for (const tabId of ids) await sleepTab(tabId, { delayMs });
+  }
+
+  /**
+   * Met un onglet en veille : relève défilement et formulaire, garde son historique, détruit sa vue.
+   * Refusé (false) si une raison de le garder éveillé apparaît entre-temps.
+   */
+  async function sleepTab(tabId, { delayMs = tabSleepDelayMs(), force = false } = {}) {
+    const entry = liveEntry(tabId);
+    if (!entry || entry.sleepPending) return { ok: false, error: 'unknown-tab' };
+    entry.sleepPending = true;
+    try {
+      const wc = entry.view.webContents;
+      let probe = null;
+      try {
+        probe = await withTimeout(
+          wc.executeJavaScriptInIsolatedWorld(PRELOAD_WORLD_ID, [{ code: PAGE_SLEEP_PROBE_SCRIPT }]),
+          SLEEP_PROBE_TIMEOUT_MS,
+        );
+      } catch (_) {
+        probe = null;
+      }
+      if (tabs.get(tabId) !== entry || wc.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+      // Saisie en cours : on attend un nouveau délai avant de réessayer.
+      if (probe && probe.dirty) {
+        entry.hiddenSince = Date.now();
+        return { ok: false, error: 'dirty-form' };
+      }
+      if (!force) {
+        const blocker = tabSleepBlocker(sleepCandidate(tabId, entry), {
+          now: Date.now(),
+          delayMs,
+          activeTabId: shownTabId(),
+          neverSites: neverSleepSites(),
+        });
+        if (blocker) return { ok: false, error: blocker };
+      } else if (tabId === shownTabId()) {
+        return { ok: false, error: 'active' };
+      }
+      const history = wc.navigationHistory;
+      let entries = [];
+      let index = 0;
+      try {
+        entries = history && typeof history.getAllEntries === 'function' ? history.getAllEntries() : [];
+        index = history && typeof history.getActiveIndex === 'function' ? history.getActiveIndex() : entries.length - 1;
+      } catch (_) {
+        entries = [];
+      }
+      // Pas de première page `about:blank` (chargée pour l'identité Chrome) dans l'historique rouvert.
+      const firstReal = entries.findIndex((item) => sanitizeBrowserUrl(item && item.url));
+      if (firstReal > 0) {
+        entries = entries.slice(firstReal);
+        index = Math.max(0, index - firstReal);
+      }
+      const state = buildState(tabId);
+      if (!state || !sanitizeBrowserUrl(state.url)) return { ok: false, error: 'not-web' };
+      sleepingTabs.set(tabId, {
+        url: state.url,
+        title: state.title,
+        favicon: entry.favicon,
+        entries: entries.every((item) => item && typeof item.url === 'string') ? entries : [],
+        index: Math.min(Math.max(0, index), Math.max(0, entries.length - 1)),
+        scroll: probe ? { x: Number(probe.scrollX) || 0, y: Number(probe.scrollY) || 0 } : null,
+        zoomFactor: wc.getZoomFactor(),
+        muted: wc.isAudioMuted(),
+        sleptAt: Date.now(),
+      });
+      destroyTab(tabId);
+      emitToRenderer(STATE_CHANNEL, sleepingState(tabId));
+      return { ok: true, tabId };
+    } finally {
+      entry.sleepPending = false;
+    }
+  }
+
+  /** Sort un onglet de veille : nouvelle vue, page et historique rouverts. Null s'il ne dort pas. */
+  function wakeTab(tabId) {
+    const slept = sleepingTabs.get(tabId);
+    if (!slept) return null;
+    const state = sleepingState(tabId);
+    sleepingTabs.delete(tabId);
+    const entry = createView(tabId, slept.url, { restore: slept });
+    // Le portail affiche tout de suite l'onglet en chargement, sans lune.
+    emitToRenderer(STATE_CHANNEL, { ...state, isLoading: true, discarded: false });
+    return entry;
+  }
+
+  /** Onglet vivant, réveillé au besoin (agent, rechargement). */
+  function liveOrWokenEntry(tabId) {
+    return liveEntry(tabId) || (wakeTab(tabId) && liveEntry(tabId));
   }
 
   /**
@@ -1228,7 +1534,18 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       webPreferences: options.webPreferences,
     });
     view.setBackgroundColor('#ffffff');
-    tabs.set(tabId, { view, url, title: '', favicon: null, abortedBlank: false, identityPending: false });
+    tabs.set(tabId, {
+      view,
+      url,
+      title: '',
+      favicon: null,
+      abortedBlank: false,
+      identityPending: false,
+      hiddenSince: Date.now(),
+      // Fenêtre fille d'une page : jamais mise en veille (la détruire couperait `opener`).
+      hasOpener: true,
+    });
+    ensureSleepTimer();
     wireWebContents(tabId, view);
     const wc = view.webContents;
     wc.setUserAgent(userAgent);
@@ -1252,6 +1569,13 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (tabs.has(tabId)) {
       destroyTab(tabId);
     }
+    // Coquille rechargée : un onglet en veille pour la même adresse se rouvre avec son historique.
+    const slept = sleepingTabs.get(tabId);
+    if (slept && slept.url === safe) {
+      wakeTab(tabId);
+      return { ok: true, tabId, url: safe };
+    }
+    sleepingTabs.delete(tabId);
     createView(tabId, safe);
     return { ok: true, tabId, url: safe };
   }
@@ -1261,6 +1585,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const safe = sanitizeBrowserUrl(url);
     if (!safe) return { ok: false, error: 'invalid-url' };
     if (!entry) {
+      sleepingTabs.delete(tabId);
       return create({ tabId, url: safe });
     }
     entry.url = safe;
@@ -1275,6 +1600,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function select({ tabId }) {
+    if (typeof tabId === 'string' && !tabs.has(tabId)) wakeTab(tabId);
     if (typeof tabId !== 'string' || !tabs.has(tabId)) {
       return { ok: false, error: 'unknown-tab' };
     }
@@ -1282,8 +1608,11 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     activeTabId = tabId;
     viewsVisible = true;
     overlayActive = false;
+    const now = Date.now();
     for (const [id, entry] of tabs) {
       const isActive = id === tabId;
+      if (isActive) entry.hiddenSince = null;
+      else if (typeof entry.hiddenSince !== 'number') entry.hiddenSince = now;
       if (isActive) {
         attachView(entry.view);
         entry.view.setVisible(true);
@@ -1302,7 +1631,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     hideFieldPopovers();
     viewsVisible = false;
     activeTabId = null;
+    const now = Date.now();
     for (const entry of tabs.values()) {
+      if (typeof entry.hiddenSince !== 'number') entry.hiddenSince = now;
       exitPageFullscreen(entry);
       entry.view.setVisible(false);
       detachView(entry.view);
@@ -1311,12 +1642,27 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function close({ tabId }) {
+    sleepingTabs.delete(tabId);
     if (!tabs.has(tabId)) return { ok: true, tabId };
     destroyTab(tabId);
     return { ok: true, tabId };
   }
 
+  /** Retour / avancer sur un onglet en veille : il se rouvre directement sur la page voulue. */
+  function wakeAtOffset(tabId, offset) {
+    const slept = sleepingTabs.get(tabId);
+    if (!slept || !Array.isArray(slept.entries)) return false;
+    const target = slept.index + offset;
+    if (target < 0 || target >= slept.entries.length) return false;
+    slept.index = target;
+    slept.url = sanitizeBrowserUrl(slept.entries[target].url) || slept.url;
+    slept.scroll = null;
+    wakeTab(tabId);
+    return true;
+  }
+
   function goBack({ tabId }) {
+    if (wakeAtOffset(tabId, -1)) return { ok: true };
     const entry = tabs.get(tabId);
     if (!entry || entry.view.webContents.isDestroyed()) {
       return { ok: false, error: 'unknown-tab' };
@@ -1331,6 +1677,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function goForward({ tabId }) {
+    if (wakeAtOffset(tabId, 1)) return { ok: true };
     const entry = tabs.get(tabId);
     if (!entry || entry.view.webContents.isDestroyed()) {
       return { ok: false, error: 'unknown-tab' };
@@ -1346,6 +1693,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   /** Couper ou réactiver le son d'un onglet (icône haut-parleur, clic droit). */
   function setMuted({ tabId, muted }) {
+    const slept = sleepingTabs.get(tabId);
+    if (slept) {
+      slept.muted = muted === true;
+      emitToRenderer(STATE_CHANNEL, sleepingState(tabId));
+      return { ok: true, muted: slept.muted };
+    }
     const entry = tabs.get(tabId);
     if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
     entry.view.webContents.setAudioMuted(muted === true);
@@ -1354,6 +1707,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function reload({ tabId }) {
+    if (!tabs.has(tabId) && wakeTab(tabId)) return { ok: true };
     const entry = tabs.get(tabId);
     if (!entry || entry.view.webContents.isDestroyed()) {
       return { ok: false, error: 'unknown-tab' };
@@ -1452,7 +1806,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function getState({ tabId }) {
-    return buildState(tabId);
+    return buildState(tabId) || sleepingState(tabId);
   }
 
   function liveEntry(tabId) {
@@ -1760,7 +2114,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
    * captures impossibles), et elle garde la taille de la zone des onglets pour que la mise en page reste juste.
    */
   function setAgentControl({ tabId, active }) {
-    const entry = liveEntry(tabId);
+    // Un agent reprend un onglet en veille : il se réveille (caché) pour être piloté.
+    const entry = active === true ? liveOrWokenEntry(tabId) : liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
     const wc = entry.view.webContents;
     if (active === true) {
@@ -1784,7 +2139,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   async function agentAction(payload) {
     const { tabId, action } = payload || {};
-    const entry = liveEntry(tabId);
+    const entry = liveOrWokenEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
     const wc = entry.view.webContents;
 
@@ -1940,6 +2295,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       return entry && !entry.view.webContents.isDestroyed() ? entry.view.webContents : null;
     },
     stateOf: (tabId) => buildState(tabId),
+    /** Mise en veille (docs/tab-sleep.md) : `sleep` met un onglet en veille tout de suite (menu, tests). */
+    sleep: ({ tabId } = {}) => sleepTab(tabId, { force: true }),
+    isSleeping: (tabId) => sleepingTabs.has(tabId),
+    sleepingTabIds: () => [...sleepingTabs.keys()],
+    runSleepCheck: () => {
+      const delayMs = tabSleepDelayMs();
+      return delayMs > 0 ? runSleepCheck(delayMs) : Promise.resolve();
+    },
   };
 }
 

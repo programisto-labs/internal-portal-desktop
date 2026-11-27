@@ -266,7 +266,7 @@ function createSitePermissionStore({ filePath, fsImpl = fs } = {}) {
  * Gestionnaires de la session des onglets web.
  * `ask({ origin, permission, label, webContents })` → Promise<'allow' | 'block' | 'dismiss'>.
  */
-function createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess = async () => true }) {
+function createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess = async () => true, onMediaGranted = null }) {
   /** Une seule question à la fois par site et par permission : les demandes suivantes attendent la réponse. */
   const pending = new Map();
 
@@ -348,7 +348,17 @@ function createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess = as
 
   function request(webContents, permission, callback, details) {
     decide(webContents, permission, details).then(
-      (granted) => callback(Boolean(granted)),
+      (granted) => {
+        // Micro ou caméra accordés : la page est peut-être en appel, la mise en veille l'épargne.
+        if (granted && permission === 'media' && typeof onMediaGranted === 'function') {
+          try {
+            onMediaGranted(webContents);
+          } catch (_) {
+            // jamais bloquant
+          }
+        }
+        callback(Boolean(granted));
+      },
       () => callback(false),
     );
   }
@@ -396,10 +406,10 @@ function createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess = as
 /** Une session (partagée par toutes les fenêtres) ne reçoit ses gestionnaires qu'une fois. */
 const installedSessions = new WeakSet();
 
-function installSitePermissions(targetSession, { store, ask, ensureSystemMediaAccess }) {
+function installSitePermissions(targetSession, { store, ask, ensureSystemMediaAccess, onMediaGranted }) {
   if (installedSessions.has(targetSession)) return false;
   installedSessions.add(targetSession);
-  const handlers = createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess });
+  const handlers = createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess, onMediaGranted });
   targetSession.setPermissionRequestHandler(handlers.request);
   targetSession.setPermissionCheckHandler(handlers.check);
   return true;

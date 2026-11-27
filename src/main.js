@@ -9,6 +9,7 @@ const { createBrowserTabManager, sharedSitePermissions, BROWSER_PARTITION } = re
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
+const { TAB_SLEEP_DELAY_CHOICES, normalizeSiteHost, resolveTabSleepDelayMs } = require('./browser-tabs/tab-sleep');
 const {
   classifyIncomingUrl,
   defaultBrowserSnapshot,
@@ -1072,6 +1073,22 @@ function getDownloadService() {
   return downloadService;
 }
 
+/** Réglage de la veille lu par le portail (même délai pour ses pages), docs/tab-sleep.md. */
+const TAB_SLEEP_CHANNEL = 'browser-tab-sleep-changed';
+
+function tabSleepSnapshot() {
+  const settings = getSettings();
+  const delayMs = VM_MODE ? 0 : resolveTabSleepDelayMs(settings);
+  return { delayMs, minutes: settings.tabSleepMinutes, neverSites: settings.tabSleepNeverSites || [] };
+}
+
+function broadcastTabSleepSettings() {
+  const snapshot = tabSleepSnapshot();
+  for (const entry of portalWindows.values()) {
+    if (!entry.win.isDestroyed()) entry.win.webContents.send(TAB_SLEEP_CHANNEL, snapshot);
+  }
+}
+
 /** Moteurs de recherche du navigateur, communs à toutes les fenêtres (docs/search-engines.md). */
 let searchEngineStore = null;
 const SEARCH_ENGINES_CHANNEL = 'browser-search-engines-changed';
@@ -1106,6 +1123,8 @@ function tabManagerFor(win) {
       history: getBrowserHistoryStore(),
       interceptLink: routePortalLinkInApp,
       searchEngines: getSearchEngineStore(),
+      // Économiseur de mémoire (docs/tab-sleep.md). Coupé en mode VM (onglets pilotés par le point de contrôle).
+      getTabSleepSettings: () => (VM_MODE ? null : getSettings()),
     });
   }
   return entry.tabManager;
@@ -2442,6 +2461,13 @@ function registerWindowIPC() {
       driveSync: driveSyncSettingsState(getDriveSyncStore()),
       searchEngines: getSearchEngineStore().list(),
       sitePermissions: sitePermissionsSettingsState(),
+      tabSleep: {
+        minutes: settings.tabSleepMinutes,
+        choices: TAB_SLEEP_DELAY_CHOICES,
+        neverSites: settings.tabSleepNeverSites || [],
+        // LASCO_TAB_SLEEP_MS (développement) remplace le délai choisi.
+        overrideMs: Number(process.env.LASCO_TAB_SLEEP_MS) > 0 ? resolveTabSleepDelayMs(settings) : null,
+      },
       downloads: {
         directory: downloadsDirectory(),
         isDefault: !settings.downloadsDirectory || downloadsDirectory() !== settings.downloadsDirectory,
@@ -2848,6 +2874,8 @@ function registerWindowIPC() {
     'browser-autofill-fill': 'autofillFill',
     // Onglet piloté par un agent en arrière-plan (docs/agent-tabs.md).
     'browser-tab-set-agent-control': 'setAgentControl',
+    // Économiseur de mémoire (docs/tab-sleep.md) : mettre un onglet en veille tout de suite.
+    'browser-tab-sleep': 'sleep',
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {
@@ -2856,6 +2884,40 @@ function registerWindowIPC() {
       return manager[method](payload || {});
     });
   }
+
+  // Économiseur de mémoire : le portail applique le même délai à ses pages (docs/tab-sleep.md).
+  ipcMain.handle('browser-tab-sleep-get', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return { ok: true, ...tabSleepSnapshot() };
+  });
+  ipcMain.handle('browser-tab-sleep-manage', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    openSettings('memory');
+    return { ok: true };
+  });
+  ipcMain.handle('settings-modal-tab-sleep-set-minutes', (event, minutes) => {
+    if (!fromSettings(event) || !TAB_SLEEP_DELAY_CHOICES.includes(minutes)) return false;
+    getSettingsStore().set({ tabSleepMinutes: minutes });
+    broadcastTabSleepSettings();
+    return true;
+  });
+  ipcMain.handle('settings-modal-tab-sleep-add-site', (event, raw) => {
+    if (!fromSettings(event)) return { ok: false };
+    const host = normalizeSiteHost(raw);
+    if (!host) return { ok: false, error: 'invalid-site' };
+    const sites = getSettings().tabSleepNeverSites || [];
+    if (sites.includes(host)) return { ok: true, host };
+    getSettingsStore().set({ tabSleepNeverSites: [...sites, host] });
+    broadcastTabSleepSettings();
+    return { ok: true, host };
+  });
+  ipcMain.handle('settings-modal-tab-sleep-remove-site', (event, host) => {
+    if (!fromSettings(event) || typeof host !== 'string') return false;
+    const sites = (getSettings().tabSleepNeverSites || []).filter((site) => site !== host);
+    getSettingsStore().set({ tabSleepNeverSites: sites });
+    broadcastTabSleepSettings();
+    return true;
+  });
 
   // Barre d'adresse du portail : moteur par défaut et raccourcis des sites (docs/search-engines.md).
   ipcMain.handle('browser-search-engines-get', (event) => {
