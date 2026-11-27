@@ -179,6 +179,10 @@
         <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
         Téléchargements
       </button>
+      <button data-section="memory">
+        <svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        Mémoire
+      </button>
       <button data-section="drive">
         <svg viewBox="0 0 24 24"><path d="M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01"/></svg>
         My Drive
@@ -316,6 +320,26 @@
             <label class="switch"><input type="checkbox" id="downloadsAskWhere" aria-label="Demander où enregistrer chaque fichier"><span></span></label>
           </div>
         </div>
+      </section>
+
+      <section data-panel="memory" hidden>
+        <p class="intro">Comme Chrome : un onglet que vous n’avez pas regardé depuis un moment est mis en veille pour libérer la mémoire. Il garde son titre, son adresse et sa position, une lune s’affiche sur son icône, et il se recharge quand vous cliquez dessus.</p>
+        <div class="group">
+          <div class="row">
+            <div class="text">
+              <div class="label">Mettre en veille les onglets inactifs</div>
+              <div class="hint" id="tabSleepHint">Onglets web et pages de Lasco. Jamais l’onglet affiché, un onglet qui joue du son, en plein écran, en appel, piloté par un agent, avec une saisie en cours, ni Lasco Code.</div>
+            </div>
+            <select id="tabSleepMinutes" aria-label="Mettre en veille les onglets inactifs"></select>
+          </div>
+        </div>
+        <h2>Ne jamais mettre en veille ces sites</h2>
+        <div class="site-toolbar">
+          <div class="field site-search"><input type="text" id="tabSleepSite" placeholder="Ajouter un site, par exemple figma.com" aria-label="Ajouter un site à ne jamais mettre en veille" autocomplete="off" spellcheck="false"></div>
+          <button class="btn" id="tabSleepAdd">Ajouter</button>
+        </div>
+        <div class="hint error" id="tabSleepError" hidden style="margin: 0 0 8px 2px;"></div>
+        <div class="group" id="tabSleepSites"></div>
       </section>
 
       <section data-panel="drive" hidden>

@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { normalizeShortcuts } = require('./background-mode');
+const { normalizeTabSleepSettings, DEFAULT_TAB_SLEEP_MINUTES } = require('./browser-tabs/tab-sleep');
 
 const LASCO_PROTOCOL = 'lasco';
 /** `themeSource`: app appearance (Réglages > Général), applied to `nativeTheme.themeSource`. */
@@ -21,6 +22,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   backgroundHintShown: false,
   downloadsDirectory: null,
   downloadsAskWhere: false,
+  // Économiseur de mémoire (docs/tab-sleep.md) : délai en minutes (0 = jamais), sites exclus.
+  tabSleepMinutes: DEFAULT_TAB_SLEEP_MINUTES,
+  tabSleepNeverSites: [],
 });
 
 /** Keep only known keys with valid types; unknown / invalid values fall back to defaults. */
@@ -37,6 +41,7 @@ function normalizeSettings(raw) {
     out.downloadsDirectory = obj.downloadsDirectory;
   }
   out.shortcuts = normalizeShortcuts(obj.shortcuts);
+  Object.assign(out, normalizeTabSleepSettings(obj));
   return out;
 }
 

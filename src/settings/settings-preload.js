@@ -8,11 +8,12 @@ const { ipcRenderer } = require('electron');
 const params = new URLSearchParams(globalThis.location ? globalThis.location.search : '');
 const STANDALONE = params.get('standalone') === '1';
 const AGENTS = params.get('agents') !== '0';
-const SECTIONS = ['general', 'search', 'downloads', 'drive', 'sites', 'computer', 'permissions', 'journal', 'updates'];
+const SECTIONS = ['general', 'search', 'downloads', 'memory', 'drive', 'sites', 'computer', 'permissions', 'journal', 'updates'];
 const TITLES = {
   general: 'Général',
   search: 'Moteur de recherche',
   downloads: 'Téléchargements',
+  memory: 'Économiseur de mémoire',
   drive: 'My Drive',
   sites: 'Autorisations des sites',
   computer: 'Cet ordinateur',
@@ -419,6 +420,64 @@ function renderSearch(s) {
   }
 }
 
+/** Libellé d'un délai de mise en veille (minutes, 0 = jamais). */
+function tabSleepLabel(minutes) {
+  if (minutes === 0) return 'Jamais';
+  if (minutes < 60) return `Après ${minutes} min`;
+  const hours = minutes / 60;
+  return hours === 1 ? 'Après 1 heure' : `Après ${hours} heures`;
+}
+
+let tabSleepError = null;
+
+function renderTabSleep(t) {
+  if (!t) return;
+  const select = $('tabSleepMinutes');
+  if (document.activeElement !== select) {
+    select.replaceChildren();
+    for (const minutes of t.choices) {
+      const option = document.createElement('option');
+      option.value = String(minutes);
+      option.textContent = tabSleepLabel(minutes);
+      select.append(option);
+    }
+    select.value = String(t.minutes);
+  }
+  $('tabSleepHint').textContent = t.overrideMs
+    ? `Délai de développement : ${Math.round(t.overrideMs / 1000)} s (LASCO_TAB_SLEEP_MS).`
+    : 'Onglets web et pages de Lasco. Jamais l’onglet affiché, un onglet qui joue du son, en plein écran, en appel, piloté par un agent, avec une saisie en cours, ni Lasco Code.';
+  $('tabSleepError').hidden = !tabSleepError;
+  $('tabSleepError').textContent = tabSleepError || '';
+  const list = $('tabSleepSites');
+  list.replaceChildren();
+  if (!t.neverSites.length) list.append(el('div', 'empty', 'Aucun site. Ses sous-domaines sont compris (figma.com couvre www.figma.com).'));
+  for (const host of t.neverSites) {
+    const row = el('div', 'row');
+    const text = el('div', 'text');
+    text.append(el('div', 'label mono', host));
+    const remove = el('button', 'btn danger', 'Retirer');
+    remove.setAttribute('aria-label', `Retirer ${host}`);
+    remove.onclick = async () => {
+      await ipcRenderer.invoke('settings-modal-tab-sleep-remove-site', host);
+      render();
+    };
+    row.append(text, remove);
+    list.append(row);
+  }
+}
+
+async function addTabSleepSite() {
+  const input = $('tabSleepSite');
+  const res = await ipcRenderer.invoke('settings-modal-tab-sleep-add-site', input.value);
+  if (res && res.ok) {
+    input.value = '';
+    tabSleepError = null;
+  } else {
+    tabSleepError = 'Adresse de site illisible. Exemple : figma.com';
+  }
+  render();
+}
+
 function renderDownloads(d) {
   if (!d) return;
   $('downloadsFolder').textContent = d.directory || '';
@@ -625,6 +684,7 @@ async function render() {
   renderUpdate(s.update);
   renderDrive(s.driveSync);
   renderDownloads(s.downloads);
+  renderTabSleep(s.tabSleep);
   renderSearch(s.searchEngines);
   renderSites(s.sitePermissions);
   renderAdblock(s.adblock);
@@ -722,6 +782,18 @@ window.addEventListener('DOMContentLoaded', () => {
   };
   $('downloadsOpen').onclick = () => ipcRenderer.invoke('settings-modal-downloads-open');
   bindSwitch('downloadsAskWhere', 'settings-modal-downloads-set-ask');
+  $('tabSleepMinutes').onchange = async () => {
+    await ipcRenderer.invoke('settings-modal-tab-sleep-set-minutes', Number($('tabSleepMinutes').value));
+    $('tabSleepMinutes').blur();
+    render();
+  };
+  $('tabSleepAdd').onclick = () => addTabSleepSite();
+  $('tabSleepSite').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addTabSleepSite();
+    }
+  });
   bindSwitch('searchAutoDiscover', 'settings-modal-search-set-auto-discover');
   $('searchDefault').onchange = async () => {
     await ipcRenderer.invoke('settings-modal-search-set-default', $('searchDefault').value);

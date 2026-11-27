@@ -127,6 +127,14 @@ const browserTabsBridge = {
     manage: () => invokeBrowserTab('browser-search-engines-manage'),
     onChange: (callback) => subscribe('browser-search-engines-changed', callback),
   },
+  // Économiseur de mémoire (docs/tab-sleep.md) : délai réglé dans Lasco > Réglages…, repris par le portail.
+  sleep: {
+    get: () => invokeBrowserTab('browser-tab-sleep-get'),
+    onChange: (callback) => subscribe('browser-tab-sleep-changed', callback),
+    manage: () => invokeBrowserTab('browser-tab-sleep-manage'),
+    /** `{ tabId }` : met l'onglet en veille tout de suite (hors onglet affiché). */
+    now: (payload) => invokeBrowserTab('browser-tab-sleep', payload),
+  },
   setOverlay: (payload) => invokeBrowserTab('browser-tab-set-overlay', payload),
   showTabContextMenu: (payload) => invokeBrowserTab('browser-tab-show-context-menu', payload),
   onTabContextMenuAction: (callback) => subscribe('browser-tab-context-menu-action', callback),
