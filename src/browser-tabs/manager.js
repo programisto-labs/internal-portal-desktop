@@ -1168,6 +1168,21 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
    */
   function adoptPopup(options, { url, openerTabId, disposition }) {
     const tabId = `popup-${randomUUID()}`;
+    const emitAdopted = () =>
+      emitToRenderer(OPEN_REQUEST_CHANNEL, {
+        url,
+        openerTabId,
+        adoptedTabId: tabId,
+        ...(typeof disposition === 'string' ? { disposition } : {}),
+      });
+    // Sans opener (clic molette, ⌘-clic, lien `_blank` en `noopener`), Chromium ne crée
+    // pas de webContents : c'est à nous de le créer et d'y charger l'URL (sinon
+    // « options.webContents must be a WebContents » dans le processus principal).
+    if (!options || !options.webContents) {
+      const entry = createView(tabId, url);
+      emitAdopted();
+      return entry.view.webContents;
+    }
     const view = new WebContentsView({
       webContents: options.webContents,
       webPreferences: options.webPreferences,
@@ -1178,12 +1193,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const wc = view.webContents;
     wc.setUserAgent(userAgent);
     void applyChromeIdentity(wc, userAgent).catch(() => {});
-    emitToRenderer(OPEN_REQUEST_CHANNEL, {
-      url,
-      openerTabId,
-      adoptedTabId: tabId,
-      ...(typeof disposition === 'string' ? { disposition } : {}),
-    });
+    emitAdopted();
     return wc;
   }
 
