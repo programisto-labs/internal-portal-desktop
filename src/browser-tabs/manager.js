@@ -36,8 +36,7 @@ const { createHistoryStore } = require('./history');
 const { applyChromeIdentity, chromeUserAgentOverride, installClientHintHeaders } = require('./chrome-identity');
 const {
   installDevtoolsResponsive,
-  registerResponsiveRoute,
-  unregisterResponsiveRoute,
+  watchDevtoolsResponsive,
   createTabResponsive,
 } = require('./devtools-responsive');
 const { createPasswordController } = require('./passwords');
@@ -634,7 +633,6 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const { view } = entry;
     detachView(view);
     if (entry.responsive) entry.responsive.dispose();
-    if (!view.webContents.isDestroyed()) unregisterResponsiveRoute(view.webContents.id);
     const wc = view.webContents;
     if (!wc.isDestroyed()) {
       try {
@@ -822,8 +820,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const webContentsId = wc.id;
     tabIdsByWebContents.set(webContentsId, tabId);
     tabWindowGetters.set(webContentsId, getMainWindow);
-    registerResponsiveRoute(webContentsId, (message) => handleResponsiveMessage(tabId, message));
-    wc.once('destroyed', () => unregisterResponsiveRoute(webContentsId));
+    watchDevtoolsResponsive(wc, (message) => setResponsive(tabId, message.op === 'set' ? message.settings : null));
     // Comme le mode appareil de Chrome : fermer les DevTools rend la page à tout l'onglet.
     wc.on('devtools-closed', () => {
       void setResponsive(tabId, null);
@@ -1577,21 +1574,6 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (!url) return { ok: false, error: 'invalid-url' };
     await shell.openExternal(url);
     return { ok: true };
-  }
-
-  /**
-   * Message du panneau « Responsive » des DevTools (docs/devtools-responsive.md) : seulement
-   * pour un onglet de cette fenêtre dont les DevTools sont ouverts.
-   */
-  async function handleResponsiveMessage(tabId, message) {
-    const entry = tabs.get(tabId);
-    if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
-    const wc = entry.view.webContents;
-    if (!wc.isDevToolsOpened()) return { ok: false, error: 'devtools-closed' };
-    if (message.op === 'set') await setResponsive(tabId, message.settings || {});
-    else if (message.op === 'off') await setResponsive(tabId, null);
-    else if (message.op !== 'get') return { ok: false, error: 'invalid' };
-    return responsiveOf(entry).state();
   }
 
   function responsiveOf(entry) {

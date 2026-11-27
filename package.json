@@ -142,8 +142,7 @@
     ],
     "asarUnpack": [
       "node_modules/node-pty/**",
-      "src/browser-tabs/devtools-extension/**",
-      "src/browser-tabs/devtools-responsive-preload.js"
+      "src/browser-tabs/devtools-extension/**"
     ],
     "npmRebuild": false
   },

@@ -1,0 +1,16 @@
+{
+  "devices": [
+    { "id": "iphone-se", "name": "iPhone SE", "width": 375, "height": 667, "deviceScaleFactor": 2, "mobile": true, "ua": "iphone" },
+    { "id": "iphone-15-pro", "name": "iPhone 15 Pro", "width": 393, "height": 852, "deviceScaleFactor": 3, "mobile": true, "ua": "iphone" },
+    { "id": "iphone-15-pro-max", "name": "iPhone 15 Pro Max", "width": 430, "height": 932, "deviceScaleFactor": 3, "mobile": true, "ua": "iphone" },
+    { "id": "pixel-8", "name": "Pixel 8", "width": 412, "height": 915, "deviceScaleFactor": 2.625, "mobile": true, "ua": "android" },
+    { "id": "galaxy-s24", "name": "Galaxy S24", "width": 360, "height": 780, "deviceScaleFactor": 3, "mobile": true, "ua": "android" },
+    { "id": "ipad-mini", "name": "iPad Mini", "width": 768, "height": 1024, "deviceScaleFactor": 2, "mobile": true, "ua": "ipad" },
+    { "id": "ipad-pro-13", "name": "iPad Pro 13\"", "width": 1032, "height": 1376, "deviceScaleFactor": 2, "mobile": true, "ua": "ipad" },
+    { "id": "laptop", "name": "Laptop", "width": 1280, "height": 800, "deviceScaleFactor": 2, "mobile": false, "ua": null },
+    { "id": "desktop-hd", "name": "Desktop HD", "width": 1920, "height": 1080, "deviceScaleFactor": 1, "mobile": false, "ua": null }
+  ],
+  "deviceScaleFactors": [1, 1.5, 2, 2.625, 3],
+  "zooms": [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2],
+  "defaults": { "device": "responsive", "width": 400, "height": 800, "deviceScaleFactor": 2, "mobile": true, "zoom": "fit" }
+}

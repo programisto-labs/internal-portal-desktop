@@ -4,11 +4,12 @@
  * Panneau « Responsive » des DevTools des onglets web (docs/devtools-responsive.md).
  *
  * - L'extension `devtools-extension/` ajoute l'onglet « Responsive » aux DevTools des onglets
- *   web (session `persist:browser-tabs` seulement : jamais les pages du portail).
- * - Son service worker relaie les réglages à Desktop par `lasco-devtools-responsive`, grâce au
- *   preload de service worker `devtools-responsive-preload.js`. Desktop ne répond qu'au
- *   service worker de cette extension, et seulement pour un onglet web dont les DevTools sont
- *   ouverts.
+ *   web (session `persist:browser-tabs` seulement : jamais les pages du portail). Pas de
+ *   service worker ni de script injecté : rien ne tourne tant que les DevTools sont fermés.
+ * - Le panneau envoie ses réglages dans un seul sens, en console (`MESSAGE_PREFIX`). Desktop ne
+ *   lit que la console des DevTools de l'onglet, et seulement les messages du cadre de
+ *   l'extension (origine `chrome-extension://<id>`) : une page web ne peut pas en écrire.
+ *   L'onglet visé est celui de ces DevTools : le panneau ne le nomme pas.
  * - Chaque onglet émulé a un contrôleur (`createTabResponsive`) : vue réduite et centrée sur
  *   un fond gris, émulation par le protocole DevTools (taille, densité, tactile, identité).
  */
@@ -21,13 +22,11 @@ const {
   responsiveLayout,
   deviceUserAgent,
   deviceMetrics,
-  publicDevices,
-  DEFAULT_SETTINGS,
-  DEVICE_SCALE_FACTORS,
-  ZOOMS,
 } = require('./responsive');
 
-const IPC_CHANNEL = 'lasco-devtools-responsive';
+const MESSAGE_PREFIX = '__lasco_responsive__';
+/** Taille maximale d'un message du panneau (caractères). */
+const MAX_MESSAGE_LENGTH = 2000;
 
 /** Fichiers lus par Chromium (extension) : hors de l'archive asar une fois empaquetés. */
 function unpackedPath(file) {
@@ -36,53 +35,82 @@ function unpackedPath(file) {
 }
 
 const EXTENSION_DIR = unpackedPath(path.join(__dirname, 'devtools-extension'));
-const SW_PRELOAD = unpackedPath(path.join(__dirname, 'devtools-responsive-preload.js'));
 
-/** webContents id d'un onglet web → (message) => réponse. Une route par onglet, toutes fenêtres. */
-const routes = new Map();
-const installedSessions = new WeakSet();
-
-function registerResponsiveRoute(webContentsId, handler) {
-  routes.set(webContentsId, handler);
+/** Extension déjà chargée dans cette session (l'objet `Session` d'un webContents peut différer). */
+function loadedExtension(browserSession) {
+  const extensions = browserSession.extensions.getAllExtensions();
+  return extensions.find((extension) => extension.path === EXTENSION_DIR) || null;
 }
 
-function unregisterResponsiveRoute(webContentsId) {
-  routes.delete(webContentsId);
-}
+const loading = new WeakMap();
 
-async function routeMessage(message) {
-  if (!message || typeof message !== 'object') return { ok: false, error: 'invalid' };
-  const handler = routes.get(Number(message.tabId));
-  if (!handler) return { ok: false, error: 'unknown-tab' };
-  return handler(message);
+/** `new URL('chrome-extension://…').origin` vaut « null » dans Node : origine construite à la main. */
+function extensionOrigin(extension) {
+  return `chrome-extension://${extension.id}`;
 }
 
 /**
- * Charge l'extension dans la session des onglets web, une fois. Erreurs avalées : sans
- * extension, les DevTools restent ceux d'Electron, sans l'onglet « Responsive ».
+ * Charge l'extension dans la session des onglets web, une fois, et renvoie son origine
+ * (null si elle n'a pas pu être chargée). Erreurs avalées : sans extension, les DevTools
+ * restent ceux d'Electron, sans l'onglet « Responsive ».
  */
 async function installDevtoolsResponsive(browserSession) {
-  if (!browserSession || installedSessions.has(browserSession)) return;
-  installedSessions.add(browserSession);
-  try {
-    browserSession.registerPreloadScript({ type: 'service-worker', id: 'lasco-devtools-responsive', filePath: SW_PRELOAD });
-    const extension = await browserSession.extensions.loadExtension(EXTENSION_DIR);
-    const workers = browserSession.serviceWorkers;
-    const wire = (versionId) => {
-      const worker = workers.getWorkerFromVersionID(versionId);
-      if (!worker || worker.scope !== extension.url) return;
-      worker.ipc.removeHandler(IPC_CHANNEL);
-      worker.ipc.handle(IPC_CHANNEL, (event, message) => {
-        if (!event.serviceWorker || event.serviceWorker.scope !== extension.url) return { ok: false, error: 'forbidden' };
-        return routeMessage(message);
-      });
-    };
-    workers.on('running-status-changed', ({ versionId, runningStatus }) => {
-      if (runningStatus === 'starting' || runningStatus === 'running') wire(versionId);
-    });
-  } catch (error) {
-    console.warn('[browser-tabs] responsive devtools panel unavailable:', error && error.message);
+  if (!browserSession) return null;
+  const loaded = loadedExtension(browserSession);
+  if (loaded) return extensionOrigin(loaded);
+  if (!loading.has(browserSession)) {
+    loading.set(
+      browserSession,
+      browserSession.extensions.loadExtension(EXTENSION_DIR).catch((error) => {
+        const again = loadedExtension(browserSession);
+        if (again) return again;
+        console.warn('[browser-tabs] responsive devtools panel unavailable:', error && error.message);
+        return null;
+      }),
+    );
   }
+  const extension = await loading.get(browserSession);
+  return extension ? extensionOrigin(extension) : null;
+}
+
+/** Message de console → réglages du panneau, ou null (autre message, illisible, trop long). */
+function parsePanelMessage(text) {
+  const raw = String(text || '');
+  if (!raw.startsWith(MESSAGE_PREFIX) || raw.length > MAX_MESSAGE_LENGTH) return null;
+  try {
+    const message = JSON.parse(raw.slice(MESSAGE_PREFIX.length));
+    if (!message || typeof message !== 'object') return null;
+    if (message.op === 'off') return { op: 'off' };
+    if (message.op === 'set' && message.settings && typeof message.settings === 'object') {
+      return { op: 'set', settings: message.settings };
+    }
+  } catch (_) {
+    // ignoré
+  }
+  return null;
+}
+
+/**
+ * Écoute le panneau dans les DevTools de `wc` pendant qu'ils sont ouverts. `onMessage` reçoit
+ * `{ op: 'set', settings }` ou `{ op: 'off' }`, dans l'ordre d'envoi.
+ */
+function watchDevtoolsResponsive(wc, onMessage) {
+  wc.on('devtools-opened', async () => {
+    const devtools = wc.devToolsWebContents;
+    if (!devtools || devtools.isDestroyed()) return;
+    const origin = await installDevtoolsResponsive(wc.session);
+    if (!origin || devtools.isDestroyed()) return;
+    let queue = Promise.resolve();
+    devtools.on('console-message', (event) => {
+      const frame = event.frame;
+      if (!frame || frame.origin !== origin) return;
+      const message = parsePanelMessage(event.message);
+      if (!message) return;
+      queue = queue.then(() => onMessage(message)).catch((error) => {
+        console.warn('[browser-tabs] responsive message failed:', error && error.message);
+      });
+    });
+  });
 }
 
 /**
@@ -198,17 +226,6 @@ function createTabResponsive({ view, getWindow, restoreIdentity }) {
         }
       }
     },
-    state() {
-      return {
-        ok: true,
-        active: Boolean(settings),
-        settings: settings || normalizeResponsiveSettings(DEFAULT_SETTINGS),
-        scale,
-        devices: publicDevices(),
-        deviceScaleFactors: DEVICE_SCALE_FACTORS,
-        zooms: ZOOMS,
-      };
-    },
     async set(input) {
       const previousDevice = settings ? settings.device : null;
       settings = normalizeResponsiveSettings(input);
@@ -243,10 +260,9 @@ function createTabResponsive({ view, getWindow, restoreIdentity }) {
 }
 
 module.exports = {
-  IPC_CHANNEL,
+  MESSAGE_PREFIX,
   installDevtoolsResponsive,
-  registerResponsiveRoute,
-  unregisterResponsiveRoute,
-  routeMessage,
+  parsePanelMessage,
+  watchDevtoolsResponsive,
   createTabResponsive,
 };

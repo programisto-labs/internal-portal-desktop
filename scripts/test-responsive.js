@@ -7,7 +7,6 @@ const {
   responsiveLayout,
   deviceUserAgent,
   deviceMetrics,
-  publicDevices,
   FRAME_PADDING,
 } = require('../src/browser-tabs/responsive');
 
@@ -76,6 +75,23 @@ test('metrics carry orientation and scale', () => {
   assert.equal(m.screenOrientation.type, 'landscapePrimary');
 });
 
-test('public device list exposes no user agent', () => {
-  for (const d of publicDevices()) assert.equal('ua' in d, false);
+test('panel messages: only well-formed set / off are accepted', () => {
+  const { parsePanelMessage, MESSAGE_PREFIX } = require('../src/browser-tabs/devtools-responsive');
+  assert.deepEqual(parsePanelMessage(`${MESSAGE_PREFIX}{"op":"off"}`), { op: 'off' });
+  assert.deepEqual(parsePanelMessage(`${MESSAGE_PREFIX}{"op":"set","settings":{"device":"pixel-8"}}`), {
+    op: 'set',
+    settings: { device: 'pixel-8' },
+  });
+  assert.equal(parsePanelMessage('{"op":"off"}'), null);
+  assert.equal(parsePanelMessage(`${MESSAGE_PREFIX}{"op":"set"}`), null);
+  assert.equal(parsePanelMessage(`${MESSAGE_PREFIX}{"op":"eval"}`), null);
+  assert.equal(parsePanelMessage(`${MESSAGE_PREFIX}not json`), null);
+  assert.equal(parsePanelMessage(`${MESSAGE_PREFIX}${'x'.repeat(3000)}`), null);
+});
+
+test('the panel and Desktop share one device catalog', () => {
+  const catalog = require('../src/browser-tabs/devtools-extension/devices.json');
+  const { DEVICES } = require('../src/browser-tabs/responsive');
+  assert.deepEqual(DEVICES.map((d) => d.id), catalog.devices.map((d) => d.id));
+  for (const d of catalog.devices) assert.ok(d.ua === null || ['iphone', 'ipad', 'android'].includes(d.ua));
 });

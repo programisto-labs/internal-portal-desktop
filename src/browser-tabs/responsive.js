@@ -11,32 +11,17 @@
 
 const MIN_SIZE = 50;
 const MAX_SIZE = 4000;
-const DEVICE_SCALE_FACTORS = [1, 1.5, 2, 2.625, 3];
-const ZOOMS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+/**
+ * Appareils, densités et zooms : `devtools-extension/devices.json`, lu aussi par le panneau
+ * (une seule liste). `ua` : identité de navigateur annoncée (null = celle de Lasco, Chrome de bureau).
+ */
+const CATALOG = require('./devtools-extension/devices.json');
+const DEVICE_SCALE_FACTORS = Object.freeze([...CATALOG.deviceScaleFactors]);
+const ZOOMS = Object.freeze([...CATALOG.zooms]);
 /** Marge entre l'appareil et le bord de la zone de l'onglet (px). */
 const FRAME_PADDING = 16;
-
-/** `ua` : identité de navigateur annoncée par l'appareil (null = celle de Lasco, Chrome de bureau). */
-const DEVICES = Object.freeze([
-  { id: 'iphone-se', name: 'iPhone SE', width: 375, height: 667, deviceScaleFactor: 2, mobile: true, ua: 'iphone' },
-  { id: 'iphone-15-pro', name: 'iPhone 15 Pro', width: 393, height: 852, deviceScaleFactor: 3, mobile: true, ua: 'iphone' },
-  { id: 'iphone-15-pro-max', name: 'iPhone 15 Pro Max', width: 430, height: 932, deviceScaleFactor: 3, mobile: true, ua: 'iphone' },
-  { id: 'pixel-8', name: 'Pixel 8', width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true, ua: 'android' },
-  { id: 'galaxy-s24', name: 'Galaxy S24', width: 360, height: 780, deviceScaleFactor: 3, mobile: true, ua: 'android' },
-  { id: 'ipad-mini', name: 'iPad Mini', width: 768, height: 1024, deviceScaleFactor: 2, mobile: true, ua: 'ipad' },
-  { id: 'ipad-pro-13', name: 'iPad Pro 13"', width: 1032, height: 1376, deviceScaleFactor: 2, mobile: true, ua: 'ipad' },
-  { id: 'laptop', name: 'Laptop', width: 1280, height: 800, deviceScaleFactor: 2, mobile: false, ua: null },
-  { id: 'desktop-hd', name: 'Desktop HD', width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false, ua: null },
-]);
-
-const DEFAULT_SETTINGS = Object.freeze({
-  device: 'responsive',
-  width: 400,
-  height: 800,
-  deviceScaleFactor: 2,
-  mobile: true,
-  zoom: 'fit',
-});
+const DEVICES = Object.freeze(CATALOG.devices.map((device) => Object.freeze({ ...device })));
+const DEFAULT_SETTINGS = Object.freeze({ ...CATALOG.defaults });
 
 function clampSize(value, fallback) {
   const n = Math.round(Number(value));
@@ -158,24 +143,15 @@ function deviceMetrics(settings, scale) {
     deviceScaleFactor: settings.deviceScaleFactor,
     mobile: settings.mobile,
     scale,
+    // Comme les DevTools de Chrome : la vue a déjà la bonne taille. Sans ce drapeau, la taille
+    // visible reste figée sur l'appareil après `clearDeviceMetricsOverride`.
+    dontSetVisibleSize: true,
     screenWidth: settings.width,
     screenHeight: settings.height,
     screenOrientation: settings.width > settings.height
       ? { type: 'landscapePrimary', angle: 90 }
       : { type: 'portraitPrimary', angle: 0 },
   };
-}
-
-/** Liste envoyée au panneau (pas de chaîne d'identité). */
-function publicDevices() {
-  return DEVICES.map(({ id, name, width, height, deviceScaleFactor, mobile }) => ({
-    id,
-    name,
-    width,
-    height,
-    deviceScaleFactor,
-    mobile,
-  }));
 }
 
 module.exports = {
@@ -188,5 +164,4 @@ module.exports = {
   responsiveLayout,
   deviceUserAgent,
   deviceMetrics,
-  publicDevices,
 };
