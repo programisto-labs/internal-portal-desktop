@@ -17,6 +17,7 @@ const {
 } = require('./default-browser');
 const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
 const { createHistoryStore } = require('./browser-tabs/history');
+const { registerBrowserImportIpc } = require('./browser-import/ipc');
 const { createSearchEngineStore } = require('./browser-tabs/search-engines');
 const { createDownloadsStore } = require('./downloads/store');
 const { createDownloadService } = require('./downloads/service');
@@ -2876,6 +2877,19 @@ function registerWindowIPC() {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
     openSettings('search');
     return { ok: true };
+  });
+
+  // Import from another browser (docs/browser-import.md). Portal windows only.
+  registerBrowserImportIpc({
+    ipcMain,
+    dialog,
+    shell,
+    home: app.getPath('home'),
+    history: getBrowserHistoryStore(),
+    resolveWindow: (event) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      return portalWindowEntry(win) ? win : null;
+    },
   });
 
   // Identity check before the portal shows a saved password (docs/passwords.md). Portal windows only.

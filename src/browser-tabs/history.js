@@ -181,6 +181,43 @@ function createHistoryStore({
     return { items: all.slice(skip, skip + max).map((e) => ({ ...e })), total: all.length };
   }
 
+  /**
+   * Merge visits imported from another browser (docs/browser-import.md). An address already known keeps
+   * the larger visit count and the latest visit; nothing is counted twice when the same import runs again.
+   * Returns `{ imported, skipped }`: `imported` = new addresses still kept after pruning to `maxEntries`.
+   */
+  function importEntries(items) {
+    load();
+    const added = new Set();
+    let skipped = 0;
+    for (const item of Array.isArray(items) ? items : []) {
+      const key = item && historyKey(item.url);
+      if (!key) {
+        skipped += 1;
+        continue;
+      }
+      const lastVisit = Math.min(now(), Math.max(0, Number(item.lastVisit) || 0));
+      const visitCount = Math.max(1, Math.floor(Number(item.visitCount)) || 1);
+      const title = String(item.title || '').slice(0, MAX_TITLE_LENGTH);
+      const existing = entries.get(key);
+      if (existing) {
+        existing.visitCount = Math.max(existing.visitCount, visitCount);
+        existing.lastVisit = Math.max(existing.lastVisit, lastVisit);
+        if (!existing.title && title) existing.title = title;
+        skipped += 1;
+        continue;
+      }
+      entries.set(key, { url: key, title, visitCount, lastVisit });
+      added.add(key);
+    }
+    prune();
+    let imported = 0;
+    for (const key of added) if (entries.has(key)) imported += 1;
+    skipped += added.size - imported;
+    if (added.size) flush();
+    return { imported, skipped };
+  }
+
   function remove(urlString) {
     load();
     const key = historyKey(urlString);
@@ -195,7 +232,7 @@ function createHistoryStore({
     flush();
   }
 
-  return { recordVisit, updateTitle, suggest, list, remove, clear, flush };
+  return { recordVisit, updateTitle, importEntries, suggest, list, remove, clear, flush };
 }
 
 module.exports = { createHistoryStore, historyKey, normalizeForMatch, MAX_ENTRIES };

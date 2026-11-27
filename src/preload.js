@@ -312,6 +312,21 @@ const downloadsBridge = {
   onChanged: (callback) => subscribe('downloads-changed', callback),
 };
 
+/** Import from another browser of this computer (docs/browser-import.md). Portal windows only. */
+const browserImportBridge = {
+  list: () => ipcRenderer.invoke('browser-import-list'),
+  /** `{ importId, browserId, profileId, kinds: { bookmarks, history, passwords } }`. */
+  run: (payload) => ipcRenderer.invoke('browser-import-run', payload),
+  /** Native open dialog, then reads the password CSV exported by a browser. */
+  importPasswordsCsv: () => ipcRenderer.invoke('browser-import-passwords-csv'),
+  /** `{ token }` → `{ ok, items: [{ url, username, password }] }`, once. */
+  takePasswords: (payload) => ipcRenderer.invoke('browser-import-take-passwords', payload),
+  discardPasswords: (payload) => ipcRenderer.invoke('browser-import-discard-passwords', payload),
+  /** System Settings > Privacy > Full Disk Access (Safari). */
+  openFullDiskAccessSettings: () => ipcRenderer.invoke('browser-import-open-full-disk-access'),
+  onProgress: (callback) => subscribe('browser-import-progress', callback),
+};
+
 const desktopBridge = {
   platform: process.platform,
   version: appVersion,
@@ -362,6 +377,7 @@ const desktopBridge = {
   ...(exposeVmShell && { vm: vmShellBridge }),
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposePortalBridges && { downloads: downloadsBridge }),
+  ...(exposePortalBridges && !vmMode && { browserImport: browserImportBridge }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
