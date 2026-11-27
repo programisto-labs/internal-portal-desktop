@@ -191,6 +191,10 @@
         <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         Autorisations des sites
       </button>
+      <button data-section="adblock">
+        <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m4.9 4.9 14.2 14.2"/></svg>
+        Bloqueur de pubs
+      </button>
       <button data-section="computer" data-agents>
         <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
         Cet ordinateur
@@ -378,6 +382,21 @@
           <button class="btn danger" id="siteResetAll">Tout réinitialiser</button>
         </div>
         <div class="group" id="siteList"></div>
+      </section>
+      <section data-panel="adblock" hidden>
+        <p class="intro">Bloque les publicités et les traqueurs des sites ouverts dans les onglets web (listes EasyList et EasyPrivacy, mises à jour une fois par jour). Les pages de Lasco ne sont jamais filtrées.</p>
+        <div class="group">
+          <div class="row">
+            <div class="text">
+              <div class="label">Bloquer les pubs et les traqueurs</div>
+              <div class="hint" id="adblockHint">Le nombre de requêtes bloquées s’affiche dans les informations du site, à gauche de l’adresse.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="adblockEnabled" aria-label="Bloquer les pubs et les traqueurs"><span></span></label>
+          </div>
+        </div>
+        <h2>Sites autorisés</h2>
+        <p class="intro" style="margin: 0 0 8px 2px; font-size: 12px;">Le bloqueur est coupé sur ces sites. Pour en ajouter un : informations du site, à gauche de l’adresse.</p>
+        <div class="group" id="adblockSites"></div>
       </section>
       <section data-panel="computer" data-agents hidden>
         <p class="intro">Opérations des agents IA sur cet ordinateur, après votre confirmation. Désactivé par défaut. Sans lien avec la machine virtuelle.</p>

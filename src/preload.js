@@ -97,6 +97,15 @@ const browserTabsBridge = {
   print: (payload) => invokeBrowserTab('browser-tab-print', payload),
   capture: (payload) => invokeBrowserTab('browser-tab-capture', payload),
   copyScreenshot: (payload) => invokeBrowserTab('browser-tab-copy-screenshot', payload),
+  // Capture d'écran enregistrée dans les Téléchargements et copiée (docs/page-capture.md).
+  screenshots: {
+    /** Le portail traite `capture-full-page` / `capture-visible` (menu contextuel, ⌘⇧S). */
+    ready: () => invokeBrowserTab('browser-tab-capture-ready'),
+    /** `{ tabId, mode: 'full' | 'visible', target?: 'file' | 'assistant' }` : onglet web. */
+    captureTab: (payload) => invokeBrowserTab('browser-tab-capture-save', payload),
+    /** `{ rect, title, target? }` : partie visible d'une page du portail (rect dans la fenêtre). */
+    capturePortal: (payload) => invokeBrowserTab('browser-portal-capture-save', payload),
+  },
   openExternal: (payload) => invokeBrowserTab('browser-tab-open-external', payload),
   openDevTools: (payload) => invokeBrowserTab('browser-tab-open-devtools', payload),
   clearBrowsingData: () => invokeBrowserTab('browser-tab-clear-data'),
@@ -104,6 +113,8 @@ const browserTabsBridge = {
   siteInfo: (payload) => invokeBrowserTab('browser-tab-site-info', payload),
   setSitePermission: (payload) => invokeBrowserTab('browser-tab-set-site-permission', payload),
   resetSitePermissions: (payload) => invokeBrowserTab('browser-tab-reset-site-permissions', payload),
+  /** `{ tabId, enabled }` : bloqueur de pubs sur le site de l'onglet (docs/adblock.md) ; la page est rechargée. */
+  setSiteAdblock: (payload) => invokeBrowserTab('browser-tab-set-site-adblock', payload),
   openSiteSettings: () => invokeBrowserTab('browser-tab-open-site-settings'),
   historySuggest: (payload) => invokeBrowserTab('browser-history-suggest', payload),
   historyList: (payload) => invokeBrowserTab('browser-history-list', payload),
@@ -279,6 +290,11 @@ const tabWindowsBridge = {
   prewarm: (payload) => ipcRenderer.invoke('tab-window-prewarm', payload),
   /** ⌘N: open a new window on the new-tab page (`{ href }`: the portal's new-tab path). */
   openWindow: (payload) => ipcRenderer.invoke('tab-window-open', payload),
+  // Recherche dans les onglets (⌘⇧A) : onglets des autres fenêtres Lasco.
+  publishTabs: (payload) => ipcRenderer.invoke('tab-window-publish-tabs', payload),
+  listTabs: () => ipcRenderer.invoke('tab-window-list-tabs'),
+  activateTab: (payload) => ipcRenderer.invoke('tab-window-activate-tab', payload),
+  onTabAction: (callback) => subscribe('tab-window-tab-action', callback),
 };
 
 /**
@@ -370,6 +386,10 @@ const desktopBridge = {
   ...(exposeVmShell && { vm: vmShellBridge }),
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposePortalBridges && { downloads: downloadsBridge }),
+  /** Navigation privée (docs/private-browsing.md) : menu ☰ du navigateur du portail. */
+  ...(exposePortalBridges && !vmMode && {
+    privateBrowsing: { openWindow: () => ipcRenderer.invoke('private-window-open') },
+  }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),
