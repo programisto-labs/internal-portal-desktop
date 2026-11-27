@@ -39,6 +39,23 @@ const PROMPTABLE = {
   fileSystem: 'modifier les fichiers et dossiers que vous lui ouvrez',
 };
 
+/** Nom court d'une permission (informations du site, Réglages > Autorisations des sites). */
+const PERMISSION_NAMES = {
+  microphone: 'Micro',
+  camera: 'Caméra',
+  geolocation: 'Position',
+  notifications: 'Notifications',
+  'clipboard-read': 'Lecture du presse-papiers',
+  midi: 'Appareils MIDI',
+  midiSysex: 'Contrôle des appareils MIDI',
+  'idle-detection': "Détection d'inactivité",
+  'window-management': 'Gestion des fenêtres',
+  fileSystem: 'Modification de fichiers',
+};
+
+/** Réglage par défaut d'une permission sans décision pour le site : `ask` (question) ou `block` (refus sans question). */
+const DEFAULTS = new Set(['ask', 'block']);
+
 /** Demande `media` d'Electron → permissions retenues (`audio` → micro, `video` → caméra). */
 const MEDIA_TYPE_PERMISSIONS = { audio: 'microphone', video: 'camera' };
 
@@ -101,9 +118,14 @@ function permissionPolicy(permission) {
   return 'deny';
 }
 
-/** Décisions retenues : `{ version: 1, origins: { "https://x": { geolocation: "allow" } } }`. */
+/**
+ * Décisions retenues : `{ version: 1, origins: { "https://x": { geolocation: "allow" } }, defaults: { camera: "block" } }`.
+ * `defaults` ne garde que les permissions réglées sur « Bloquer » (sinon : demander).
+ */
 function createSitePermissionStore({ filePath, fsImpl = fs } = {}) {
   let origins = null;
+  /** permission → 'block' (absente : 'ask'). Lu avec `origins`. */
+  const defaults = new Map();
   /**
    * « Ignorer » : refusé sans question jusqu'au redémarrage de Lasco (jamais écrit sur le disque).
    * Sans lui, un site qui redemande à chaque refus (position relue en boucle) reposait la question sans fin.
@@ -127,6 +149,10 @@ function createSitePermissionStore({ filePath, fsImpl = fs } = {}) {
         }
         if (valid.size) origins.set(origin, valid);
       }
+      const rawDefaults = raw && typeof raw.defaults === 'object' && raw.defaults ? raw.defaults : {};
+      for (const [permission, value] of Object.entries(rawDefaults)) {
+        if (permissionPolicy(permission) === 'ask' && value === 'block') defaults.set(permission, 'block');
+      }
     } catch (_) {
       // Fichier absent ou illisible : aucune décision, chaque site redemande.
     }
@@ -140,7 +166,10 @@ function createSitePermissionStore({ filePath, fsImpl = fs } = {}) {
       const payload = {};
       for (const [origin, decisions] of load()) payload[origin] = Object.fromEntries(decisions);
       const tmp = `${filePath}.tmp`;
-      fsImpl.writeFileSync(tmp, JSON.stringify({ version: 1, origins: payload }));
+      fsImpl.writeFileSync(
+        tmp,
+        JSON.stringify({ version: 1, origins: payload, defaults: Object.fromEntries(defaults) }),
+      );
       fsImpl.renameSync(tmp, filePath);
     } catch (_) {
       // Non enregistré : la question reviendra.
@@ -176,14 +205,55 @@ function createSitePermissionStore({ filePath, fsImpl = fs } = {}) {
     isDismissed(origin, permission) {
       return dismissed.has(dismissKey(origin, permission));
     },
+    /** Levée d'un « Ignorer » sans toucher à la décision (aucune). */
+    undismiss(origin, permission) {
+      return dismissed.delete(dismissKey(origin, permission));
+    },
     list(origin) {
       const decisions = load().get(origin);
       return decisions ? Object.fromEntries(decisions) : {};
+    },
+    /** Permissions ignorées pour un site (jusqu'au redémarrage). */
+    listDismissed(origin) {
+      return PROMPTABLE_PERMISSIONS.filter((permission) => dismissed.has(dismissKey(origin, permission)));
+    },
+    /**
+     * Sites avec au moins une décision ou un « Ignorer », triés par hôte :
+     * `[{ origin, host, decisions: { camera: 'allow' }, dismissed: ['geolocation'] }]`.
+     */
+    listSites() {
+      const all = new Set(load().keys());
+      for (const key of dismissed) all.add(key.slice(0, key.indexOf('\n')));
+      return [...all]
+        .map((origin) => ({
+          origin,
+          host: siteHost(origin),
+          decisions: this.list(origin),
+          dismissed: this.listDismissed(origin),
+        }))
+        .sort((a, b) => a.host.localeCompare(b.host) || a.origin.localeCompare(b.origin));
+    },
+    getDefault(permission) {
+      load();
+      return defaults.get(permission) || 'ask';
+    },
+    /** `value` : 'ask' ou 'block'. */
+    setDefault(permission, value) {
+      if (permissionPolicy(permission) !== 'ask' || !DEFAULTS.has(value)) return false;
+      load();
+      if (value === 'block') defaults.set(permission, 'block');
+      else defaults.delete(permission);
+      save();
+      return true;
+    },
+    listDefaults() {
+      return PROMPTABLE_PERMISSIONS.map((permission) => ({ permission, value: this.getDefault(permission) }));
     },
     clearOrigin(origin) {
       for (const key of [...dismissed]) if (key.startsWith(`${origin}\n`)) dismissed.delete(key);
       if (load().delete(origin)) save();
     },
+    /** Oublie toutes les décisions des sites ; les réglages par défaut restent. */
     clear() {
       dismissed.clear();
       load().clear();
@@ -227,6 +297,8 @@ function createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess = as
       if (stored === 'block') return false;
       if (stored === 'allow') continue;
       if (store.isDismissed && store.isDismissed(origin, permission)) return false;
+      // Réglage par défaut « Bloquer » (Réglages > Autorisations des sites) : refusé sans question.
+      if (store.getDefault && store.getDefault(permission) === 'block') return false;
       undecided.push(permission);
     }
     if (!undecided.length) return true;
@@ -305,6 +377,7 @@ function createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess = as
         // n'appelait jamais getUserMedia, donc la question de Lasco n'apparaissait pas. Tant que
         // rien n'est bloqué ni ignoré, on répond « accordé » : le site appelle getUserMedia et la
         // demande passe par `request`, qui pose la question.
+        if (store.getDefault && store.getDefault(target) === 'block') return false;
         return !(store.isDismissed && store.isDismissed(site, target));
       }
       // Noms des appareils (enumerateDevices) : cachés jusqu'à « Autoriser ».
@@ -332,12 +405,18 @@ function installSitePermissions(targetSession, { store, ask, ensureSystemMediaAc
   return true;
 }
 
-/** Ce que les informations du site affichent : une ligne par permission demandable. */
+/**
+ * Ce que les informations du site affichent : une ligne par permission demandable, décidée ou non.
+ * `decision` : 'allow' | 'block' | 'ask' (aucune décision : le réglage par défaut s'applique) ;
+ * `dismissed` : « Ignorer » en mémoire jusqu'au redémarrage ; `defaultDecision` : 'ask' | 'block'.
+ */
 function describeSitePermissions(store, origin) {
   const decisions = store.list(origin);
-  return PROMPTABLE_PERMISSIONS.filter((permission) => decisions[permission]).map((permission) => ({
+  return PROMPTABLE_PERMISSIONS.map((permission) => ({
     permission,
-    decision: decisions[permission],
+    decision: decisions[permission] || 'ask',
+    dismissed: !decisions[permission] && Boolean(store.isDismissed && store.isDismissed(origin, permission)),
+    defaultDecision: store.getDefault ? store.getDefault(permission) : 'ask',
   }));
 }
 
@@ -345,6 +424,7 @@ module.exports = {
   ALWAYS_ALLOWED,
   PROMPTABLE,
   PROMPTABLE_PERMISSIONS,
+  PERMISSION_NAMES,
   siteOrigin,
   siteHost,
   permissionLabel,

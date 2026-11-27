@@ -8,12 +8,13 @@ const { ipcRenderer } = require('electron');
 const params = new URLSearchParams(globalThis.location ? globalThis.location.search : '');
 const STANDALONE = params.get('standalone') === '1';
 const AGENTS = params.get('agents') !== '0';
-const SECTIONS = ['general', 'search', 'downloads', 'drive', 'computer', 'permissions', 'journal', 'updates'];
+const SECTIONS = ['general', 'search', 'downloads', 'drive', 'sites', 'computer', 'permissions', 'journal', 'updates'];
 const TITLES = {
   general: 'Général',
   search: 'Moteur de recherche',
   downloads: 'Téléchargements',
   drive: 'My Drive',
+  sites: 'Autorisations des sites',
   computer: 'Cet ordinateur',
   permissions: 'Autorisations',
   journal: 'Journal',
@@ -427,6 +428,130 @@ function renderDownloads(d) {
   $('downloadsError').textContent = downloadsError || '';
 }
 
+/** Site dont toutes les autorisations sont affichées (« Modifier »). */
+let expandedSite = null;
+const SITE_DECISIONS = [
+  ['allow', 'Autoriser'],
+  ['block', 'Bloquer'],
+];
+
+function decisionSelect(label, value, options, onChange) {
+  const select = document.createElement('select');
+  select.setAttribute('aria-label', label);
+  for (const [v, text] of options) {
+    const option = document.createElement('option');
+    option.value = v;
+    option.textContent = text;
+    select.append(option);
+  }
+  select.value = value;
+  select.onchange = async () => {
+    await onChange(select.value);
+    select.blur();
+    render();
+  };
+  return select;
+}
+
+/** Texte de « aucune décision » : le réglage par défaut, comme Chrome (« Demander (par défaut) »). */
+function defaultOptionText(defaults, permission) {
+  return defaults[permission] === 'block' ? 'Bloquer (par défaut)' : 'Demander (par défaut)';
+}
+
+function siteSummary(site, names) {
+  const parts = [];
+  for (const [permission, decision] of Object.entries(site.decisions)) {
+    parts.push(`${names[permission] || permission} : ${decision === 'allow' ? 'autorisé' : 'bloqué'}`);
+  }
+  for (const permission of site.dismissed) parts.push(`${names[permission] || permission} : ignoré`);
+  return parts.join(' · ');
+}
+
+function renderSites(sp) {
+  if (!sp) return;
+  const names = sp.names || {};
+  const defaults = Object.fromEntries(sp.defaults.map((d) => [d.permission, d.value]));
+  const defaultsGroup = $('siteDefaults');
+  if (!defaultsGroup.contains(document.activeElement) || document.activeElement.tagName !== 'SELECT') {
+    defaultsGroup.replaceChildren();
+    for (const d of sp.defaults) {
+      const row = el('div', 'row');
+      const text = el('div', 'text');
+      text.append(el('div', 'label', names[d.permission] || d.permission));
+      const label = names[d.permission] || d.permission;
+      const select = decisionSelect(label, d.value, [['ask', 'Demander'], ['block', 'Bloquer']], (value) =>
+        ipcRenderer.invoke('settings-modal-site-set-default', d.permission, value),
+      );
+      row.append(text, select);
+      defaultsGroup.append(row);
+    }
+  }
+
+  const list = $('siteList');
+  if (list.contains(document.activeElement) && document.activeElement.tagName === 'SELECT') return;
+  list.replaceChildren();
+  const query = $('siteSearch').value.trim().toLowerCase();
+  const sites = sp.sites.filter((site) => !query || site.origin.toLowerCase().includes(query));
+  $('siteResetAll').disabled = sp.sites.length === 0;
+  if (!sites.length) {
+    list.append(el('div', 'empty', query ? 'Aucun site ne correspond.' : 'Aucun site pour l’instant.'));
+    return;
+  }
+  for (const site of sites) {
+    const block = el('div', 'site-block');
+    const row = el('div', 'row');
+    const text = el('div', 'text');
+    text.append(el('div', 'label', site.host), el('div', 'hint', siteSummary(site, names)));
+    if (!site.origin.startsWith('https:')) text.append(el('div', 'hint mono', site.origin));
+    const open = expandedSite === site.origin;
+    const toggle = el('button', 'link', open ? 'Fermer' : 'Modifier');
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.setAttribute('aria-label', `${open ? 'Fermer' : 'Modifier'} les autorisations de ${site.host}`);
+    toggle.onclick = () => {
+      expandedSite = open ? null : site.origin;
+      render();
+    };
+    const remove = el('button', 'btn danger', 'Supprimer');
+    remove.setAttribute('aria-label', `Supprimer les autorisations de ${site.host}`);
+    remove.onclick = async () => {
+      await ipcRenderer.invoke('settings-modal-site-remove', site.origin);
+      if (expandedSite === site.origin) expandedSite = null;
+      render();
+    };
+    row.append(text, toggle, remove);
+    block.append(row);
+    if (open) {
+      const perms = el('div', 'site-perms');
+      for (const d of sp.defaults) {
+        const permission = d.permission;
+        const line = el('div', 'site-perm');
+        const name = el('div', 'name');
+        name.append(el('div', '', names[permission] || permission));
+        const dismissed = !site.decisions[permission] && site.dismissed.includes(permission);
+        if (dismissed) name.append(el('div', 'hint', 'Ignoré jusqu’au redémarrage de Lasco'));
+        line.append(name);
+        if (dismissed) {
+          const lift = el('button', 'link', 'Redemander');
+          lift.onclick = async () => {
+            await ipcRenderer.invoke('settings-modal-site-set', site.origin, permission, null);
+            render();
+          };
+          line.append(lift);
+        }
+        const options = [...SITE_DECISIONS, ['ask', defaultOptionText(defaults, permission)]];
+        line.append(
+          decisionSelect(`${names[permission] || permission} pour ${site.host}`, site.decisions[permission] || 'ask', options, (value) =>
+            ipcRenderer.invoke('settings-modal-site-set', site.origin, permission, value),
+          ),
+        );
+        perms.append(line);
+      }
+      block.append(perms);
+    }
+    list.append(block);
+  }
+}
+
 function renderUpdate(u) {
   $('version').textContent = u.currentVersion || '';
   let text = UPDATE_LABELS[u.status] || '';
@@ -472,6 +597,7 @@ async function render() {
   renderDrive(s.driveSync);
   renderDownloads(s.downloads);
   renderSearch(s.searchEngines);
+  renderSites(s.sitePermissions);
 
   if (!s.hostOps) return;
   const h = s.hostOps;
@@ -570,6 +696,12 @@ window.addEventListener('DOMContentLoaded', () => {
   $('searchDefault').onchange = async () => {
     await ipcRenderer.invoke('settings-modal-search-set-default', $('searchDefault').value);
     $('searchDefault').blur();
+    render();
+  };
+  $('siteSearch').oninput = () => render();
+  $('siteResetAll').onclick = async () => {
+    const res = await ipcRenderer.invoke('settings-modal-site-reset-all');
+    if (res && res.ok) expandedSite = null;
     render();
   };
   $('driveEnabled').onchange = () => driveAction('settings-modal-drive-set-enabled', $('driveEnabled').checked);
