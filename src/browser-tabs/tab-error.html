@@ -31,6 +31,21 @@
     }
     .button.secondary { background: transparent; color: var(--fg); border-color: color-mix(in srgb, var(--fg) 20%, transparent); }
     [hidden] { display: none !important; }
+    /* Site signalé par Safe Browsing (docs/safe-browsing.md) : page rouge plein écran, comme Chrome. */
+    body[data-kind="safe-browsing"] { background: #c5221f; color: #ffffff; align-items: flex-start; padding-top: 14vh; }
+    body[data-kind="safe-browsing"] main { max-width: 600px; }
+    body[data-kind="safe-browsing"] .icon { font-size: 56px; }
+    body[data-kind="safe-browsing"] h1 { color: #ffffff; font-size: 26px; }
+    body[data-kind="safe-browsing"] p { color: rgba(255, 255, 255, 0.92); font-size: 15px; }
+    body[data-kind="safe-browsing"] .host { color: #ffffff; }
+    body[data-kind="safe-browsing"] .actions { justify-content: space-between; align-items: center; margin-top: 32px; }
+    body[data-kind="safe-browsing"] .button { background: #ffffff; color: #c5221f; font-weight: 600; }
+    .link {
+      background: none; border: none; color: inherit; font: inherit; font-size: 13px; cursor: pointer;
+      text-decoration: underline; text-underline-offset: 3px; padding: 0; opacity: 0.9;
+    }
+    #details { margin-top: 28px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.35); }
+    #details p { font-size: 13px; }
   </style>
 </head>
 <body>
@@ -43,6 +58,12 @@
     <div class="actions">
       <a class="button" id="retry" hidden></a>
       <button class="button secondary" type="button" id="back" hidden>Revenir en arrière</button>
+      <button class="button" type="button" id="safeBack" hidden></button>
+      <button class="link" type="button" id="toggleDetails" aria-expanded="false" aria-controls="details" hidden></button>
+    </div>
+    <div id="details" hidden>
+      <p id="detailsText"></p>
+      <p><button class="link" type="button" id="proceed"></button></p>
     </div>
   </main>
   <script src="tab-error.js"></script>

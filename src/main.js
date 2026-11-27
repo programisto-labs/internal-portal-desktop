@@ -28,6 +28,9 @@ const { registerBrowserImportIpc } = require('./browser-import/ipc');
 const { createSearchEngineStore } = require('./browser-tabs/search-engines');
 const { createDownloadsStore } = require('./downloads/store');
 const { createDownloadService } = require('./downloads/service');
+const { createSafeBrowsingService } = require('./safe-browsing/service');
+const { resolveEndpoint, createSafeBrowsingTransport, createFileStorage } = require('./safe-browsing/transport');
+const { assessDownloadDanger } = require('./safe-browsing/downloads');
 const { PASSWORD_PAGE_CHANNELS } = require('./browser-tabs/passwords');
 const { FORM_AUTOFILL_PAGE_CHANNELS } = require('./browser-tabs/form-autofill');
 const { createVaultAuth } = require('./vault-auth');
@@ -1087,6 +1090,8 @@ function getDownloadService() {
       const win = mainPortalWindow();
       if (win && !win.isDestroyed()) win.setProgressBar(fraction);
     },
+    // Fichier d'un site signalé (docs/safe-browsing.md) : jamais écrit, « Conserver quand même ».
+    assessDanger: ({ urls, pageUrl }) => assessDownloadDanger(getSafeBrowsing(), [...urls, pageUrl]),
     // Onglet ouvert seulement pour ce fichier : fermé, comme Chrome (plus d'onglet vide).
     onStarted: ({ webContents, source }) => {
       if (source !== 'web' || !webContents) return;
@@ -1096,6 +1101,28 @@ function getDownloadService() {
     },
   });
   return downloadService;
+}
+
+/**
+ * Protection contre les sites dangereux (docs/safe-browsing.md) : une base de préfixes pour toutes
+ * les fenêtres, mise à jour en arrière-plan. Réglages > Général > Sécurité (activée par défaut).
+ */
+let safeBrowsing = null;
+
+function getSafeBrowsing() {
+  if (safeBrowsing) return safeBrowsing;
+  const { net } = require('electron');
+  const endpoint = resolveEndpoint({ portalOrigin: PORTAL_ORIGIN });
+  safeBrowsing = createSafeBrowsingService({
+    transport: createSafeBrowsingTransport({
+      fetch: (url, init) => net.fetch(url, init),
+      endpoint,
+      clientVersion: app.getVersion(),
+    }),
+    storage: createFileStorage({ fs, filePath: path.join(app.getPath('userData'), 'safe-browsing.json') }),
+    isEnabled: () => getSettings().safeBrowsingEnabled !== false,
+  });
+  return safeBrowsing;
 }
 
 /** Réglage de la veille lu par le portail (même délai pour ses pages), docs/tab-sleep.md. */
@@ -1150,6 +1177,7 @@ function tabManagerFor(win) {
       history: getBrowserHistoryStore(),
       interceptLink: routePortalLinkInApp,
       searchEngines: getSearchEngineStore(),
+      safeBrowsing: getSafeBrowsing(),
       // Économiseur de mémoire (docs/tab-sleep.md). Coupé en mode VM (onglets pilotés par le point de contrôle).
       getTabSleepSettings: () => (VM_MODE ? null : getSettings()),
     });
@@ -1269,6 +1297,8 @@ function openPrivateWindow(sourceWindow) {
     partition,
     privateMode: true,
     searchEngines: getSearchEngineStore(),
+    // Comme Chrome : la protection vaut aussi en navigation privée (vérifications en mémoire, aucune donnée de navigation écrite).
+    safeBrowsing: getSafeBrowsing(),
     isPortalUrl: isPortalNavigationUrl,
     onPortalUrl: openPortalUrlFromPrivateWindow,
   });
@@ -2178,6 +2208,7 @@ function registerWindowIPC() {
     'downloads-resume': 'resume',
     'downloads-cancel': 'cancel',
     'downloads-retry': 'retry',
+    'downloads-keep-dangerous': 'keepDangerous',
     'downloads-open': 'open',
     'downloads-show': 'show',
     'downloads-remove': 'remove',
@@ -2714,6 +2745,7 @@ function registerWindowIPC() {
         // Background mode needs the menu bar icon (macOS).
         backgroundAvailable: Boolean(trayController),
         keepInBackground: settings.keepInBackground,
+        safeBrowsingEnabled: settings.safeBrowsingEnabled !== false,
         loginItem: loginItemSnapshot(),
         shortcuts: shortcutsSnapshot(),
       },
@@ -2759,6 +2791,13 @@ function registerWindowIPC() {
   ipcMain.handle('settings-modal-set-keep-in-background', (event, enabled) => {
     if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
     getSettingsStore().set({ keepInBackground: enabled });
+    return true;
+  });
+  // Réglages > Général > Sécurité (docs/safe-browsing.md).
+  ipcMain.handle('settings-modal-set-safe-browsing', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
+    getSettingsStore().set({ safeBrowsingEnabled: enabled });
+    if (enabled) void getSafeBrowsing().update();
     return true;
   });
   ipcMain.handle('settings-modal-set-open-at-login', (event, enabled) => {
@@ -3120,6 +3159,7 @@ function registerWindowIPC() {
   const browserTabActions = {
     'browser-tab-zoom': 'zoom',
     'browser-tab-set-muted': 'setMuted',
+    'browser-tab-set-safe-browsing-texts': 'setSafeBrowsingTexts',
     'browser-tab-find': 'findInPage',
     'browser-tab-stop-find': 'stopFindInPage',
     'browser-tab-print': 'print',
@@ -3455,6 +3495,7 @@ function startVmMode() {
     ])
   );
   getDownloadService().attach(session.fromPartition(BROWSER_PARTITION), 'web');
+  getSafeBrowsing().start();
   registerWindowIPC();
   ipcMain.handle('vm-shell-info', (event) => {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
@@ -3520,6 +3561,7 @@ if (!app.requestSingleInstanceLock()) {
     // Téléchargements : pages web des onglets et pages du portail (exports CSV, PDF…).
     getDownloadService().attach(session.fromPartition(BROWSER_PARTITION), 'web');
     getDownloadService().attach(session.fromPartition('persist:portal'), 'portal');
+    getSafeBrowsing().start();
     registerWindowIPC();
     setupAutoUpdater();
     nativeTheme.on('updated', updateAllIcons);

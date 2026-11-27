@@ -88,6 +88,8 @@ const browserTabsBridge = {
   reload: (payload) => invokeBrowserTab('browser-tab-reload', payload),
   /** `{ tabId, muted }` : couper ou réactiver le son de l'onglet web. */
   setMuted: (payload) => invokeBrowserTab('browser-tab-set-muted', payload),
+  /** Textes de la page « Site dangereux » dans la langue de la personne (docs/safe-browsing.md). */
+  setSafeBrowsingTexts: (texts) => invokeBrowserTab('browser-tab-set-safe-browsing-texts', { texts }),
   stop: (payload) => invokeBrowserTab('browser-tab-stop', payload),
   setBounds: (payload) => invokeBrowserTab('browser-tab-set-bounds', payload),
   getState: (payload) => invokeBrowserTab('browser-tab-get-state', payload),
@@ -327,6 +329,8 @@ const downloadsBridge = {
   resume: (id) => ipcRenderer.invoke('downloads-resume', { id }),
   cancel: (id) => ipcRenderer.invoke('downloads-cancel', { id }),
   retry: (id) => ipcRenderer.invoke('downloads-retry', { id }),
+  /** « Conserver quand même » d'un fichier signalé dangereux (docs/safe-browsing.md). */
+  keepDangerous: (id) => ipcRenderer.invoke('downloads-keep-dangerous', { id }),
   open: (id) => ipcRenderer.invoke('downloads-open', { id }),
   show: (id) => ipcRenderer.invoke('downloads-show', { id }),
   remove: (id) => ipcRenderer.invoke('downloads-remove', { id }),

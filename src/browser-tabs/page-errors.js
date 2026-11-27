@@ -65,12 +65,12 @@ function isLocalHost(hostname) {
  * Cadenas de la barre d'adresse :
  * - `secure` : https chargé ;
  * - `insecure` : http (sauf machine locale) ;
- * - `dangerous` : certificat refusé ;
+ * - `dangerous` : certificat refusé, ou site signalé par Safe Browsing (docs/safe-browsing.md) ;
  * - `local` : http sur cette machine ;
  * - null : rien à afficher (onglet vide, page d'erreur réseau ou plantage).
  */
 function securityStateOf(url, errorPage) {
-  if (errorPage) return errorPage.kind === 'certificate' ? 'dangerous' : null;
+  if (errorPage) return errorPage.kind === 'certificate' || errorPage.kind === 'safe-browsing' ? 'dangerous' : null;
   try {
     const parsed = new URL(String(url || ''));
     if (parsed.protocol === 'https:') return 'secure';
@@ -93,10 +93,100 @@ function errorPageQuery(errorPage) {
   if (errorPage.code) query.code = String(errorPage.code);
   if (errorPage.message) query.message = String(errorPage.message);
   if (errorPage.reason) query.reason = String(errorPage.reason);
+  if (errorPage.kind === 'safe-browsing') {
+    query.threat = SAFE_BROWSING_THREATS.includes(errorPage.threat) ? errorPage.threat : 'malware';
+    if (errorPage.token) query.token = String(errorPage.token);
+    const texts = cleanSafeBrowsingTexts(errorPage.texts);
+    if (texts) query.texts = JSON.stringify(texts);
+  }
   return query;
 }
 
+/** Menaces de la page « Site dangereux » (docs/safe-browsing.md). */
+const SAFE_BROWSING_THREATS = ['malware', 'phishing', 'unwanted'];
+
+/** Textes de la page « Site dangereux » fournis par le portail, dans la langue de la personne. */
+const SAFE_BROWSING_TEXT_KEYS = [
+  'phishingTitle',
+  'phishingMessage',
+  'phishingDetails',
+  'malwareTitle',
+  'malwareMessage',
+  'malwareDetails',
+  'unwantedTitle',
+  'unwantedMessage',
+  'unwantedDetails',
+  'back',
+  'showDetails',
+  'hideDetails',
+  'proceed',
+  'siteLabel',
+];
+const MAX_TEXT_LENGTH = 800;
+
+/** Garde seulement les clés connues, en texte court (jamais du HTML : la page les insère en texte). */
+function cleanSafeBrowsingTexts(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  for (const key of SAFE_BROWSING_TEXT_KEYS) {
+    const value = raw[key];
+    if (typeof value === 'string' && value.trim()) out[key] = value.trim().slice(0, MAX_TEXT_LENGTH);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Geste lu dans l'adresse de la page d'avertissement après un clic (`#proceed-<jeton>` ou
+ * `#back-<jeton>`, posé par tab-error.js avec `location.replace`). Le jeton, tiré au hasard à chaque
+ * avertissement, empêche toute autre page d'ouvrir le site à sa place. Null sinon.
+ */
+function safeBrowsingGesture(url, errorPage) {
+  if (!errorPage || errorPage.kind !== 'safe-browsing' || !errorPage.token) return null;
+  let parsed;
+  try {
+    parsed = new URL(String(url || ''));
+  } catch (_) {
+    return null;
+  }
+  if (parsed.protocol !== 'file:') return null;
+  const match = /^#(proceed|back)-([A-Za-z0-9-]+)$/.exec(parsed.hash);
+  if (!match || match[2] !== errorPage.token) return null;
+  return match[1];
+}
+
+/** Page « Site dangereux » de Lasco relue depuis son adresse (file://…/tab-error.html?kind=safe-browsing…). */
+function safeBrowsingPageFromUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(String(url || ''));
+  } catch (_) {
+    return null;
+  }
+  if (parsed.protocol !== 'file:') return null;
+  let filePath = '';
+  try {
+    filePath = require('url').fileURLToPath(`file://${parsed.host}${parsed.pathname}`);
+  } catch (_) {
+    return null;
+  }
+  if (path.resolve(filePath) !== path.resolve(ERROR_PAGE)) return null;
+  const params = parsed.searchParams;
+  if (params.get('kind') !== 'safe-browsing') return null;
+  const blocked = sanitizeBrowserUrl(params.get('url') || '');
+  const token = params.get('token') || '';
+  if (!blocked || !/^[A-Za-z0-9-]+$/.test(token)) return null;
+  const threat = SAFE_BROWSING_THREATS.includes(params.get('threat')) ? params.get('threat') : 'malware';
+  let host = '';
+  try {
+    host = new URL(blocked).host;
+  } catch (_) {
+    host = '';
+  }
+  return { kind: 'safe-browsing', url: blocked, threat, token, title: host };
+}
+
 module.exports = {
+  safeBrowsingPageFromUrl,
   ERROR_PAGE,
   isCertificateError,
   classifyLoadFailure,
@@ -104,4 +194,7 @@ module.exports = {
   isLocalHost,
   securityStateOf,
   errorPageQuery,
+  cleanSafeBrowsingTexts,
+  safeBrowsingGesture,
+  SAFE_BROWSING_THREATS,
 };

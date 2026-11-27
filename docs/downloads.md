@@ -32,13 +32,18 @@ Exposé aux fenêtres du portail (principale et détachées), cadre principal, o
 | `list({ query?, limit?, offset? })` | `{ ok, items, total, directory }`, plus récents d'abord |
 | `pause(id)` / `resume(id)` / `cancel(id)` | téléchargement en cours |
 | `retry(id)` | relance une adresse http(s) dans la même session ; `not-retryable` pour un export `blob:` / `data:` |
+| `keepDangerous(id)` | « Conserver quand même » d'un fichier signalé dangereux (docs/safe-browsing.md) : téléchargé de nouveau sans vérification |
 | `open(id)` | ouvre le fichier terminé ; `missing` s'il n'est plus sur le disque |
 | `show(id)` | l'affiche dans le Finder / l'Explorateur (le dossier s'il a disparu) |
 | `remove(id)` / `clear()` | retire de la liste (jamais un téléchargement en cours) ; les fichiers restent |
 | `openDirectory()` / `openSettings()` | dossier des téléchargements / Réglages > Téléchargements |
 | `onChanged(cb)` | `{ type: 'upsert', item }`, `{ type: 'remove', ids }`, `{ type: 'clear', ids }` |
 
-Un élément : `id, url, filename, savePath, mimeType, totalBytes, receivedBytes, state ('progressing' | 'completed' | 'cancelled' | 'interrupted'), paused, canResume, bytesPerSecond, startTime, endTime, source ('web' | 'portal'), error ('network' | 'failed' | 'shutdown' | null), exists` (fichier présent, pour un téléchargement terminé).
+Un élément : `id, url, filename, savePath, mimeType, totalBytes, receivedBytes, state ('progressing' | 'completed' | 'cancelled' | 'interrupted'), paused, canResume, bytesPerSecond, startTime, endTime, source ('web' | 'portal'), error ('network' | 'failed' | 'shutdown' | 'dangerous' | null), danger ('malware' | 'phishing' | 'unwanted' | null), exists` (fichier présent, pour un téléchargement terminé).
+
+## Fichiers dangereux
+
+Un fichier dont l'adresse ou la page d'origine est signalée par la protection contre les sites dangereux n'est jamais écrit : annulé, gardé dans la liste avec `error: 'dangerous'` (voir docs/safe-browsing.md).
 
 ## Raccourci
 

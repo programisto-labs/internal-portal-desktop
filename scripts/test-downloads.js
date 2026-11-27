@@ -89,6 +89,9 @@ function setup(overrides = {}) {
     getSession: () => ({ downloadURL: (u) => downloadedUrls.push(u) }),
     setProgress: (f) => progress.push(f),
     onStarted: overrides.onStarted,
+    assessDanger: overrides.assessDanger,
+    moveFile: overrides.moveFile || (() => true),
+    removeFile: overrides.removeFile || (() => {}),
     randomId: () => `d${++n}`,
   });
   return { service, existing, events, opened, shown, progress, downloadedUrls };
@@ -238,5 +241,78 @@ describe('download start in a page', () => {
     service.attach(session, 'web');
     session.emit('will-download', {}, new FakeItem(), { id: 1 });
     assert.equal(service.list().items.length, 1);
+  });
+});
+
+describe('downloads: dangerous files (Safe Browsing)', () => {
+  it('cancels a file of a flagged site and lists it as dangerous', () => {
+    const { service, events } = setup({ assessDanger: () => ({ verdict: 'dangerous', threat: 'malware' }) });
+    const item = new FakeItem({ url: 'https://bad.example/virus.exe', filename: 'virus.exe' });
+    service.handleDownload(item, 'web');
+    assert.equal(item.cancelled, true);
+    const last = events.filter((e) => e.type === 'upsert').pop().item;
+    assert.equal(last.error, 'dangerous');
+    assert.equal(last.danger, 'malware');
+    assert.equal(last.state, 'cancelled');
+  });
+
+  it('writes under a temporary name while a prefix is verified, then renames a safe file', async () => {
+    let resolveCheck;
+    const moved = [];
+    const { service, events } = setup({
+      assessDanger: () => ({ verdict: 'check', check: () => new Promise((r) => { resolveCheck = r; }) }),
+      moveFile: (from, to) => moved.push([from, to]) > 0,
+    });
+    const item = new FakeItem();
+    service.handleDownload(item, 'web');
+    assert.equal(item.savePath, '/Users/me/Downloads/rapport.csv.lasco-verification');
+    item.finish();
+    await new Promise((r) => setImmediate(r));
+    resolveCheck({ verdict: 'safe' });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(moved, [['/Users/me/Downloads/rapport.csv.lasco-verification', '/Users/me/Downloads/rapport.csv']]);
+    const last = events.filter((e) => e.type === 'upsert').pop().item;
+    assert.equal(last.state, 'completed');
+    assert.equal(last.savePath, '/Users/me/Downloads/rapport.csv');
+  });
+
+  it('deletes a small file finished before the verdict when it is dangerous', async () => {
+    let resolveCheck;
+    const removed = [];
+    const { service, events } = setup({
+      assessDanger: () => ({ verdict: 'check', check: () => new Promise((r) => { resolveCheck = r; }) }),
+      removeFile: (p) => removed.push(p),
+    });
+    const item = new FakeItem({ url: 'https://bad.example/a.exe', filename: 'a.exe' });
+    service.handleDownload(item, 'web');
+    item.finish();
+    await new Promise((r) => setImmediate(r));
+    resolveCheck({ verdict: 'dangerous', threat: 'malware' });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(removed, ['/Users/me/Downloads/a.exe.lasco-verification']);
+    const last = events.filter((e) => e.type === 'upsert').pop().item;
+    assert.equal(last.state, 'cancelled');
+    assert.equal(last.error, 'dangerous');
+    assert.equal(last.savePath, '/Users/me/Downloads/a.exe');
+  });
+
+  it('« Conserver quand même » downloads it again without the check', () => {
+    const assessed = [];
+    const { service, downloadedUrls } = setup({
+      assessDanger: ({ urls }) => {
+        assessed.push(urls[0]);
+        return { verdict: 'dangerous', threat: 'phishing' };
+      },
+    });
+    service.handleDownload(new FakeItem({ url: 'https://bad.example/f.zip', filename: 'f.zip' }), 'web');
+    assert.deepEqual(service.keepDangerous({ id: 'd1' }), { ok: true });
+    assert.deepEqual(downloadedUrls, ['https://bad.example/f.zip']);
+    const again = new FakeItem({ url: 'https://bad.example/f.zip', filename: 'f.zip' });
+    service.handleDownload(again, 'web');
+    assert.equal(again.cancelled, false);
+    assert.equal(assessed.length, 1);
+    assert.deepEqual(service.keepDangerous({ id: 'd2' }), { ok: false });
   });
 });
