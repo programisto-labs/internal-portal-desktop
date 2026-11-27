@@ -31,6 +31,10 @@ Appels acceptés seulement depuis le cadre principal d'une fenêtre du portail, 
 | `closeWindow()` | Fenêtre détachée sans onglet : Desktop la ferme. |
 | `openWindow({ href })` | ⌘N / Ctrl+N (Fichier > Nouvelle fenêtre) : Desktop ouvre une fenêtre `detached` sur `href` (chemin du nouvel onglet), décalée de 28 px de la fenêtre d'origine, même taille. Prend la réserve si elle est chargée sur `href`, sinon une fenêtre neuve ; une nouvelle réserve est préparée 3 s plus tard. Refusé depuis la réserve. |
 | `prewarm({ href })` | Intention de détacher (menu de l'onglet ouvert, onglet saisi avec au moins deux onglets) : Desktop précharge la fenêtre de réserve sur `href` (chemin du nouvel onglet). Refusé depuis la réserve elle-même. |
+| `publishTabs({ tabs })` | Recherche dans les onglets (⌘⇧A) : la fenêtre publie ses onglets (`id`, `kind`, `title`, `href`, `favicon`, `active`), relus par `sanitizeTabSummary` (200 au plus, icône http(s) ou chemin du portail). Republié à chaque changement. Refusé depuis la réserve. |
+| `listTabs()` | `{ windows: [{ windowId, role, tabs }] }` : onglets publiés par les **autres** fenêtres du portail (réserve exclue), fenêtre au premier plan d'abord. |
+| `activateTab({ windowId, tabId, action })` | `select` : Desktop affiche et active la fenêtre `windowId` ; `close` : l'onglet disparaît de sa liste publiée. Dans les deux cas, la fenêtre visée reçoit `onTabAction` et sélectionne ou ferme l'onglet. Refusé (`no-window`, `no-tab`) pour la fenêtre appelante ou un onglet qu'elle n'a pas publié. |
+| `onTabAction(cb)` | `{ tabId, action: 'select' \| 'close' }` demandé depuis la bulle d'une autre fenêtre. |
 
 Descripteur `tab` (`sanitizeTabDescriptor`, `src/tab-windows.js`) : `id`, `kind` (`internal` | `external`), `href` (chemin du portail, ou URL http(s) d'un onglet web), `locationHref` (chemin chargé par la fenêtre : `href` pour une page du portail, `…/new-tab` pour un onglet web), `title`, `favicon` (http(s)), `blank`.
 

@@ -37,3 +37,12 @@ test('relays favourite, history and the shortcut list, leaves the rest', () => {
   assert.equal(mac({ key: 'w', meta: true }), null);
   assert.equal(mac({ key: 'd' }), null);
 });
+
+test('relays the tab search (⌘⇧A / Ctrl+Shift+A), not ⌘A (select all)', () => {
+  assert.equal(mac({ key: 'a', code: 'KeyA', meta: true, shift: true }), 'search-tabs');
+  assert.equal(mac({ key: 'A', code: 'KeyA', meta: true, shift: true }), 'search-tabs');
+  assert.equal(win({ key: 'A', code: 'KeyA', control: true, shift: true }), 'search-tabs');
+  assert.equal(mac({ key: 'a', meta: true }), null);
+  assert.equal(mac({ key: 'a', meta: true, shift: true, alt: true }), null);
+  assert.equal(win({ key: 'a', meta: true, shift: true }), null);
+});

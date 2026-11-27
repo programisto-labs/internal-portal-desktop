@@ -9,6 +9,7 @@ La page du portail gère ses raccourcis (`lib/portal-tabs/shortcuts.ts` du porta
 | ⌃Tab, ⌃⇧Tab, ⌘⌥→ / ⌘⌥←, ⌘⇧] / ⌘⇧[ | Onglet suivant / précédent | Relayé |
 | ⌘⌥1–9 / Ctrl+Maj+1–9 | Agent N de la colonne Lasco AI | Relayé |
 | ⌘D, ⌘Y, ⌘/ | Favori, historique, liste des raccourcis | Relayé |
+| ⌘⇧A / Ctrl+Maj+A | Rechercher dans les onglets (bulle de la coquille, aussi les onglets des autres fenêtres, voir `docs/tab-windows.md`) | Relayé (`search-tabs`) |
 | ⌘⇧R | Recharger sans le cache | Vue native |
 | ⌘⇧J / Ctrl+J | Téléchargements | Relayé (`downloads`) |
 | ⌘⇧S / Ctrl+Shift+S | Capturer la page entière (docs/page-capture.md) | Relayé (`capture-full-page`) |

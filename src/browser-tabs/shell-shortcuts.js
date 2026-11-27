@@ -7,7 +7,8 @@
  * - ⌘1–8 / ⌘9 : onglet N / dernier onglet ;
  * - ⌃Tab, ⌃⇧Tab, ⌘⌥→ / ⌘⌥←, ⌘⇧] / ⌘⇧[ : onglet suivant / précédent ;
  * - ⌘⌥1–9 (macOS) / Ctrl+Maj+1–9 : agent N de la colonne ;
- * - ⌘D favori, ⌘Y historique, ⌘/ liste des raccourcis.
+ * - ⌘D favori, ⌘Y historique, ⌘/ liste des raccourcis ;
+ * - ⌘⇧A / Ctrl+Maj+A : rechercher dans les onglets (comme Chrome).
  * La touche physique (`input.code`) compte : sur un clavier AZERTY, ⌘1 donne `key` = « & ».
  */
 
@@ -49,6 +50,7 @@ function resolveRelayedShellShortcut(input, isMac) {
   if (alt) return null;
   if (key === '/') return 'show-shortcuts';
   if (shift) {
+    if (key === 'a') return 'search-tabs';
     if (input.code === 'BracketRight' || key === '}') return 'next-tab';
     if (input.code === 'BracketLeft' || key === '{') return 'previous-tab';
     return null;
