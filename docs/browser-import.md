@@ -46,8 +46,8 @@ permission to a new process only).
   `saltysalt`, 1003 iterations, 16 bytes).
 - The Keychain secret is the item « Chrome Safe Storage » (« Brave Safe Storage », « Arc Safe Storage »,
   « Microsoft Edge Safe Storage »…), read with `/usr/bin/security find-generic-password -w`. macOS asks
-  the person to allow it (enter the session password, then « Autoriser »): this is expected. Refused or
-  closed: `keychain-denied`; the portal proposes the CSV instead.
+  the person to allow it (enter the session password, then « Autoriser »): this is expected. Refused:
+  `keychain-denied`; no answer within 2 minutes: `keychain-timeout`. The portal proposes the CSV instead.
 - A value that does not decrypt to valid UTF-8 (other format, wrong key) is counted in `unreadable`, never
   imported. Never-save entries (`blacklisted_by_user`) and non-web origins (`android://`) are skipped.
 - Windows (DPAPI, app-bound encryption) and Linux (libsecret) are not decrypted: CSV only.
@@ -56,7 +56,7 @@ permission to a new process only).
 
 Portal windows only (not in VM mode). Every channel checks the sender is a portal window.
 
-- `list()` → `{ ok, platform, browsers: [{ id, name, passwords: 'native' | 'csv', needsFullDiskAccess?,
+- `list()` → `{ ok, platform, browsers: [{ id, name, passwords: 'native' | 'csv', keychainItem?, needsFullDiskAccess?,
   profiles: [{ id, name, email?, data: { bookmarks, history, passwords } }] }] }`.
 - `run({ importId, browserId, profileId, kinds: { bookmarks, history, passwords } })` →
   `{ ok, browser, profile, history?, bookmarks?, passwords?, errors: { <kind>: code } }`. One import at a
@@ -75,7 +75,7 @@ Portal windows only (not in VM mode). Every channel checks the sender is a porta
 - `openFullDiskAccessSettings()` (macOS).
 - `onProgress(cb)` → `{ importId, step: 'history' | 'bookmarks' | 'passwords', status: 'running' | 'done' | 'failed', count?, error? }`.
 
-Error codes: `not-found`, `full-disk-access`, `read-failed`, `keychain-denied`, `keychain-not-found`,
+Error codes: `not-found`, `full-disk-access`, `read-failed`, `keychain-denied`, `keychain-timeout`, `keychain-not-found`,
 `passwords-csv-only`, `unknown-browser`, `busy`, `forbidden`.
 
 ## Rules

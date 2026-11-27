@@ -29,9 +29,9 @@ function readKeychainSecret({ service, account }, { execFileImpl = execFile } = 
       });
     });
   const keychainError = (error) => {
-    // 44: item not found; 51 / 128: the person refused (« Refuser ») or closed the dialog.
-    const code = error && error.code;
-    return new readers.ImportReadError(code === 44 ? 'keychain-not-found' : 'keychain-denied');
+    // 44: item not found; killed: nobody answered the dialog in time; else the person refused it.
+    if (error && (error.killed || error.signal)) return new readers.ImportReadError('keychain-timeout');
+    return new readers.ImportReadError(error && error.code === 44 ? 'keychain-not-found' : 'keychain-denied');
   };
   return run(['find-generic-password', '-w', '-s', service, '-a', account]).catch((error) => {
     if (error && error.code === 44) {

@@ -370,3 +370,34 @@ describe('history store: importEntries', () => {
     assert.equal(items[1].lastVisit, now);
   });
 });
+
+describe('browser import: Keychain', () => {
+  const { readKeychainSecret } = require('../src/browser-import/index');
+  const fakeExec = (outcomes) => (file, args, opts, cb) => {
+    const next = outcomes.shift();
+    if (next instanceof Error) cb(next, '', '');
+    else cb(null, `${next}\n`, '');
+  };
+  const fail = (props) => Object.assign(new Error('security'), props);
+
+  it('reads the secret, retrying without the account when the item is not found', async () => {
+    const calls = [];
+    const exec = (file, args, opts, cb) => {
+      calls.push(args.join(' '));
+      fakeExec(calls.length === 1 ? [fail({ code: 44 })] : ['secret'])(file, args, opts, cb);
+    };
+    assert.equal(await readKeychainSecret({ service: 'Arc Safe Storage', account: 'Arc' }, { execFileImpl: exec }), 'secret');
+    assert.deepEqual(calls, [
+      'find-generic-password -w -s Arc Safe Storage -a Arc',
+      'find-generic-password -w -s Arc Safe Storage',
+    ]);
+  });
+
+  it('tells a refusal from a dialog left unanswered', async () => {
+    const item = { service: 'Chrome Safe Storage', account: 'Chrome' };
+    await assert.rejects(readKeychainSecret(item, { execFileImpl: fakeExec([fail({ code: 51 })]) }), { code: 'keychain-denied' });
+    await assert.rejects(readKeychainSecret(item, { execFileImpl: fakeExec([fail({ killed: true, signal: 'SIGTERM' })]) }), {
+      code: 'keychain-timeout',
+    });
+  });
+});

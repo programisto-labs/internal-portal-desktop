@@ -205,6 +205,7 @@ function detectBrowsers({ fsImpl = fs, home, platform = process.platform, env = 
         profiles,
         // Passwords are decrypted with the macOS Keychain key; elsewhere, a CSV export is proposed.
         passwords: platform === 'darwin' ? 'native' : 'csv',
+        keychainItem: platform === 'darwin' ? def.keychain.service : undefined,
       });
       break;
     }
@@ -259,6 +260,7 @@ function publicBrowser(browser) {
     id: browser.id,
     name: browser.name,
     passwords: browser.passwords,
+    keychainItem: browser.keychainItem,
     needsFullDiskAccess: browser.needsFullDiskAccess === true || undefined,
     profiles: browser.profiles.map((p) => ({ id: p.id, name: p.name, email: p.email, data: { ...p.data } })),
   };
