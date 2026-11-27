@@ -301,6 +301,12 @@ function installClientHintHeaders(browserSession, policy = createClientHintPolic
   return policy;
 }
 
+/** `Emulation.setUserAgentOverride` de l'identité Chrome de bureau (aussi rendue après le mode responsive). */
+function chromeUserAgentOverride(userAgent) {
+  const info = platformInfo();
+  return { userAgent, platform: info.navigatorPlatform, userAgentMetadata: buildUserAgentMetadata() };
+}
+
 /**
  * Attaches the Chrome identity to a tab. Must run once the tab has a live
  * renderer (attaching before the first navigation closes the CDP target), so
@@ -311,12 +317,7 @@ async function applyChromeIdentity(webContents, userAgent) {
   try {
     const dbg = webContents.debugger;
     if (!dbg.isAttached()) dbg.attach('1.3');
-    const info = platformInfo();
-    await dbg.sendCommand('Emulation.setUserAgentOverride', {
-      userAgent,
-      platform: info.navigatorPlatform,
-      userAgentMetadata: buildUserAgentMetadata(),
-    });
+    await dbg.sendCommand('Emulation.setUserAgentOverride', chromeUserAgentOverride(userAgent));
     await dbg.sendCommand('Page.enable');
     await dbg.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: CHROME_OBJECT_SCRIPT });
     await dbg.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: PASSKEY_FALLBACK_SCRIPT });
@@ -338,6 +339,7 @@ module.exports = {
   formatBrandsHeader,
   installClientHintHeaders,
   applyChromeIdentity,
+  chromeUserAgentOverride,
   CHROME_OBJECT_SCRIPT,
   PASSKEY_FALLBACK_SCRIPT,
 };

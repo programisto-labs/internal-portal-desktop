@@ -4,6 +4,7 @@ const {
   app,
   BrowserWindow,
   WebContentsView,
+  nativeImage,
   session,
   clipboard,
   ClipboardItem,
@@ -34,12 +35,19 @@ const {
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
 const { createAdblockService } = require('./adblock');
-const { applyChromeIdentity, installClientHintHeaders } = require('./chrome-identity');
+const { applyChromeIdentity, chromeUserAgentOverride, installClientHintHeaders } = require('./chrome-identity');
+const {
+  installDevtoolsResponsive,
+  registerResponsiveRoute,
+  unregisterResponsiveRoute,
+  createTabResponsive,
+} = require('./devtools-responsive');
 const { createPasswordController } = require('./passwords');
 const { createPasswordPopover } = require('./password-popover');
 const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-autofill');
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
+const { capturePageImage } = require('./page-capture');
 const {
   BUILTIN_ENGINES,
   MAX_DESCRIPTION_BYTES,
@@ -49,6 +57,12 @@ const {
 } = require('./search-engines');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const {
+  assertInMemoryPartition,
+  createPrivateSitePermissions,
+  PRIVATE_DENIED_TAB_METHODS,
+  wipePrivateSession,
+} = require('../private-window/rules');
 
 const PASSWORD_PRELOAD = path.join(__dirname, 'password-preload.js');
 const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.js');
@@ -275,15 +289,16 @@ function sharedAdblock() {
 /** webContents id d'un onglet web → fenêtre qui l'affiche (pour poser la question dans la bonne fenêtre). */
 const tabWindowGetters = new Map();
 
-async function askSitePermission({ origin, label, webContents }) {
+async function askSitePermission({ origin, label, webContents }, { privateMode = false } = {}) {
   const getWindow = webContents ? tabWindowGetters.get(webContents.id) : null;
   const candidate = (getWindow && getWindow()) || BrowserWindow.getFocusedWindow();
   const win = candidate && !candidate.isDestroyed() ? candidate : null;
   const options = {
     type: 'question',
     message: `${siteHost(origin)} souhaite ${label}`,
-    detail:
-      "Votre choix est retenu pour ce site. Vous pourrez le modifier depuis l'icône à gauche de l'adresse.",
+    detail: privateMode
+      ? "Fenêtre de navigation privée : votre choix vaut jusqu'à sa fermeture, il n'est pas retenu."
+      : "Votre choix est retenu pour ce site. Vous pourrez le modifier depuis l'icône à gauche de l'adresse.",
     buttons: ['Autoriser', 'Bloquer', 'Ignorer'],
     defaultId: 2,
     cancelId: 2,
@@ -302,11 +317,34 @@ function isBlankDownloadTab({ url, canGoBack }) {
   return !url || url === 'about:blank';
 }
 
-function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines }) {
-  const historyStore =
-    history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
+/**
+ * `partition` / `privateMode` : fenêtre de navigation privée (docs/private-browsing.md). Session en mémoire
+ * propre à la fenêtre, historique, autorisations et applications externes en mémoire, ni mots de passe,
+ * ni saisie automatique, ni pilotage par un agent. `onPortalUrl(url)` : une adresse de Lasco ouverte dans un
+ * onglet privé part dans la fenêtre principale (`isPortalUrl` la reconnaît), jamais dans l'onglet.
+ */
+function createBrowserTabManager({
+  getMainWindow,
+  history,
+  interceptLink,
+  searchEngines,
+  partition = BROWSER_PARTITION,
+  privateMode = false,
+  isPortalUrl = null,
+  onPortalUrl = null,
+}) {
+  const browserPartition = privateMode ? assertInMemoryPartition(partition) : partition;
+  const historyStore = privateMode
+    ? createHistoryStore({})
+    : history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
+  /** Onglet privé : une page de Lasco s'ouvre dans la fenêtre principale. Vrai si l'adresse a été déviée. */
+  const divertPortalUrl = (url) => {
+    if (!privateMode || typeof isPortalUrl !== 'function' || !isPortalUrl(url)) return false;
+    if (typeof onPortalUrl === 'function') onPortalUrl(url);
+    return true;
+  };
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
-  const externalAppPermissions = sharedExternalAppPermissions();
+  const externalAppPermissions = privateMode ? createExternalAppPermissionStore({}) : sharedExternalAppPermissions();
   const externalApps = createExternalAppLauncher({
     shell,
     showMessageBox: (...args) => dialog.showMessageBox(...args),
@@ -314,7 +352,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     getParentWindow: () => getMainWindow(),
     permissions: externalAppPermissions,
   });
-  const sitePermissions = sharedSitePermissions();
+  const sitePermissions = privateMode
+    ? createPrivateSitePermissions({ memory: createSitePermissionStore({}), base: sharedSitePermissions() })
+    : sharedSitePermissions();
   const adblock = sharedAdblock();
   // Interrupteur ou exception changés (Réglages, informations du site) : l'état des onglets suit.
   const stopAdblockListener = adblock.settings.onChange(() => {
@@ -486,7 +526,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function getBrowserSession() {
-    const browserSession = session.fromPartition(BROWSER_PARTITION);
+    const browserSession = session.fromPartition(browserPartition);
     if (!sessionConfigured) {
       sessionConfigured = true;
       browserSession.setUserAgent(userAgent, buildAcceptLanguages(app.getPreferredSystemLanguages()));
@@ -495,11 +535,13 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       // Autorisations des sites : demandées puis retenues par site, jamais le micro ni la caméra.
       installSitePermissions(browserSession, {
         store: sitePermissions,
-        ask: askSitePermission,
+        ask: (request) => askSitePermission(request, { privateMode }),
         ensureSystemMediaAccess: (media) => ensureSystemMediaAccess(systemPreferences, media),
       });
       // Bloqueur de pubs et de traqueurs : cette session seulement, jamais persist:portal.
       adblock.install(browserSession);
+      // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
+      void installDevtoolsResponsive(browserSession);
     }
     return browserSession;
   }
@@ -584,12 +626,17 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       view.setVisible(false);
       return;
     }
-    view.setBounds({
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.round(width),
-      height: Math.round(height),
-    });
+    // Mode responsive : la vue prend la taille de l'appareil, centrée sur son fond.
+    if (fullscreenEntry && fullscreenEntry.responsive && fullscreenEntry.responsive.active()) {
+      fullscreenEntry.responsive.layout(lastBounds);
+    } else {
+      view.setBounds({
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(width),
+        height: Math.round(height),
+      });
+    }
     let abortedBlank = false;
     for (const entry of tabs.values()) {
       if (entry.view === view) {
@@ -606,6 +653,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   function detachView(view) {
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
+    const responsive = entryOfView(view)?.responsive;
+    if (responsive) responsive.detachFrom(win);
     try {
       win.contentView.removeChildView(view);
     } catch (_) {
@@ -617,6 +666,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const win = getMainWindow();
     if (!win || win.isDestroyed()) return;
     try {
+      // Mode responsive : le fond gris passe juste sous la vue.
+      const responsive = entryOfView(view)?.responsive;
+      if (responsive) responsive.attachTo(win);
       // Re-adding moves the view to the top of the stacking order.
       win.contentView.addChildView(view);
     } catch (_) {
@@ -640,6 +692,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (entry.hangDialog) entry.hangDialog.abort();
     const { view } = entry;
     detachView(view);
+    if (entry.responsive) entry.responsive.dispose();
+    if (!view.webContents.isDestroyed()) unregisterResponsiveRoute(view.webContents.id);
     const wc = view.webContents;
     if (!wc.isDestroyed()) {
       try {
@@ -843,12 +897,19 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       const entry = tabs.get(tabId);
       if (entry && entry.view === view) entry.adblockBlocked = 0;
     });
+    registerResponsiveRoute(webContentsId, (message) => handleResponsiveMessage(tabId, message));
+    wc.once('destroyed', () => unregisterResponsiveRoute(webContentsId));
+    // Comme le mode appareil de Chrome : fermer les DevTools rend la page à tout l'onglet.
+    wc.on('devtools-closed', () => {
+      void setResponsive(tabId, null);
+    });
 
     const launchExternalApp = (url) =>
       externalApps.launch({ url, pageUrl: wc.getURL(), key: `tab:${tabId}` });
 
     wc.setWindowOpenHandler(({ url, disposition }) => {
       if (launchExternalApp(url)) return { action: 'deny' };
+      if (divertPortalUrl(url)) return { action: 'deny' };
       const safe = sanitizeBrowserUrl(url);
       if (safe && typeof interceptLink === 'function' && interceptLink(safe)) {
         return { action: 'deny' };
@@ -881,6 +942,10 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     });
 
     wc.on('will-navigate', (event, url) => {
+      if (divertPortalUrl(url)) {
+        event.preventDefault();
+        return;
+      }
       const safe = sanitizeBrowserUrl(url);
       if (!safe) {
         event.preventDefault();
@@ -889,6 +954,10 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     });
 
     wc.on('will-redirect', (event, url) => {
+      if (divertPortalUrl(url)) {
+        event.preventDefault();
+        return;
+      }
       const safe = sanitizeBrowserUrl(url);
       if (!safe) {
         event.preventDefault();
@@ -1041,6 +1110,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         t: () => forwardToPortalField('new-tab'),
         // Téléchargements : ⌘⇧J (macOS), Ctrl+J (Windows / Linux), comme Chrome.
         j: () => forward('downloads'),
+        // ⌘⇧S / Ctrl+Shift+S : capture de la page entière (docs/page-capture.md).
+        s: () => captureReady && forward('capture-full-page'),
         p: () => print({ tabId }),
         r: () => reload({ tabId }),
         '=': () => zoom({ tabId, direction: 'in' }),
@@ -1051,7 +1122,9 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         ']': () => goForward({ tabId }),
       };
       const handler = handlers[key];
-      if (!handler || (input.shift && !['g', 'j', '=', '+'].includes(key))) return;
+      if (!handler || (input.shift && !['g', 'j', 's', '=', '+'].includes(key))) return;
+      // ⌘S seul reste à la page (enregistrer dans un éditeur web).
+      if (key === 's' && (!input.shift || !captureReady)) return;
       event.preventDefault();
       handler();
     });
@@ -1072,6 +1145,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
           });
         }
       };
+
+      const forwardCapture = (action) => emitToRenderer(SHORTCUT_CHANNEL, { tabId, action });
 
       // Téléchargement géré par Lasco (docs/downloads.md) : dossier choisi dans les Réglages.
       const download = (url) => {
@@ -1169,6 +1244,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
         { label: 'Actualiser', click: () => reload({ tabId }) },
         separator,
         { label: 'Imprimer…', click: () => print({ tabId }) },
+        // Capture d'écran (docs/page-capture.md) : le portail enregistre et affiche la notification.
+        ...(captureReady
+          ? [
+              { label: 'Capturer la page entière', click: () => forwardCapture('capture-full-page') },
+              { label: 'Capturer la partie visible', click: () => forwardCapture('capture-visible') },
+            ]
+          : []),
+        separator,
         {
           label: 'Inspecter',
           click: () => {
@@ -1195,8 +1278,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       sandbox: true,
       webSecurity: true,
       // Password manager runtime (main frame only, isolated world, exposes nothing to the
-      // page): untrusted web content never reaches Electron APIs.
-      preload: PASSWORD_PRELOAD,
+      // page): untrusted web content never reaches Electron APIs. Never in a private window.
+      ...(privateMode ? {} : { preload: PASSWORD_PRELOAD }),
       allowRunningInsecureContent: false,
       spellcheck: true,
     };
@@ -1293,6 +1376,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (typeof tabId !== 'string' || !tabId.trim()) {
       return { ok: false, error: 'invalid-tab-id' };
     }
+    if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
     const safe = sanitizeBrowserUrl(url);
     if (!safe) return { ok: false, error: 'invalid-url' };
 
@@ -1304,6 +1388,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
   }
 
   function navigate({ tabId, url }) {
+    if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
     const entry = tabs.get(tabId);
     const safe = sanitizeBrowserUrl(url);
     if (!safe) return { ok: false, error: 'invalid-url' };
@@ -1591,6 +1676,30 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     }
   }
 
+  /** Le portail sait enregistrer une capture : menu contextuel et ⌘⇧S la proposent. */
+  let captureReady = false;
+  function setCaptureReady() {
+    captureReady = true;
+    return { ok: true };
+  }
+
+  /**
+   * Capture d'écran en PNG (docs/page-capture.md) : `mode` 'full' (page entière, protocole
+   * DevTools) ou 'visible'. Renvoie l'image au main, qui l'enregistre et la copie.
+   */
+  async function captureImage({ tabId, mode }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    try {
+      const result = await capturePageImage(wc, { mode: mode === 'visible' ? 'visible' : 'full', nativeImage });
+      if (!result.ok) return result;
+      return { ...result, url: sanitizeBrowserUrl(wc.getURL()) || entry.url || '', title: wc.getTitle() || '' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'capture-failed' };
+    }
+  }
+
   async function openExternal({ tabId }) {
     const entry = liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
@@ -1598,6 +1707,47 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     if (!url) return { ok: false, error: 'invalid-url' };
     await shell.openExternal(url);
     return { ok: true };
+  }
+
+  /**
+   * Message du panneau « Responsive » des DevTools (docs/devtools-responsive.md) : seulement
+   * pour un onglet de cette fenêtre dont les DevTools sont ouverts.
+   */
+  async function handleResponsiveMessage(tabId, message) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    if (!wc.isDevToolsOpened()) return { ok: false, error: 'devtools-closed' };
+    if (message.op === 'set') await setResponsive(tabId, message.settings || {});
+    else if (message.op === 'off') await setResponsive(tabId, null);
+    else if (message.op !== 'get') return { ok: false, error: 'invalid' };
+    return responsiveOf(entry).state();
+  }
+
+  function responsiveOf(entry) {
+    if (!entry.responsive) {
+      const wc = entry.view.webContents;
+      entry.responsive = createTabResponsive({
+        view: entry.view,
+        getWindow: getMainWindow,
+        restoreIdentity: () =>
+          wc.isDestroyed()
+            ? Promise.resolve()
+            : wc.debugger.sendCommand('Emulation.setUserAgentOverride', chromeUserAgentOverride(userAgent)).catch(() => {}),
+      });
+    }
+    return entry.responsive;
+  }
+
+  async function setResponsive(tabId, settings) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return;
+    if (!settings && !entry.responsive) return;
+    const responsive = responsiveOf(entry);
+    if (settings) await responsive.set(settings);
+    else await responsive.off();
+    if (entry.view.webContents.isDestroyed()) return;
+    applyBounds(entry.view);
   }
 
   function openDevTools({ tabId }) {
@@ -1708,7 +1858,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
 
   /** Moteur déclaré par la page (OpenSearch), ajouté aux raccourcis de la barre d'adresse. */
   async function discoverSearchEngine(tabId, wc) {
-    if (!searchEngines || wc.isDestroyed()) return;
+    // Fenêtre privée : aucun site visité n'est retenu, même comme raccourci de recherche.
+    if (privateMode || !searchEngines || wc.isDestroyed()) return;
     const entry = tabs.get(tabId);
     const pageUrl = sanitizeBrowserUrl(wc.getURL());
     if (!pageUrl || (entry && entry.errorPage)) return;
@@ -1960,7 +2111,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     return true;
   }
 
-  return {
+  const api = {
     create,
     setAdoptPopups,
     navigate,
@@ -1980,6 +2131,8 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     print,
     capture,
     copyScreenshot,
+    captureImage,
+    setCaptureReady,
     openExternal,
     openDevTools,
     clearBrowsingData,
@@ -2017,6 +2170,19 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     },
     stateOf: (tabId) => buildState(tabId),
   };
+  if (privateMode) {
+    // Fenêtre privée : ni mots de passe, ni saisie automatique, ni agent, ni historique du navigateur normal.
+    for (const method of PRIVATE_DENIED_TAB_METHODS) {
+      if (typeof api[method] === 'function') api[method] = () => ({ ok: false, error: 'private-window' });
+    }
+  }
+  api.isPrivate = privateMode;
+  /** Fermeture d'une fenêtre privée : vues détruites, puis cookies, cache et stockage de sa session effacés. */
+  api.destroySession = async () => {
+    destroyAll();
+    if (privateMode) await wipePrivateSession(session.fromPartition(browserPartition));
+  };
+  return api;
 }
 
 module.exports = {

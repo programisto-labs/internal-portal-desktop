@@ -10,8 +10,11 @@
  */
 (function vmShell() {
   const desktop = window.lascoDesktop;
-  if (!desktop || !desktop.browserTabs || !desktop.vm) return;
+  // Deux usages de la même coquille : la VM (docs/vm-mode.md) et la fenêtre de navigation privée
+  // (docs/private-browsing.md, `private.html`, pont `privateWindow`). Jamais le portail dans l'un ou l'autre.
+  if (!desktop || !desktop.browserTabs || (!desktop.vm && !desktop.privateWindow)) return;
   const bt = desktop.browserTabs;
+  const isPrivate = !desktop.vm && Boolean(desktop.privateWindow);
 
   // --- Icons (lucide, same as the portal) ------------------------------------------------------------------------
   const ICONS = {
@@ -38,6 +41,10 @@
     monitor: '<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
     'chevron-up': '<path d="m18 15-6-6-6 6"/>',
     'chevron-down': '<path d="m6 9 6 6 6-6"/>',
+    // Masque de la navigation privée (lucide « venetian-mask »).
+    mask:
+      '<path d="M18 11c-1.5 0-2.5.5-3 2"/><path d="M4 6a2 2 0 0 0-2 2v4a5 5 0 0 0 5 5 8 8 0 0 1 5 2 8 8 0 0 1 5-2 5 5 0 0 0 5-5V8a2 2 0 0 0-2-2h-3a8 8 0 0 0-5 2 8 8 0 0 0-5-2z"/><path d="M6 11c1.5 0 2.5.5 3 2"/>',
+    'app-window': '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/>',
   };
 
   function icon(name) {
@@ -58,7 +65,10 @@
   /** @type {Map<string, HTMLElement>} */
   const tabNodes = new Map();
   let activeId = null;
-  let homeUrl = 'https://www.google.com/';
+  // Fenêtre privée : un nouvel onglet s'ouvre sur la page qui explique la navigation privée (pas de vue native).
+  let homeUrl = isPrivate ? '' : 'https://www.google.com/';
+  /** Moteur par défaut du navigateur (fenêtre privée) : `{ template: '…%s…' }`. */
+  let searchEngine = null;
   let seq = 0;
 
   const el = (id) => document.getElementById(id);
@@ -90,6 +100,10 @@
   }
 
   function searchUrl(text) {
+    if (searchEngine && typeof searchEngine.template === 'string' && searchEngine.template.includes('%s')) {
+      const url = searchEngine.template.split('%s').join(encodeURIComponent(text));
+      if (/^https:\/\//i.test(url)) return url;
+    }
     return `https://www.google.com/search?q=${encodeURIComponent(text)}`;
   }
 
@@ -127,6 +141,7 @@
         zoomFactor: 1,
         audible: false,
         muted: false,
+        blank: false,
       });
       const after = afterId ? order.indexOf(afterId) : -1;
       if (after >= 0) order.splice(after + 1, 0, tabId);
@@ -233,7 +248,7 @@
       node.title = label;
       const iconWrap = node.querySelector('.tab-icon');
       const favicon = safeImage(tab.favicon);
-      const iconKey = tab.loading ? 'loading' : favicon || 'globe';
+      const iconKey = tab.loading ? 'loading' : favicon || (tab.blank ? 'mask' : 'globe');
       if (iconWrap.dataset.key !== iconKey) {
         iconWrap.dataset.key = iconKey;
         iconWrap.textContent = '';
@@ -252,7 +267,7 @@
           });
           iconWrap.append(img);
         } else {
-          iconWrap.append(icon('globe'));
+          iconWrap.append(icon(iconKey === 'mask' ? 'mask' : 'globe'));
         }
       }
       node.querySelector('.tab-title span').textContent = label;
@@ -395,7 +410,7 @@
         addressIcon.append(icon('globe'));
       }
     }
-    if (!addressFocused) address.value = active ? displayDomain(active.url) : '';
+    if (!addressFocused) address.value = active && !active.blank ? displayDomain(active.url) : '';
 
     const zoom = active ? active.zoomFactor : 1;
     const zoomText = `${Math.round((zoom || 1) * 100)} %`;
@@ -406,9 +421,15 @@
     document.title = active ? `${tabLabel(active)} — Lasco` : 'Lasco';
   }
 
+  const intro = el('private-intro');
+
   function render() {
     renderTabs();
     renderToolbar();
+    if (intro) {
+      const active = activeId ? tabs.get(activeId) : null;
+      intro.hidden = !(active && active.blank);
+    }
   }
 
   // --- Tabs -----------------------------------------------------------------------------------------------------
@@ -418,11 +439,26 @@
     closeFloating();
     sendBounds();
     render();
-    await bt.select({ tabId });
+    // Onglet vierge (fenêtre privée) : aucune vue native, la page de la coquille s'affiche.
+    if (tabs.get(tabId).blank) await bt.hide();
+    else await bt.select({ tabId });
+  }
+
+  /** Nouvel onglet vierge d'une fenêtre privée : la page « Navigation privée », sans vue native. */
+  function openBlankTab({ background = false, afterId } = {}) {
+    const tabId = newTabId();
+    const tab = ensureTab(tabId, '', { afterId });
+    tab.blank = true;
+    tab.loading = false;
+    tab.title = 'Navigation privée';
+    if (!background || !activeId) void selectTab(tabId);
+    else render();
+    return Promise.resolve(tabId);
   }
 
   async function openTab(url, { background = false, afterId } = {}) {
     const safe = resolveInput(url) || homeUrl;
+    if (!safe) return openBlankTab({ background, afterId });
     const tabId = newTabId();
     ensureTab(tabId, safe, { afterId });
     const result = await bt.create({ tabId, url: safe });
@@ -446,6 +482,8 @@
       activeId = null;
       const next = order[Math.min(index, order.length - 1)];
       if (next) void selectTab(next);
+      // Fenêtre privée : fermer le dernier onglet ferme la fenêtre (et efface sa session), comme Chrome.
+      else if (isPrivate) window.close();
       else void openTab(homeUrl);
     }
     render();
@@ -471,6 +509,8 @@
   function runShortcut(action) {
     if (action === 'new-tab') {
       void openTab(homeUrl).then(() => focusAddress());
+    } else if (action === 'new-private-window') {
+      if (isPrivate) void desktop.privateWindow.openWindow();
     } else if (action === 'focus-address') focusAddress();
     else if (action === 'find') openFind();
     else if (action === 'find-next') findStep(true);
@@ -721,13 +761,31 @@
     address.blur();
     closeSuggestions();
     if (activeId) {
-      const tab = tabs.get(activeId);
+      const tabId = activeId;
+      const tab = tabs.get(tabId);
+      const wasBlank = Boolean(tab && tab.blank);
+      const previousUrl = tab ? tab.url : '';
       if (tab) {
         tab.url = url;
         tab.loading = true;
       }
       render();
-      void bt.navigate({ tabId: activeId, url });
+      void bt.navigate({ tabId, url }).then((result) => {
+        const current = tabs.get(tabId);
+        if (!current) return;
+        if (result && result.ok) {
+          // Onglet vierge : sa vue native vient d'être créée, elle prend la place de la page.
+          if (wasBlank) {
+            current.blank = false;
+            if (activeId === tabId) void selectTab(tabId);
+          }
+          return;
+        }
+        // Adresse refusée (une page de Lasco part dans la fenêtre principale) : l'onglet reste tel quel.
+        current.url = previousUrl;
+        current.loading = false;
+        render();
+      });
     } else void openTab(url);
   }
 
@@ -843,6 +901,7 @@
     }
     closeMenu();
     if (action === 'new-tab') runShortcut('new-tab');
+    else if (action === 'new-private-window') runShortcut('new-private-window');
     else if (action === 'find') openFind();
     else if (action === 'print' && activeId) void bt.print({ tabId: activeId });
     else if (action === 'copy-link' && activeId) {
@@ -894,17 +953,19 @@
   );
   bt.onClosed((payload) => payload && forgetTab(payload.tabId));
   bt.onShortcut((payload) => payload && runShortcut(payload.action));
-  desktop.vm.onTabOpened((payload) => {
-    if (!payload || typeof payload.tabId !== 'string') return;
-    ensureTab(payload.tabId, payload.url);
-    if (payload.active) activeId = payload.tabId;
-    render();
-  });
-  desktop.vm.onTabActivated((payload) => {
-    if (!payload || !tabs.has(payload.tabId)) return;
-    activeId = payload.tabId;
-    render();
-  });
+  if (desktop.vm) {
+    desktop.vm.onTabOpened((payload) => {
+      if (!payload || typeof payload.tabId !== 'string') return;
+      ensureTab(payload.tabId, payload.url);
+      if (payload.active) activeId = payload.tabId;
+      render();
+    });
+    desktop.vm.onTabActivated((payload) => {
+      if (!payload || !tabs.has(payload.tabId)) return;
+      activeId = payload.tabId;
+      render();
+    });
+  }
 
   // --- Chrome ---------------------------------------------------------------------------------------------------
   el('back').addEventListener('click', () => activeId && bt.goBack({ tabId: activeId }));
@@ -944,7 +1005,8 @@
     if (event.key === 'Escape' && (!menu.hidden || !sitePanel.hidden)) {
       closeMenu();
       closeSitePanel();
-    } else if (mod && key === 't') runShortcut('new-tab');
+    } else if (mod && event.shiftKey && key === 'n') runShortcut('new-private-window');
+    else if (mod && key === 't') runShortcut('new-tab');
     else if (mod && key === 'l') runShortcut('focus-address');
     else if (mod && key === 'w') runShortcut('close-tab');
     else if (mod && key === 'f') openFind();
@@ -971,10 +1033,34 @@
     if (next === 'page' && document.activeElement === address) address.blur();
     requestAnimationFrame(sendBounds);
   }
-  if (typeof desktop.vm.onViewMode === 'function') desktop.vm.onViewMode((payload) => payload && setViewMode(payload.mode));
+  if (desktop.vm && typeof desktop.vm.onViewMode === 'function') {
+    desktop.vm.onViewMode((payload) => payload && setViewMode(payload.mode));
+  }
 
   // --- Start ----------------------------------------------------------------------------------------------------
   render();
+  if (isPrivate) {
+    document.body.dataset.platform = desktop.platform || '';
+    // Raccourcis affichés dans la notation du système : ⌘⇧N sur macOS, Ctrl+Maj+N ailleurs.
+    const mac = desktop.platform === 'darwin';
+    for (const kbd of document.querySelectorAll('kbd[data-shortcut]')) {
+      const keys = kbd.getAttribute('data-shortcut').split('+');
+      const letter = keys.pop();
+      const shift = keys.includes('Shift');
+      kbd.textContent = mac ? `${shift ? '⇧' : ''}⌘${letter}` : `Ctrl+${shift ? 'Maj+' : ''}${letter}`;
+    }
+    const engines = bt.searchEngines && typeof bt.searchEngines.get === 'function' ? bt.searchEngines.get() : null;
+    void Promise.all([desktop.privateWindow.getInfo().catch(() => null), Promise.resolve(engines).catch(() => null)]).then(
+      ([info, snapshot]) => {
+        if (snapshot && snapshot.ok && snapshot.defaultEngine) searchEngine = snapshot.defaultEngine;
+        if (info && info.ok) el('version').textContent = `Lasco Desktop ${info.version}`;
+        sendBounds();
+        if (order.length === 0) void openBlankTab().then(() => focusAddress());
+        else if (!activeId) void selectTab(order[0]);
+      }
+    );
+    return;
+  }
   void desktop.vm.getInfo().then((info) => {
     if (info && info.ok) {
       if (typeof info.viewMode === 'string') setViewMode(info.viewMode);
