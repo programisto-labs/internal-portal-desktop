@@ -362,6 +362,10 @@ const desktopBridge = {
   ...(exposeVmShell && { vm: vmShellBridge }),
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposePortalBridges && { downloads: downloadsBridge }),
+  /** Navigation privée (docs/private-browsing.md) : menu ☰ du navigateur du portail. */
+  ...(exposePortalBridges && !vmMode && {
+    privateBrowsing: { openWindow: () => ipcRenderer.invoke('private-window-open') },
+  }),
   ...(exposeHostOps && { hostOps: hostOpsBridge, codeWorkspace: codeWorkspaceBridge, codeHarness: codeHarnessBridge }),
   setBadgeCount: (count) => ipcRenderer.invoke('lasco-set-badge-count', count),
   notify: (payload) => ipcRenderer.invoke('lasco-notify', payload),

@@ -37,6 +37,12 @@ const {
 } = require('./tab-windows');
 const { APP_MENU_COMMANDS, normalizeAppMenuState, buildApplicationMenuTemplate } = require('./app-menu');
 const {
+  PRIVATE_WINDOW_ARG,
+  PRIVATE_WINDOW_BACKGROUND,
+  newPrivatePartition,
+  isDeniedInPrivate,
+} = require('./private-window/rules');
+const {
   applyBadgeCount,
   showAgentNotification,
   closeDesktopNotification,
@@ -146,6 +152,7 @@ function installApplicationMenu() {
     },
     openSettings: () => openSettings('general'),
     send: sendAppMenuCommand,
+    openPrivateWindow: (browserWindow) => openPrivateWindow(browserWindow),
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -1096,8 +1103,10 @@ function portalWindowEntry(win) {
   return portalWindows.get(win.id) || null;
 }
 
-/** Native browser views of a portal window (null for any other window, e.g. Réglages). */
+/** Native browser views of a portal window or a private window (null for any other window, e.g. Réglages). */
 function tabManagerFor(win) {
+  const privateEntry = privateWindowEntry(win);
+  if (privateEntry) return privateEntry.tabManager;
   const entry = portalWindowEntry(win);
   if (!entry) return null;
   if (!entry.tabManager) {
@@ -1115,6 +1124,138 @@ function destroyAllBrowserViews() {
   for (const entry of portalWindows.values()) {
     if (entry.tabManager) entry.tabManager.destroyAll();
   }
+  for (const entry of privateWindows.values()) {
+    void entry.tabManager.destroySession();
+  }
+}
+
+/**
+ * Fenêtres de navigation privée (docs/private-browsing.md) : onglets web seulement, sur une session en
+ * mémoire propre à chaque fenêtre et effacée à sa fermeture. Jamais dans `portalWindows` : aucun pont du
+ * portail (agents, opérations sur l'ordinateur, Coffre, téléchargements listés, My Drive) ne les accepte.
+ * @type {Map<number, { win: BrowserWindow, partition: string, tabManager: ReturnType<typeof createBrowserTabManager> }>}
+ */
+const privateWindows = new Map();
+
+function privateWindowEntry(win) {
+  if (!win || win.isDestroyed()) return null;
+  return privateWindows.get(win.id) || null;
+}
+
+/** Une adresse de Lasco tapée ou ouverte dans une fenêtre privée : elle s'ouvre dans la fenêtre principale. */
+function openPortalUrlFromPrivateWindow(url) {
+  const target = extractPortalTarget(url, isPortalNavigationUrl);
+  const existing = mainPortalWindow();
+  const win = existing || showMainWindow();
+  if (!win || win.isDestroyed()) return;
+  if (existing) showMainWindow();
+  if (target) win.webContents.send('open-portal-tab', target);
+  else loadMainPortalUrl(win, url);
+}
+
+/** Téléchargements d'une fenêtre privée : enregistrés dans le dossier choisi, jamais listés ni retenus. */
+function attachPrivateDownloads(ses) {
+  createDownloadService({
+    store: createDownloadsStore({}),
+    getDirectory: downloadsDirectory,
+    shouldAsk: () => getSettings().downloadsAskWhere === true,
+    fileExists: (p) => {
+      try {
+        return fs.statSync(p).isFile();
+      } catch (_) {
+        return false;
+      }
+    },
+    ensureDir: (dir) => {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+    openPath: (p) => void shell.openPath(p),
+    showItemInFolder: (p) => shell.showItemInFolder(p),
+    openFolder: (p) => void shell.openPath(p),
+    emit: () => undefined,
+    getSession: () => ses,
+  }).attach(ses, 'web');
+}
+
+/**
+ * ⌘⇧N / Ctrl+Maj+N, menu ☰ du navigateur, Fichier > Nouvelle fenêtre de navigation privée.
+ * La page est la coquille de Desktop (`src/vm-shell/`, en mode privé) : jamais le portail, donc ni barre
+ * latérale, ni colonne Lasco AI, ni agents, ni session Lasco.
+ */
+function openPrivateWindow(sourceWindow) {
+  if (VM_MODE) return null;
+  const source = sourceWindow && !sourceWindow.isDestroyed() ? sourceWindow : BrowserWindow.getFocusedWindow();
+  const sourceBounds = source && !source.isDestroyed() ? source.getBounds() : null;
+  const at = sourceBounds ? { x: sourceBounds.x, y: sourceBounds.y } : screen.getCursorScreenPoint();
+  const bounds = buildNewWindowBounds({ sourceBounds, workArea: screen.getDisplayNearestPoint(at).workArea });
+  const partition = newPrivatePartition(() => require('crypto').randomUUID());
+  const isMac = process.platform === 'darwin';
+  let iconPath = null;
+  try {
+    iconPath = getIconPath();
+  } catch (_) {
+    iconPath = null;
+  }
+  const win = new BrowserWindow({
+    ...bounds,
+    minWidth: 640,
+    minHeight: 420,
+    title: 'Navigation privée — Lasco',
+    show: false,
+    backgroundColor: PRIVATE_WINDOW_BACKGROUND,
+    titleBarStyle: 'hidden',
+    ...(isMac
+      ? { trafficLightPosition: { x: 14, y: 14 } }
+      : { titleBarOverlay: { color: PRIVATE_WINDOW_BACKGROUND, symbolColor: '#e9e4f5', height: 40 } }),
+    webPreferences: {
+      preload: path.join(__dirname, 'private-window', 'private-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      // La page de la coquille elle-même ne garde rien non plus.
+      partition: `${partition}-shell`,
+      additionalArguments: [`${APP_VERSION_ARG_PREFIX}${app.getVersion()}`, PRIVATE_WINDOW_ARG],
+    },
+    ...(iconPath && { icon: iconPath }),
+  });
+  const winId = win.id;
+  const ses = session.fromPartition(partition);
+  attachPrivateDownloads(ses);
+  const tabManager = createBrowserTabManager({
+    getMainWindow: () => (win.isDestroyed() ? null : win),
+    partition,
+    privateMode: true,
+    searchEngines: getSearchEngineStore(),
+    isPortalUrl: isPortalNavigationUrl,
+    onPortalUrl: openPortalUrlFromPrivateWindow,
+  });
+  privateWindows.set(winId, { win, partition, tabManager });
+  // La coquille ne navigue jamais : les pages s'ouvrent dans ses onglets web.
+  win.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    const safe = sanitizeBrowserUrl(url);
+    if (safe && !win.isDestroyed()) win.webContents.send('browser-tab-open-request', buildBrowserOpenRequest(safe));
+  });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+  });
+  win.on('closed', () => {
+    const entry = privateWindows.get(winId);
+    privateWindows.delete(winId);
+    if (entry) void entry.tabManager.destroySession();
+    void session.fromPartition(`${partition}-shell`).clearStorageData().catch(() => undefined);
+  });
+  win.loadFile(path.join(__dirname, 'vm-shell', 'private.html'));
+  return win;
 }
 
 /** Portal windows, focused first (used to find the window under a dropped tab). */
@@ -2787,14 +2928,15 @@ function registerWindowIPC() {
 
   ipcMain.handle('browser-tab-show-context-menu', (event, payload) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    const entry = portalWindowEntry(win);
+    // Fenêtre privée : le menu de ses onglets, sans « Détacher » ni « Rattacher ».
+    const entry = portalWindowEntry(win) || (privateWindowEntry(win) && { role: 'private' });
     if (!entry) return { ok: false, error: 'forbidden' };
     const p = payload && typeof payload === 'object' ? payload : {};
     const template = buildTabMenuTemplate({
       tabId: p.tabId,
       actions: resolveWindowMenuActions({
         actions: p.actions,
-        windowActions: p.windowActions === true,
+        windowActions: p.windowActions === true && entry.role !== 'private',
         role: entry.role,
         tabCount: p.tabCount,
       }),
@@ -2853,13 +2995,16 @@ function registerWindowIPC() {
     ipcMain.handle(channel, (event, payload) => {
       const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
       if (!manager) return { ok: false, error: 'forbidden' };
+      // Fenêtre privée : ni mots de passe, ni saisie automatique, ni agent (docs/private-browsing.md).
+      if (manager.isPrivate && isDeniedInPrivate(method)) return { ok: false, error: 'private-window' };
       return manager[method](payload || {});
     });
   }
 
   // Barre d'adresse du portail : moteur par défaut et raccourcis des sites (docs/search-engines.md).
   ipcMain.handle('browser-search-engines-get', (event) => {
-    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!portalWindowEntry(win) && !privateWindowEntry(win)) return { ok: false, error: 'forbidden' };
     return { ok: true, ...getSearchEngineStore().snapshot() };
   });
   ipcMain.handle('browser-search-engines-mark-used', (event, payload) => {
@@ -2876,6 +3021,19 @@ function registerWindowIPC() {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
     openSettings('search');
     return { ok: true };
+  });
+
+  // Navigation privée (docs/private-browsing.md) : ouverte depuis le portail (menu ☰) ou une fenêtre privée.
+  ipcMain.handle('private-window-open', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    // Cadre principal d'une fenêtre du portail, à l'origine du portail (même règle que les téléchargements).
+    const fromPortal = downloadsSender(event);
+    if (!fromPortal && !privateWindowEntry(win)) return { ok: false, error: 'forbidden' };
+    return openPrivateWindow(win) ? { ok: true } : { ok: false, error: 'unavailable' };
+  });
+  ipcMain.handle('private-window-info', (event) => {
+    if (!privateWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return { ok: true, version: app.getVersion(), platform: process.platform };
   });
 
   // Identity check before the portal shows a saved password (docs/passwords.md). Portal windows only.

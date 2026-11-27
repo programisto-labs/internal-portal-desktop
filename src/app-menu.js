@@ -88,9 +88,9 @@ function buildWindowMenuItems({ isMac, state, send }) {
 
 /**
  * Full menu bar template. Callbacks are injected so the template stays testable:
- * `closeTab(win)`, `closeWindow(win)`, `openSettings()`, `send(command)`.
+ * `closeTab(win)`, `closeWindow(win)`, `openSettings()`, `send(command)`, `openPrivateWindow(win)`.
  */
-function buildApplicationMenuTemplate({ isMac, state, closeTab, closeWindow, openSettings, send }) {
+function buildApplicationMenuTemplate({ isMac, state, closeTab, closeWindow, openSettings, send, openPrivateWindow }) {
   return [
     ...(isMac
       ? [
@@ -123,6 +123,16 @@ function buildApplicationMenuTemplate({ isMac, state, closeTab, closeWindow, ope
           enabled: Boolean(state && state.canOpenWindow),
           click: () => send('new-window'),
         },
+        // Navigation privée (docs/private-browsing.md) : Desktop seul, sans attendre la page du portail.
+        ...(typeof openPrivateWindow === 'function'
+          ? [
+              {
+                label: 'Nouvelle fenêtre de navigation privée',
+                accelerator: 'CmdOrCtrl+Shift+N',
+                click: (_item, win) => openPrivateWindow(win),
+              },
+            ]
+          : []),
         { type: 'separator' },
         { label: "Fermer l'onglet", accelerator: 'CmdOrCtrl+W', click: (_item, win) => closeTab(win) },
         { label: 'Fermer la fenêtre', accelerator: 'CmdOrCtrl+Shift+W', click: (_item, win) => closeWindow(win) },

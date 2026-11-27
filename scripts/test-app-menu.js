@@ -80,4 +80,25 @@ describe('application menu « Fenêtre »', () => {
     assert.deepEqual(sent, ['new-window']);
     assert.ok(APP_MENU_COMMANDS.includes('new-window'));
   });
+
+  it('« Nouvelle fenêtre de navigation privée » (⌘⇧N) is opened by Desktop, without waiting for the page', () => {
+    const opened = [];
+    const fileMenu = buildApplicationMenuTemplate({
+      isMac: false,
+      state: null,
+      closeTab: noop,
+      closeWindow: noop,
+      openSettings: noop,
+      send: noop,
+      openPrivateWindow: (win) => opened.push(win),
+    }).find((m) => m.label === 'Fichier').submenu;
+    const item = byLabel(fileMenu, 'Nouvelle fenêtre de navigation privée');
+    assert.equal(item.accelerator, 'CmdOrCtrl+Shift+N');
+    assert.notEqual(item.enabled, false);
+    item.click(null, 'source-window');
+    assert.deepEqual(opened, ['source-window']);
+    // Sans le rappel (mode VM), pas d'entrée.
+    const vmMenu = buildApplicationMenuTemplate({ isMac: true, state: null, closeTab: noop, closeWindow: noop, openSettings: noop, send: noop });
+    assert.equal(byLabel(vmMenu.find((m) => m.label === 'Fichier').submenu, 'Nouvelle fenêtre de navigation privée'), undefined);
+  });
 });
