@@ -162,6 +162,9 @@ describe('autorisations des sites', () => {
       handlers.check(wc, 'media', 'https://meet.google.com', { mediaType, embeddingOrigin: 'https://meet.google.com/' });
     assert.equal(query(meet, 'audio'), true);
     assert.equal(query(meet, 'video'), true);
+    // Caméra avec pan/tilt/zoom (`{ name: 'camera', panTiltZoom: true }`, sans mediaType) :
+    // Meet l'interroge aussi ; « refusé » lui faisait croire la caméra bloquée.
+    assert.equal(query(meet, undefined), true);
     assert.equal(asked.length, 0);
     assert.equal(await request(handlers, meet, 'media', { mediaTypes: ['audio', 'video'] }), true);
     assert.equal(asked.length, 1);
@@ -190,6 +193,11 @@ describe('autorisations des sites', () => {
     assert.equal(asked[1].label, 'utiliser votre micro');
     assert.equal(store.get('https://visio.example', 'microphone'), 'block');
     assert.equal(visioQuery('audio'), false);
+    // Pan/tilt/zoom suit la caméra, jamais le micro.
+    assert.equal(visioQuery(undefined), false);
+    store.set('https://visio.example', 'camera', 'allow');
+    assert.equal(visioQuery(undefined), true);
+    store.set('https://visio.example', 'camera', 'block');
 
     // « Ignorer » : refusé jusqu'au redémarrage, la lecture synchrone aussi.
     answer = 'dismiss';

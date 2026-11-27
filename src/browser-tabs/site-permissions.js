@@ -288,24 +288,28 @@ function createSitePermissionHandlers({ store, ask, ensureSystemMediaAccess = as
       topOriginOf(webContents, null) ||
       siteOrigin(requestingOrigin);
     if (permission === 'media') {
-      // `mediaType` : `audio`, `video`, ou `unknown`.
+      // `mediaType` : `audio`, `video`, ou absent.
       const site = origin();
       if (!site) return false;
       const type = details && details.mediaType;
+      // `navigator.permissions.query({ name: 'camera' | 'microphone' })` est le seul appel qui
+      // porte `embeddingOrigin`. Sans `mediaType`, c'est la caméra avec pan/tilt/zoom
+      // (`{ name: 'camera', panTiltZoom: true }`), que Google Meet interroge : elle suit la caméra.
+      const isQuery = Boolean(details && details.embeddingOrigin);
+      if (isQuery) {
+        const target = MEDIA_TYPE_PERMISSIONS[type] || 'camera';
+        const stored = store.get(site, target);
+        if (stored) return stored === 'allow';
+        // Electron ne sait répondre que « accordé » ou « refusé », jamais « à demander ». Sans
+        // décision, « refusé » faisait conclure à Google Meet que l'accès était bloqué : il
+        // n'appelait jamais getUserMedia, donc la question de Lasco n'apparaissait pas. Tant que
+        // rien n'est bloqué ni ignoré, on répond « accordé » : le site appelle getUserMedia et la
+        // demande passe par `request`, qui pose la question.
+        return !(store.isDismissed && store.isDismissed(site, target));
+      }
+      // Noms des appareils (enumerateDevices) : cachés jusqu'à « Autoriser ».
       const wanted = MEDIA_TYPE_PERMISSIONS[type] ? [MEDIA_TYPE_PERMISSIONS[type]] : ['microphone', 'camera'];
-      if (wanted.some((p) => store.get(site, p) === 'allow')) return true;
-      // `navigator.permissions.query({ name: 'camera' | 'microphone' })` (seul appel qui porte
-      // `embeddingOrigin`) : Electron ne sait répondre que « accordé » ou « refusé », jamais « à
-      // demander ». Sans décision, « refusé » faisait conclure à Google Meet que l'accès était
-      // bloqué : il n'appelait jamais getUserMedia, donc la question de Lasco n'apparaissait pas.
-      // Tant que rien n'est bloqué ni ignoré, on répond « accordé » : le site appelle getUserMedia
-      // et la demande passe par `request`, qui pose la question. Les noms des appareils
-      // (enumerateDevices, sans `embeddingOrigin`) restent cachés jusqu'à « Autoriser ».
-      if (!details || !details.embeddingOrigin || !MEDIA_TYPE_PERMISSIONS[type]) return false;
-      const target = MEDIA_TYPE_PERMISSIONS[type];
-      if (store.get(site, target) === 'block') return false;
-      if (store.isDismissed && store.isDismissed(site, target)) return false;
-      return true;
+      return wanted.some((p) => store.get(site, p) === 'allow');
     }
     const policy = permissionPolicy(permission);
     if (policy !== 'ask') return policy === 'allow';
