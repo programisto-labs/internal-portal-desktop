@@ -25,6 +25,7 @@ const { FORM_AUTOFILL_PAGE_CHANNELS } = require('./browser-tabs/form-autofill');
 const { createVaultAuth } = require('./vault-auth');
 const {
   sanitizeTabDescriptor,
+  sanitizeTabSummary,
   encodeTabWindowArg,
   findWindowAtPoint,
   buildDetachedWindowBounds,
@@ -2387,6 +2388,46 @@ function registerWindowIPC() {
       if (process.platform === 'darwin') kept.floating.moveTop();
     }
     return { ok: true, action: 'detached' };
+  });
+  // Recherche dans les onglets (⌘⇧A) : chaque fenêtre publie ses onglets (titre, adresse, icône),
+  // la bulle d'une fenêtre liste ceux des autres et peut y aller ou les fermer.
+  ipcMain.handle('tab-window-publish-tabs', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    entry.tabSummary = sanitizeTabSummary(payload);
+    return { ok: true };
+  });
+  ipcMain.handle('tab-window-list-tabs', (event) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, windows: [] };
+    const windows = portalWindowsFrontToBack()
+      .filter((other) => other !== entry && Array.isArray(other.tabSummary) && other.tabSummary.length > 0)
+      .map((other) => ({ windowId: other.win.id, role: other.role, tabs: other.tabSummary }));
+    return { ok: true, windows };
+  });
+  ipcMain.handle('tab-window-activate-tab', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const target = Number.isInteger(p.windowId) ? portalWindows.get(p.windowId) : null;
+    if (!target || target === entry || target.spare || target.win.isDestroyed()) {
+      return { ok: false, error: 'no-window' };
+    }
+    const tabId = typeof p.tabId === 'string' ? p.tabId : '';
+    if (!Array.isArray(target.tabSummary) || !target.tabSummary.some((tab) => tab.id === tabId)) {
+      return { ok: false, error: 'no-tab' };
+    }
+    const action = p.action === 'close' ? 'close' : 'select';
+    if (action === 'select') {
+      if (target.win.isMinimized()) target.win.restore();
+      target.win.show();
+      target.win.focus();
+    } else {
+      // Optimiste : la liste suivante ne le montre plus, la fenêtre republiera ses onglets.
+      target.tabSummary = target.tabSummary.filter((tab) => tab.id !== tabId);
+    }
+    target.win.webContents.send('tab-window-tab-action', { tabId, action });
+    return { ok: true };
   });
   // A detached window whose last tab left (closed, attached or dragged away).
   ipcMain.handle('tab-window-close', (event) => {

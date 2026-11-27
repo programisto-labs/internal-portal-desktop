@@ -271,6 +271,11 @@ const tabWindowsBridge = {
   prewarm: (payload) => ipcRenderer.invoke('tab-window-prewarm', payload),
   /** ⌘N: open a new window on the new-tab page (`{ href }`: the portal's new-tab path). */
   openWindow: (payload) => ipcRenderer.invoke('tab-window-open', payload),
+  // Recherche dans les onglets (⌘⇧A) : onglets des autres fenêtres Lasco.
+  publishTabs: (payload) => ipcRenderer.invoke('tab-window-publish-tabs', payload),
+  listTabs: () => ipcRenderer.invoke('tab-window-list-tabs'),
+  activateTab: (payload) => ipcRenderer.invoke('tab-window-activate-tab', payload),
+  onTabAction: (callback) => subscribe('tab-window-tab-action', callback),
 };
 
 /**
