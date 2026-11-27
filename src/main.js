@@ -1,14 +1,21 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, globalShortcut, session, systemPreferences } = require('electron');
+const { app, BrowserWindow, WebContentsView, clipboard, ipcMain, nativeImage, nativeTheme, dialog, shell, Menu, Notification, screen, Tray, globalShortcut, session, systemPreferences } = require('electron');
 const { installPortalMediaPermissions } = require('./media-permissions');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
 const { autoUpdater } = require('electron-updater');
-const { createBrowserTabManager, sharedSitePermissions, BROWSER_PARTITION } = require('./browser-tabs/manager');
+const {
+  createBrowserTabManager,
+  sharedSitePermissions,
+  sharedAdblock,
+  BROWSER_PARTITION,
+} = require('./browser-tabs/manager');
+const { captureFilename, captureVisible } = require('./browser-tabs/page-capture');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
+const { TAB_SLEEP_DELAY_CHOICES, normalizeSiteHost, resolveTabSleepDelayMs } = require('./browser-tabs/tab-sleep');
 const {
   classifyIncomingUrl,
   defaultBrowserSnapshot,
@@ -26,6 +33,7 @@ const { FORM_AUTOFILL_PAGE_CHANNELS } = require('./browser-tabs/form-autofill');
 const { createVaultAuth } = require('./vault-auth');
 const {
   sanitizeTabDescriptor,
+  sanitizeTabSummary,
   encodeTabWindowArg,
   findWindowAtPoint,
   buildDetachedWindowBounds,
@@ -37,6 +45,12 @@ const {
   buildNewWindowBounds,
 } = require('./tab-windows');
 const { APP_MENU_COMMANDS, normalizeAppMenuState, buildApplicationMenuTemplate } = require('./app-menu');
+const {
+  PRIVATE_WINDOW_ARG,
+  PRIVATE_WINDOW_BACKGROUND,
+  newPrivatePartition,
+  isDeniedInPrivate,
+} = require('./private-window/rules');
 const {
   applyBadgeCount,
   showAgentNotification,
@@ -147,6 +161,7 @@ function installApplicationMenu() {
     },
     openSettings: () => openSettings('general'),
     send: sendAppMenuCommand,
+    openPrivateWindow: (browserWindow) => openPrivateWindow(browserWindow),
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -592,6 +607,16 @@ function sitePermissionsSettingsState() {
     names: PERMISSION_NAMES,
     defaults: store.listDefaults(),
     sites: store.listSites(),
+  };
+}
+
+/** Réglages > Bloqueur de pubs (docs/adblock.md). */
+function adblockSettingsState() {
+  const adblock = sharedAdblock();
+  return {
+    enabled: adblock.settings.isEnabled(),
+    updatedAt: adblock.loader.getFetchedAt() || null,
+    sites: adblock.settings.listSites(),
   };
 }
 
@@ -1073,6 +1098,22 @@ function getDownloadService() {
   return downloadService;
 }
 
+/** Réglage de la veille lu par le portail (même délai pour ses pages), docs/tab-sleep.md. */
+const TAB_SLEEP_CHANNEL = 'browser-tab-sleep-changed';
+
+function tabSleepSnapshot() {
+  const settings = getSettings();
+  const delayMs = VM_MODE ? 0 : resolveTabSleepDelayMs(settings);
+  return { delayMs, minutes: settings.tabSleepMinutes, neverSites: settings.tabSleepNeverSites || [] };
+}
+
+function broadcastTabSleepSettings() {
+  const snapshot = tabSleepSnapshot();
+  for (const entry of portalWindows.values()) {
+    if (!entry.win.isDestroyed()) entry.win.webContents.send(TAB_SLEEP_CHANNEL, snapshot);
+  }
+}
+
 /** Moteurs de recherche du navigateur, communs à toutes les fenêtres (docs/search-engines.md). */
 let searchEngineStore = null;
 const SEARCH_ENGINES_CHANNEL = 'browser-search-engines-changed';
@@ -1097,8 +1138,10 @@ function portalWindowEntry(win) {
   return portalWindows.get(win.id) || null;
 }
 
-/** Native browser views of a portal window (null for any other window, e.g. Réglages). */
+/** Native browser views of a portal window or a private window (null for any other window, e.g. Réglages). */
 function tabManagerFor(win) {
+  const privateEntry = privateWindowEntry(win);
+  if (privateEntry) return privateEntry.tabManager;
   const entry = portalWindowEntry(win);
   if (!entry) return null;
   if (!entry.tabManager) {
@@ -1107,6 +1150,8 @@ function tabManagerFor(win) {
       history: getBrowserHistoryStore(),
       interceptLink: routePortalLinkInApp,
       searchEngines: getSearchEngineStore(),
+      // Économiseur de mémoire (docs/tab-sleep.md). Coupé en mode VM (onglets pilotés par le point de contrôle).
+      getTabSleepSettings: () => (VM_MODE ? null : getSettings()),
     });
   }
   return entry.tabManager;
@@ -1116,6 +1161,138 @@ function destroyAllBrowserViews() {
   for (const entry of portalWindows.values()) {
     if (entry.tabManager) entry.tabManager.destroyAll();
   }
+  for (const entry of privateWindows.values()) {
+    void entry.tabManager.destroySession();
+  }
+}
+
+/**
+ * Fenêtres de navigation privée (docs/private-browsing.md) : onglets web seulement, sur une session en
+ * mémoire propre à chaque fenêtre et effacée à sa fermeture. Jamais dans `portalWindows` : aucun pont du
+ * portail (agents, opérations sur l'ordinateur, Coffre, téléchargements listés, My Drive) ne les accepte.
+ * @type {Map<number, { win: BrowserWindow, partition: string, tabManager: ReturnType<typeof createBrowserTabManager> }>}
+ */
+const privateWindows = new Map();
+
+function privateWindowEntry(win) {
+  if (!win || win.isDestroyed()) return null;
+  return privateWindows.get(win.id) || null;
+}
+
+/** Une adresse de Lasco tapée ou ouverte dans une fenêtre privée : elle s'ouvre dans la fenêtre principale. */
+function openPortalUrlFromPrivateWindow(url) {
+  const target = extractPortalTarget(url, isPortalNavigationUrl);
+  const existing = mainPortalWindow();
+  const win = existing || showMainWindow();
+  if (!win || win.isDestroyed()) return;
+  if (existing) showMainWindow();
+  if (target) win.webContents.send('open-portal-tab', target);
+  else loadMainPortalUrl(win, url);
+}
+
+/** Téléchargements d'une fenêtre privée : enregistrés dans le dossier choisi, jamais listés ni retenus. */
+function attachPrivateDownloads(ses) {
+  createDownloadService({
+    store: createDownloadsStore({}),
+    getDirectory: downloadsDirectory,
+    shouldAsk: () => getSettings().downloadsAskWhere === true,
+    fileExists: (p) => {
+      try {
+        return fs.statSync(p).isFile();
+      } catch (_) {
+        return false;
+      }
+    },
+    ensureDir: (dir) => {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+    openPath: (p) => void shell.openPath(p),
+    showItemInFolder: (p) => shell.showItemInFolder(p),
+    openFolder: (p) => void shell.openPath(p),
+    emit: () => undefined,
+    getSession: () => ses,
+  }).attach(ses, 'web');
+}
+
+/**
+ * ⌘⇧N / Ctrl+Maj+N, menu ☰ du navigateur, Fichier > Nouvelle fenêtre de navigation privée.
+ * La page est la coquille de Desktop (`src/vm-shell/`, en mode privé) : jamais le portail, donc ni barre
+ * latérale, ni colonne Lasco AI, ni agents, ni session Lasco.
+ */
+function openPrivateWindow(sourceWindow) {
+  if (VM_MODE) return null;
+  const source = sourceWindow && !sourceWindow.isDestroyed() ? sourceWindow : BrowserWindow.getFocusedWindow();
+  const sourceBounds = source && !source.isDestroyed() ? source.getBounds() : null;
+  const at = sourceBounds ? { x: sourceBounds.x, y: sourceBounds.y } : screen.getCursorScreenPoint();
+  const bounds = buildNewWindowBounds({ sourceBounds, workArea: screen.getDisplayNearestPoint(at).workArea });
+  const partition = newPrivatePartition(() => require('crypto').randomUUID());
+  const isMac = process.platform === 'darwin';
+  let iconPath = null;
+  try {
+    iconPath = getIconPath();
+  } catch (_) {
+    iconPath = null;
+  }
+  const win = new BrowserWindow({
+    ...bounds,
+    minWidth: 640,
+    minHeight: 420,
+    title: 'Navigation privée — Lasco',
+    show: false,
+    backgroundColor: PRIVATE_WINDOW_BACKGROUND,
+    titleBarStyle: 'hidden',
+    ...(isMac
+      ? { trafficLightPosition: { x: 14, y: 14 } }
+      : { titleBarOverlay: { color: PRIVATE_WINDOW_BACKGROUND, symbolColor: '#e9e4f5', height: 40 } }),
+    webPreferences: {
+      preload: path.join(__dirname, 'private-window', 'private-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      // La page de la coquille elle-même ne garde rien non plus.
+      partition: `${partition}-shell`,
+      additionalArguments: [`${APP_VERSION_ARG_PREFIX}${app.getVersion()}`, PRIVATE_WINDOW_ARG],
+    },
+    ...(iconPath && { icon: iconPath }),
+  });
+  const winId = win.id;
+  const ses = session.fromPartition(partition);
+  attachPrivateDownloads(ses);
+  const tabManager = createBrowserTabManager({
+    getMainWindow: () => (win.isDestroyed() ? null : win),
+    partition,
+    privateMode: true,
+    searchEngines: getSearchEngineStore(),
+    isPortalUrl: isPortalNavigationUrl,
+    onPortalUrl: openPortalUrlFromPrivateWindow,
+  });
+  privateWindows.set(winId, { win, partition, tabManager });
+  // La coquille ne navigue jamais : les pages s'ouvrent dans ses onglets web.
+  win.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    const safe = sanitizeBrowserUrl(url);
+    if (safe && !win.isDestroyed()) win.webContents.send('browser-tab-open-request', buildBrowserOpenRequest(safe));
+  });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+  });
+  win.on('closed', () => {
+    const entry = privateWindows.get(winId);
+    privateWindows.delete(winId);
+    if (entry) void entry.tabManager.destroySession();
+    void session.fromPartition(`${partition}-shell`).clearStorageData().catch(() => undefined);
+  });
+  win.loadFile(path.join(__dirname, 'vm-shell', 'private.html'));
+  return win;
 }
 
 /** Portal windows, focused first (used to find the window under a dropped tab). */
@@ -2019,6 +2196,67 @@ function registerWindowIPC() {
     return { ok: true };
   });
 
+  // --- Capture d'écran (docs/page-capture.md) : même fenêtres que les téléchargements ---
+  /**
+   * `target: 'file'` (défaut) : enregistrée dans les Téléchargements et copiée dans le
+   * presse-papiers ; `'assistant'` : PNG renvoyé à la page (pièce jointe du chat), rien sur le disque.
+   */
+  const deliverCapture = (shot, { target, url, title, source }) => {
+    if (!shot || !shot.ok) return shot || { ok: false, error: 'capture-failed' };
+    const filename = captureFilename({ url, title });
+    const meta = { width: shot.width, height: shot.height, mode: shot.mode, truncated: Boolean(shot.truncated), fallback: Boolean(shot.fallback), filename };
+    if (target === 'assistant') return { ok: true, ...meta, data: new Uint8Array(shot.png) };
+    const saved = getDownloadService().saveFile({ name: filename, data: shot.png, mimeType: 'image/png', url: source === 'web' ? url : '', source });
+    let copied = false;
+    try {
+      clipboard.writeImage(nativeImage.createFromBuffer(shot.png));
+      copied = true;
+    } catch (_) {
+      // Image trop grande pour le presse-papiers : le fichier reste.
+    }
+    if (!saved.ok && !copied) return { ok: false, error: saved.error || 'capture-failed' };
+    return { ok: true, ...meta, copied, item: saved.ok ? saved.item : null };
+  };
+  ipcMain.handle('browser-tab-capture-ready', (event) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    return manager ? manager.setCaptureReady() : { ok: false, error: 'forbidden' };
+  });
+  ipcMain.handle('browser-tab-capture-save', async (event, payload) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const shot = await manager.captureImage({ tabId: p.tabId, mode: p.mode });
+    return deliverCapture(shot, { target: p.target, url: shot && shot.url, title: shot && shot.title, source: 'web' });
+  });
+  // Page du portail (iframe de l'onglet) : partie visible, découpée dans la fenêtre elle-même.
+  ipcMain.handle('browser-portal-capture-save', async (event, payload) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const r = p.rect && typeof p.rect === 'object' ? p.rect : null;
+    const [cw, ch] = win.getContentSize();
+    // Le cadre est en pixels CSS de la page ; `capturePage` attend des points de la fenêtre.
+    const zoom = win.webContents.getZoomFactor() || 1;
+    const rect = r
+      ? {
+          x: Math.max(0, Math.round((Number(r.x) || 0) * zoom)),
+          y: Math.max(0, Math.round((Number(r.y) || 0) * zoom)),
+          width: Math.floor((Number(r.width) || 0) * zoom),
+          height: Math.floor((Number(r.height) || 0) * zoom),
+        }
+      : null;
+    if (rect) {
+      rect.width = Math.min(rect.width, cw - rect.x);
+      rect.height = Math.min(rect.height, ch - rect.y);
+      if (rect.width <= 0 || rect.height <= 0) return { ok: false, error: 'invalid-rect' };
+    }
+    const shot = await captureVisible(win.webContents, rect || undefined);
+    const title = typeof p.title === 'string' ? p.title.slice(0, 120) : '';
+    return deliverCapture(shot, { target: p.target, url: '', title, source: 'portal' });
+  });
+
   // --- Host operations: bridge for the web app (strictly validated natively) ---
   /** Cadre principal de la fenêtre principale, chargé depuis l'origine exacte du portail. */
   const trustedPortalSender = (event) => {
@@ -2389,6 +2627,46 @@ function registerWindowIPC() {
     }
     return { ok: true, action: 'detached' };
   });
+  // Recherche dans les onglets (⌘⇧A) : chaque fenêtre publie ses onglets (titre, adresse, icône),
+  // la bulle d'une fenêtre liste ceux des autres et peut y aller ou les fermer.
+  ipcMain.handle('tab-window-publish-tabs', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    entry.tabSummary = sanitizeTabSummary(payload);
+    return { ok: true };
+  });
+  ipcMain.handle('tab-window-list-tabs', (event) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, windows: [] };
+    const windows = portalWindowsFrontToBack()
+      .filter((other) => other !== entry && Array.isArray(other.tabSummary) && other.tabSummary.length > 0)
+      .map((other) => ({ windowId: other.win.id, role: other.role, tabs: other.tabSummary }));
+    return { ok: true, windows };
+  });
+  ipcMain.handle('tab-window-activate-tab', (event, payload) => {
+    const entry = tabWindowSender(event);
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const target = Number.isInteger(p.windowId) ? portalWindows.get(p.windowId) : null;
+    if (!target || target === entry || target.spare || target.win.isDestroyed()) {
+      return { ok: false, error: 'no-window' };
+    }
+    const tabId = typeof p.tabId === 'string' ? p.tabId : '';
+    if (!Array.isArray(target.tabSummary) || !target.tabSummary.some((tab) => tab.id === tabId)) {
+      return { ok: false, error: 'no-tab' };
+    }
+    const action = p.action === 'close' ? 'close' : 'select';
+    if (action === 'select') {
+      if (target.win.isMinimized()) target.win.restore();
+      target.win.show();
+      target.win.focus();
+    } else {
+      // Optimiste : la liste suivante ne le montre plus, la fenêtre republiera ses onglets.
+      target.tabSummary = target.tabSummary.filter((tab) => tab.id !== tabId);
+    }
+    target.win.webContents.send('tab-window-tab-action', { tabId, action });
+    return { ok: true };
+  });
   // A detached window whose last tab left (closed, attached or dragged away).
   ipcMain.handle('tab-window-close', (event) => {
     const entry = tabWindowSender(event);
@@ -2443,6 +2721,14 @@ function registerWindowIPC() {
       driveSync: driveSyncSettingsState(getDriveSyncStore()),
       searchEngines: getSearchEngineStore().list(),
       sitePermissions: sitePermissionsSettingsState(),
+      tabSleep: {
+        minutes: settings.tabSleepMinutes,
+        choices: TAB_SLEEP_DELAY_CHOICES,
+        neverSites: settings.tabSleepNeverSites || [],
+        // LASCO_TAB_SLEEP_MS (développement) remplace le délai choisi.
+        overrideMs: Number(process.env.LASCO_TAB_SLEEP_MS) > 0 ? resolveTabSleepDelayMs(settings) : null,
+      },
+      adblock: adblockSettingsState(),
       downloads: {
         directory: downloadsDirectory(),
         isDefault: !settings.downloadsDirectory || downloadsDirectory() !== settings.downloadsDirectory,
@@ -2562,6 +2848,18 @@ function registerWindowIPC() {
     if (!fromSettings(event) || typeof value !== 'boolean') return false;
     getSettingsStore().set({ downloadsAskWhere: value });
     return true;
+  });
+  // Réglages > Bloqueur de pubs (docs/adblock.md).
+  ipcMain.handle('settings-modal-adblock-set-enabled', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return { ok: false, error: 'forbidden' };
+    return { ok: sharedAdblock().settings.setEnabled(enabled) };
+  });
+  ipcMain.handle('settings-modal-adblock-set-site', (event, origin, enabled) => {
+    if (!fromSettings(event) || typeof origin !== 'string' || siteOrigin(origin) !== origin) {
+      return { ok: false, error: 'forbidden' };
+    }
+    if (typeof enabled !== 'boolean') return { ok: false, error: 'invalid-value' };
+    return { ok: sharedAdblock().settings.setSiteAllowed(origin, !enabled) };
   });
   // Réglages > Autorisations des sites (docs/site-permissions.md).
   ipcMain.handle('settings-modal-site-set-default', (event, permission, value) => {
@@ -2788,14 +3086,15 @@ function registerWindowIPC() {
 
   ipcMain.handle('browser-tab-show-context-menu', (event, payload) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    const entry = portalWindowEntry(win);
+    // Fenêtre privée : le menu de ses onglets, sans « Détacher » ni « Rattacher ».
+    const entry = portalWindowEntry(win) || (privateWindowEntry(win) && { role: 'private' });
     if (!entry) return { ok: false, error: 'forbidden' };
     const p = payload && typeof payload === 'object' ? payload : {};
     const template = buildTabMenuTemplate({
       tabId: p.tabId,
       actions: resolveWindowMenuActions({
         actions: p.actions,
-        windowActions: p.windowActions === true,
+        windowActions: p.windowActions === true && entry.role !== 'private',
         role: entry.role,
         tabCount: p.tabCount,
       }),
@@ -2832,6 +3131,7 @@ function registerWindowIPC() {
     'browser-tab-site-info': 'siteInfo',
     'browser-tab-set-site-permission': 'setSitePermission',
     'browser-tab-reset-site-permissions': 'resetSitePermissions',
+    'browser-tab-set-site-adblock': 'setSiteAdblock',
     'browser-history-suggest': 'historySuggest',
     'browser-history-list': 'historyList',
     'browser-history-remove': 'historyRemove',
@@ -2849,18 +3149,57 @@ function registerWindowIPC() {
     'browser-autofill-fill': 'autofillFill',
     // Onglet piloté par un agent en arrière-plan (docs/agent-tabs.md).
     'browser-tab-set-agent-control': 'setAgentControl',
+    // Économiseur de mémoire (docs/tab-sleep.md) : mettre un onglet en veille tout de suite.
+    'browser-tab-sleep': 'sleep',
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {
       const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
       if (!manager) return { ok: false, error: 'forbidden' };
+      // Fenêtre privée : ni mots de passe, ni saisie automatique, ni agent (docs/private-browsing.md).
+      if (manager.isPrivate && isDeniedInPrivate(method)) return { ok: false, error: 'private-window' };
       return manager[method](payload || {});
     });
   }
 
+  // Économiseur de mémoire : le portail applique le même délai à ses pages (docs/tab-sleep.md).
+  ipcMain.handle('browser-tab-sleep-get', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return { ok: true, ...tabSleepSnapshot() };
+  });
+  ipcMain.handle('browser-tab-sleep-manage', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    openSettings('memory');
+    return { ok: true };
+  });
+  ipcMain.handle('settings-modal-tab-sleep-set-minutes', (event, minutes) => {
+    if (!fromSettings(event) || !TAB_SLEEP_DELAY_CHOICES.includes(minutes)) return false;
+    getSettingsStore().set({ tabSleepMinutes: minutes });
+    broadcastTabSleepSettings();
+    return true;
+  });
+  ipcMain.handle('settings-modal-tab-sleep-add-site', (event, raw) => {
+    if (!fromSettings(event)) return { ok: false };
+    const host = normalizeSiteHost(raw);
+    if (!host) return { ok: false, error: 'invalid-site' };
+    const sites = getSettings().tabSleepNeverSites || [];
+    if (sites.includes(host)) return { ok: true, host };
+    getSettingsStore().set({ tabSleepNeverSites: [...sites, host] });
+    broadcastTabSleepSettings();
+    return { ok: true, host };
+  });
+  ipcMain.handle('settings-modal-tab-sleep-remove-site', (event, host) => {
+    if (!fromSettings(event) || typeof host !== 'string') return false;
+    const sites = (getSettings().tabSleepNeverSites || []).filter((site) => site !== host);
+    getSettingsStore().set({ tabSleepNeverSites: sites });
+    broadcastTabSleepSettings();
+    return true;
+  });
+
   // Barre d'adresse du portail : moteur par défaut et raccourcis des sites (docs/search-engines.md).
   ipcMain.handle('browser-search-engines-get', (event) => {
-    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!portalWindowEntry(win) && !privateWindowEntry(win)) return { ok: false, error: 'forbidden' };
     return { ok: true, ...getSearchEngineStore().snapshot() };
   });
   ipcMain.handle('browser-search-engines-mark-used', (event, payload) => {
@@ -2877,6 +3216,19 @@ function registerWindowIPC() {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
     openSettings('search');
     return { ok: true };
+  });
+
+  // Navigation privée (docs/private-browsing.md) : ouverte depuis le portail (menu ☰) ou une fenêtre privée.
+  ipcMain.handle('private-window-open', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    // Cadre principal d'une fenêtre du portail, à l'origine du portail (même règle que les téléchargements).
+    const fromPortal = downloadsSender(event);
+    if (!fromPortal && !privateWindowEntry(win)) return { ok: false, error: 'forbidden' };
+    return openPrivateWindow(win) ? { ok: true } : { ok: false, error: 'unavailable' };
+  });
+  ipcMain.handle('private-window-info', (event) => {
+    if (!privateWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    return { ok: true, version: app.getVersion(), platform: process.platform };
   });
 
   // Import from another browser (docs/browser-import.md). Portal windows only.
@@ -3146,6 +3498,8 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     app.setName('Lasco');
     nativeTheme.themeSource = getSettings().themeSource;
+    // Bloqueur de pubs (docs/adblock.md) : jamais sur les pages de Lasco (portail, API, connexion).
+    sharedAdblock().setProtectedUrlMatcher((url) => isPortalNavigationUrl(url) || isApiHostNavigationUrl(url));
     if (VM_MODE) {
       startVmMode();
       return;

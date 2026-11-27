@@ -14,6 +14,7 @@ const {
   resolveTabDropTarget,
   followPosition,
   isSpareWindowUsable,
+  sanitizeTabSummary,
 } = require('../src/tab-windows');
 const { sanitizeBrowserUrl } = require('../src/browser-tabs/url');
 const { resolveWindowMenuActions, buildTabMenuTemplate } = require('../src/browser-tabs/tab-menu');
@@ -210,5 +211,29 @@ describe('buildNewWindowBounds (⌘N)', () => {
   it('centres without a source window', () => {
     const b = buildNewWindowBounds({ sourceBounds: null, workArea });
     assert.ok(Number.isFinite(b.x) && Number.isFinite(b.y));
+  });
+});
+
+describe('sanitizeTabSummary (tab search)', () => {
+  it('keeps what the list shows and drops the rest', () => {
+    const tabs = sanitizeTabSummary({
+      tabs: [
+        { id: 'tab-1', kind: 'external', title: 'Docs\n', href: 'https://example.com/a', favicon: 'https://example.com/f.ico', active: true, extra: 1 },
+        { id: 'tab-2', title: 'Contacts', href: '/ws/e/contacts', favicon: 'javascript:alert(1)' },
+        { id: 'bad id!', title: 'x' },
+        null,
+      ],
+    });
+    assert.deepEqual(tabs, [
+      { id: 'tab-1', kind: 'external', title: 'Docs', href: 'https://example.com/a', favicon: 'https://example.com/f.ico', active: true },
+      { id: 'tab-2', kind: 'internal', title: 'Contacts', href: '/ws/e/contacts', favicon: null, active: false },
+    ]);
+  });
+
+  it('caps the list and accepts garbage', () => {
+    assert.deepEqual(sanitizeTabSummary(null), []);
+    assert.deepEqual(sanitizeTabSummary({ tabs: 'x' }), []);
+    const many = Array.from({ length: 250 }, (_, i) => ({ id: `t${i}`, title: String(i) }));
+    assert.equal(sanitizeTabSummary({ tabs: many }).length, 200);
   });
 });

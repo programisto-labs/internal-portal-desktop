@@ -730,3 +730,27 @@ document.addEventListener(
   },
   true,
 );
+
+// --- Mise en veille des onglets (docs/tab-sleep.md) ---
+// Champs que la personne a modifiés (événements de confiance seulement : un script de la page qui
+// coche une case ne compte pas). Lu par le relevé d'avant veille, exécuté dans ce même monde isolé
+// (999) : une saisie en cours garde l'onglet éveillé. Rien n'est exposé à la page.
+const sleepEditedFields = new Set();
+globalThis.__lascoSleepEditedFields = sleepEditedFields;
+window.addEventListener(
+  'input',
+  (event) => {
+    const target = event.target;
+    if (!event.isTrusted || !target || target.nodeType !== 1) return;
+    if (target.matches('input, textarea, select') || target.isContentEditable) sleepEditedFields.add(target);
+  },
+  true,
+);
+// Formulaire envoyé ou remis à zéro : sa saisie n'est plus en cours.
+const forgetSleepEditedFields = (event) => {
+  const form = event.target;
+  if (!form || typeof form.contains !== 'function') return;
+  for (const field of [...sleepEditedFields]) if (form.contains(field)) sleepEditedFields.delete(field);
+};
+window.addEventListener('submit', forgetSleepEditedFields, true);
+window.addEventListener('reset', forgetSleepEditedFields, true);

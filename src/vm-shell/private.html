@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <!--
+    Fenêtre de navigation privée (docs/private-browsing.md) : la coquille de la VM (vm-shell.js), en thème privé.
+    Page de Desktop : aucun script distant, aucun cadre, aucun accès réseau de la coquille elle-même.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+  <title>Navigation privée — Lasco</title>
+  <link rel="stylesheet" href="vm-shell.css" />
+  <link rel="stylesheet" href="private.css" />
+</head>
+<body data-view="desktop" data-mode="private">
+  <header class="tabbar">
+    <div class="private-badge" title="Navigation privée : rien n'est gardé à la fermeture de la fenêtre">
+      <span data-icon="mask"></span><span>Navigation privée</span>
+    </div>
+    <div class="tablist" role="tablist" aria-label="Onglets" id="tabs"></div>
+    <div class="new-tab-wrap" id="new-tab-wrap">
+      <button class="glass-icon secondary" id="new-tab" type="button" title="Nouvel onglet" aria-label="Nouvel onglet" data-icon="plus"></button>
+    </div>
+  </header>
+  <div class="canvas">
+    <div class="toolbar" data-browser-toolbar>
+      <div class="toolbar-start">
+        <div class="glass nav-group" role="group" aria-label="Navigation">
+          <button class="nav-button" id="back" type="button" title="Précédent" aria-label="Précédent" data-icon="arrow-left"></button>
+          <button class="nav-button" id="forward" type="button" title="Suivant" aria-label="Suivant" data-icon="arrow-right"></button>
+          <span class="nav-separator" aria-hidden="true"></span>
+          <button class="nav-button" id="reload" type="button" title="Actualiser" aria-label="Actualiser" data-icon="rotate-cw"></button>
+        </div>
+      </div>
+      <div class="address" id="address-box">
+        <button class="site-info" id="site-info" type="button" aria-label="Informations du site" aria-haspopup="dialog" aria-expanded="false" hidden></button>
+        <form class="omnibox" id="omnibox" autocomplete="off">
+          <span class="address-icon" id="address-icon" aria-hidden="true"></span>
+          <input class="glass" id="address" type="text" inputmode="url" spellcheck="false" autocapitalize="off"
+                 placeholder="Rechercher ou saisir une adresse" aria-label="Adresse" role="combobox"
+                 aria-expanded="false" aria-autocomplete="list" aria-controls="suggestions" />
+        </form>
+      </div>
+      <div class="toolbar-end">
+        <button class="zoom-badge" id="zoom-badge" type="button" title="Réinitialiser le zoom" aria-label="Réinitialiser le zoom" hidden></button>
+        <button class="glass-icon" id="menu-button" type="button" title="Menu du navigateur" aria-label="Menu du navigateur" aria-haspopup="menu" aria-expanded="false" data-icon="menu"></button>
+      </div>
+      <div class="loading-bar" id="loading-bar" aria-hidden="true" hidden></div>
+    </div>
+    <div class="find-bar" id="find-bar" role="search" hidden>
+      <input id="find-input" type="text" spellcheck="false" placeholder="Rechercher dans la page" aria-label="Rechercher dans la page" />
+      <span class="find-count" id="find-count"></span>
+      <button class="find-button" id="find-previous" type="button" aria-label="Résultat précédent" data-icon="chevron-up"></button>
+      <button class="find-button" id="find-next" type="button" aria-label="Résultat suivant" data-icon="chevron-down"></button>
+      <button class="find-button" id="find-close" type="button" aria-label="Fermer la recherche" data-icon="x"></button>
+    </div>
+    <!-- The native web view is composited over this placeholder; the frozen image stands in while a menu covers it. -->
+    <main class="content" id="content" aria-label="Page">
+      <img class="freeze" id="freeze" alt="" aria-hidden="true" hidden />
+      <section class="private-intro" id="private-intro" aria-label="Navigation privée" hidden>
+        <div class="private-intro-inner">
+          <div class="private-intro-icon" data-icon="mask" aria-hidden="true"></div>
+          <h1>Navigation privée</h1>
+          <p class="lead">
+            Cette fenêtre a sa propre session, gardée en mémoire. Quand vous la fermez, ses cookies, son cache et son
+            historique disparaissent : vous êtes déconnecté des sites ouverts ici.
+          </p>
+          <div class="private-columns">
+            <div class="private-card not-kept">
+              <h2>Rien n'est gardé</h2>
+              <ul>
+                <li>Pages visitées et historique</li>
+                <li>Cookies, connexions aux sites et données des sites</li>
+                <li>Mots de passe : ni enregistrés, ni proposés</li>
+                <li>Autorisations accordées aux sites</li>
+                <li>Liste des téléchargements</li>
+              </ul>
+            </div>
+            <div class="private-card kept">
+              <h2>Ce qui reste visible</h2>
+              <ul>
+                <li>Les fichiers téléchargés restent dans votre dossier</li>
+                <li>Les sites, votre employeur ou votre fournisseur d'accès peuvent voir votre activité</li>
+                <li>Une adresse de Lasco s'ouvre dans la fenêtre principale</li>
+              </ul>
+            </div>
+          </div>
+          <p class="private-note">
+            Aucun agent, aucun outil de Lasco AI ni compte Lasco n'a accès à cette fenêtre. Chaque fenêtre de navigation
+            privée est séparée des autres.
+          </p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <ul class="popover suggestions" id="suggestions" role="listbox" hidden></ul>
+
+  <div class="popover menu" id="menu" role="menu" aria-label="Menu du navigateur" hidden>
+    <button class="menu-item" type="button" role="menuitem" data-action="new-tab" data-icon="plus">
+      <span class="menu-label">Nouvel onglet</span><kbd data-shortcut="T">Ctrl+T</kbd>
+    </button>
+    <button class="menu-item" type="button" role="menuitem" data-action="new-private-window" data-icon="mask">
+      <span class="menu-label">Nouvelle fenêtre de navigation privée</span><kbd data-shortcut="Shift+N">Ctrl+Maj+N</kbd>
+    </button>
+    <div class="menu-separator" role="separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-action="find" data-icon="search">
+      <span class="menu-label">Rechercher dans la page</span><kbd data-shortcut="F">Ctrl+F</kbd>
+    </button>
+    <button class="menu-item" type="button" role="menuitem" data-action="print" data-icon="printer">
+      <span class="menu-label">Imprimer…</span><kbd data-shortcut="P">Ctrl+P</kbd>
+    </button>
+    <div class="menu-zoom">
+      <span class="menu-label">Zoom</span>
+      <div class="zoom-controls">
+        <button class="zoom-button" type="button" data-action="zoom-out" aria-label="Zoom arrière" data-icon="minus"></button>
+        <span class="zoom-value" id="zoom-value">100 %</span>
+        <button class="zoom-button" type="button" data-action="zoom-in" aria-label="Zoom avant" data-icon="plus"></button>
+      </div>
+      <button class="zoom-button" type="button" data-action="zoom-reset" aria-label="Réinitialiser le zoom" data-icon="rotate-ccw"></button>
+    </div>
+    <div class="menu-separator" role="separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-action="copy-link" data-icon="copy">
+      <span class="menu-label">Copier le lien</span>
+    </button>
+    <div class="menu-separator" role="separator"></div>
+    <div class="menu-about">
+      <p class="menu-about-title"><span data-icon="mask"></span>Navigation privée</p>
+      <p>Cookies, cache, historique et autorisations de cette fenêtre sont effacés à sa fermeture.</p>
+      <p class="menu-about-version" id="version"></p>
+    </div>
+  </div>
+
+  <div class="popover site-panel" id="site-panel" role="dialog" aria-label="Informations du site" hidden>
+    <div class="site-head">
+      <span class="site-head-icon" id="site-panel-icon" aria-hidden="true"></span>
+      <div class="site-head-text">
+        <p class="site-host" id="site-host"></p>
+        <p class="site-title" id="site-title"></p>
+        <p class="site-description" id="site-description"></p>
+      </div>
+    </div>
+    <div class="site-body">
+      <h3>Autorisations</h3>
+      <p class="site-empty" id="site-empty">Ce site n'a encore demandé aucune autorisation.</p>
+      <ul class="site-permissions" id="site-permissions"></ul>
+      <button class="site-reset" id="site-reset" type="button" hidden>Réinitialiser les autorisations</button>
+      <div class="site-changed" id="site-changed" hidden>
+        <span>Actualisez la page pour appliquer les changements.</span>
+        <button type="button" id="site-reload" data-icon="rotate-cw">Actualiser</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="vm-shell.js"></script>
+</body>
+</html>

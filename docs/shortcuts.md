@@ -5,12 +5,15 @@ La page du portail gère ses raccourcis (`lib/portal-tabs/shortcuts.ts` du porta
 | Touches (macOS / Windows, Linux) | Action | Où |
 | --- | --- | --- |
 | ⌘N / Ctrl+N | Nouvelle fenêtre sur un nouvel onglet | Menu Fichier (vrai raccourci natif) |
+| ⌘⇧N / Ctrl+Maj+N | Nouvelle fenêtre de navigation privée (docs/private-browsing.md) | Menu Fichier (vrai raccourci natif) |
 | ⌘1–8, ⌘9 / Ctrl+1–8, Ctrl+9 | Onglet N, dernier onglet | Relayé |
 | ⌃Tab, ⌃⇧Tab, ⌘⌥→ / ⌘⌥←, ⌘⇧] / ⌘⇧[ | Onglet suivant / précédent | Relayé |
 | ⌘⌥1–9 / Ctrl+Maj+1–9 | Agent N de la colonne Lasco AI | Relayé |
 | ⌘D, ⌘Y, ⌘/ | Favori, historique, liste des raccourcis | Relayé |
+| ⌘⇧A / Ctrl+Maj+A | Rechercher dans les onglets (bulle de la coquille, aussi les onglets des autres fenêtres, voir `docs/tab-windows.md`) | Relayé (`search-tabs`) |
 | ⌘⇧R | Recharger sans le cache | Vue native |
 | ⌘⇧J / Ctrl+J | Téléchargements | Relayé (`downloads`) |
+| ⌘⇧S / Ctrl+Shift+S | Capturer la page entière (docs/page-capture.md) | Relayé (`capture-full-page`) |
 | ⌘F, ⌘G / ⌘⇧G | Rechercher dans la page : `findInPage` de la vue pour une page web ; sur une page du portail, la page cherche elle-même dans son DOM (`lib/portal-tabs/dom-find.ts` du portail) | Vue native ou page |
 | ⌘L, ⌘T, ⌘P, ⌘R, zoom, ⌘[ ⌘] | Inchangés | Vue native ou relayé |
 
