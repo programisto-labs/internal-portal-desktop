@@ -40,7 +40,7 @@ Un changement vaut pour les prochaines demandes du site ; une page déjà ouvert
 
 Champs ajoutés :
 
-- `security` : `secure` (https), `insecure` (http hors de cette machine), `local` (http sur `localhost`, `*.localhost`, `127.0.0.1`, `::1`), `dangerous` (certificat refusé), `null` (vide, page d'erreur réseau ou plantage).
+- `security` : `secure` (https), `insecure` (http hors de cette machine), `local` (http sur `localhost`, `*.localhost`, `127.0.0.1`, `::1`), `dangerous` (certificat refusé, ou site signalé par la protection contre les sites dangereux : voir docs/safe-browsing.md, avec `threat`), `null` (vide, page d'erreur réseau ou plantage).
 - `pageError` : `crashed`, `network`, `certificate` ou `null` : Lasco affiche sa page à la place du site.
 - `htmlFullscreen` : une vidéo (ou tout élément) est en plein écran.
 

@@ -4,7 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeSettings, createSettingsStore, extractPortalTarget } = require('../src/link-handling');
 const { DEFAULT_SHORTCUTS } = require('../src/background-mode');
-const BASE = { keepInBackground: true, backgroundHintShown: false, downloadsDirectory: null, downloadsAskWhere: false, shortcuts: { ...DEFAULT_SHORTCUTS } };
+const BASE = { keepInBackground: true, backgroundHintShown: false, downloadsDirectory: null, downloadsAskWhere: false, safeBrowsingEnabled: true, shortcuts: { ...DEFAULT_SHORTCUTS } };
 
 const isPortal = (u) => new URL(u).hostname === 'app.lascoapp.com';
 
@@ -34,6 +34,9 @@ describe('link handling', () => {
     assert.equal(normalizeSettings({ downloadsDirectory: 'relative/dir' }).downloadsDirectory, null);
     assert.equal(normalizeSettings({ downloadsAskWhere: true }).downloadsAskWhere, true);
     assert.equal(normalizeSettings({ downloadsAskWhere: 'yes' }).downloadsAskWhere, false);
+    // Protection contre les sites dangereux : activée par défaut.
+    assert.equal(normalizeSettings({ safeBrowsingEnabled: false }).safeBrowsingEnabled, false);
+    assert.equal(normalizeSettings({ safeBrowsingEnabled: 'no' }).safeBrowsingEnabled, true);
   });
 
   it('persists settings through the store', () => {

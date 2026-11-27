@@ -7,6 +7,7 @@ const MAX_ENTRIES = 1000;
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 500;
 const SAVE_DELAY_MS = 1000;
+const DANGERS = ['malware', 'phishing', 'unwanted'];
 const STATES = ['progressing', 'completed', 'cancelled', 'interrupted'];
 const SOURCES = ['web', 'portal'];
 
@@ -40,6 +41,8 @@ function normalizeRecord(raw) {
     endTime: clampInt(raw.endTime) || null,
     source: SOURCES.includes(raw.source) ? raw.source : 'web',
     error: str(raw.error, 100) || null,
+    // Safe Browsing (docs/safe-browsing.md) : 'malware' | 'phishing' | 'unwanted' quand error = 'dangerous'.
+    danger: DANGERS.includes(raw.danger) ? raw.danger : null,
   };
 }
 

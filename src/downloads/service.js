@@ -1,10 +1,13 @@
 'use strict';
 
 const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
 const { sanitizeFilename, uniqueSavePath } = require('./naming');
 
 const PROGRESS_THROTTLE_MS = 250;
+/** Fichier écrit en attendant le verdict Safe Browsing (docs/safe-browsing.md). */
+const CHECK_SUFFIX = '.lasco-verification';
 const RETRY_PROTOCOLS = new Set(['http:', 'https:']);
 
 /**
@@ -23,6 +26,10 @@ const RETRY_PROTOCOLS = new Set(['http:', 'https:']);
  * - setProgress(fraction): -1 when nothing runs (dock / taskbar progress)
  * - onStarted({ webContents, source }): a download began in this page (an empty tab opened
  *   only for it is closed, like Chrome)
+ * - assessDanger({ urls, pageUrl }): Safe Browsing verdict of the file and of the page it comes from
+ *   (docs/safe-browsing.md) → { verdict: 'safe' | 'dangerous' | 'check', threat?, check?() }.
+ *   A dangerous file is never written: cancelled, listed with `error: 'dangerous'`, and only
+ *   downloaded again by « Conserver quand même » (`keepDangerous`).
  */
 function createDownloadService({
   store,
@@ -38,6 +45,22 @@ function createDownloadService({
   onFinished = () => undefined,
   setProgress = () => undefined,
   onStarted = () => undefined,
+  assessDanger = null,
+  moveFile = (from, to) => {
+    try {
+      fs.renameSync(from, to);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  },
+  removeFile = (file) => {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch (_) {
+      // Au mieux.
+    }
+  },
   now = () => Date.now(),
   randomId = () => crypto.randomUUID(),
 }) {
@@ -47,6 +70,8 @@ function createDownloadService({
   const reserved = new Set();
   /** id of a record being retried → removed once the new download starts. */
   const retrying = new Map();
+  /** Adresses gardées malgré l'avertissement (« Conserver quand même »), pour leur prochain téléchargement. */
+  const keptAnyway = new Set();
 
   function publicRecord(rec) {
     if (!rec) return null;
@@ -111,8 +136,70 @@ function createDownloadService({
     return dir && ensureDir(dir) ? dir : null;
   }
 
+  /** Adresses du fichier (redirections comprises) et de la page qui le propose. */
+  function dangerInputs(item, webContents) {
+    const chain = typeof item.getURLChain === 'function' ? item.getURLChain() : [];
+    const urls = [...new Set([...(Array.isArray(chain) ? chain : []), item.getURL()].filter(Boolean))];
+    let pageUrl = '';
+    try {
+      pageUrl = webContents && !webContents.isDestroyed() ? webContents.getURL() : '';
+    } catch (_) {
+      pageUrl = '';
+    }
+    return { urls, pageUrl };
+  }
+
+  /** Fichier d'un site signalé : arrêté avant d'être écrit, marqué « Dangereux » dans la liste. */
+  function markDangerous(id, threat) {
+    const entry = live.get(id);
+    if (!entry) return;
+    entry.record.error = 'dangerous';
+    entry.record.danger = threat || 'malware';
+    entry.dangerous = true;
+    if (!entry.record.savePath) entry.record.savePath = entry.record.filename;
+    entry.announce();
+    entry.item.cancel();
+  }
+
+  function guardDanger(id, item, webContents) {
+    if (!assessDanger) return;
+    if (keptAnyway.delete(item.getURL())) return;
+    let decision;
+    try {
+      decision = assessDanger(dangerInputs(item, webContents));
+    } catch (_) {
+      return;
+    }
+    if (!decision || decision.verdict === 'safe') return;
+    if (decision.verdict === 'dangerous') {
+      markDangerous(id, decision.threat);
+      return;
+    }
+    if (decision.verdict !== 'check' || typeof decision.check !== 'function') return;
+    // Préfixe trouvé : réponse du serveur en quelques centaines de ms. Comme Chrome, le fichier
+    // s'écrit sous un nom temporaire (un petit fichier peut être fini avant la réponse) et ne
+    // prend son nom qu'une fois jugé sûr.
+    const entry = live.get(id);
+    if (entry.record.savePath) {
+      entry.finalPath = entry.record.savePath;
+      entry.tempPath = `${entry.finalPath}${CHECK_SUFFIX}`;
+      item.setSavePath(entry.tempPath);
+    }
+    entry.verdict = Promise.resolve()
+      .then(() => decision.check())
+      .then(
+        (result) => (result && result.verdict === 'dangerous' ? result : { verdict: 'safe' }),
+        () => ({ verdict: 'safe' }),
+      );
+    void entry.verdict.then((result) => {
+      if (result.verdict === 'dangerous' && live.has(id) && item.getState() === 'progressing') {
+        markDangerous(id, result.threat);
+      }
+    });
+  }
+
   /** `will-download` of one session. */
-  function handleDownload(item, source) {
+  function handleDownload(item, source, webContents) {
     const id = randomId();
     const filename = sanitizeFilename(item.getFilename());
     const dir = chooseDirectory();
@@ -148,6 +235,7 @@ function createDownloadService({
         endTime: null,
         source,
         error: null,
+        danger: null,
       },
     };
     live.set(id, entry);
@@ -160,16 +248,48 @@ function createDownloadService({
       if (retryOf && store.remove(retryOf)) emit({ type: 'remove', ids: [retryOf] });
     };
 
+    entry.announce = () => {
+      announce();
+      if (entry.announced) publish(id, { immediate: true });
+    };
+
+    /** Chemin affiché : le nom final, jamais le nom temporaire d'un fichier en vérification. */
+    const withFinalPath = (record) => (entry.finalPath ? { ...record, savePath: entry.finalPath } : record);
+
     item.on('updated', (_event, state) => {
-      entry.record = snapshot(item, entry.record);
-      if (state === 'interrupted') entry.record.error = 'network';
+      entry.record = withFinalPath(snapshot(item, entry.record));
+      if (entry.dangerous) entry.record.error = 'dangerous';
+      else if (state === 'interrupted') entry.record.error = 'network';
       else entry.record.error = null;
       announce();
       if (entry.announced) publish(id);
     });
-    item.once('done', (_event, state) => {
-      entry.record = { ...snapshot(item, entry.record), state, paused: false, endTime: now(), bytesPerSecond: 0 };
-      if (state === 'interrupted') entry.record.error = entry.record.error || 'failed';
+    item.once('done', async (_event, doneState) => {
+      let state = doneState;
+      entry.record = withFinalPath({ ...snapshot(item, entry.record), state, paused: false, endTime: now(), bytesPerSecond: 0 });
+      if (entry.verdict) {
+        // Fini avant la réponse du serveur : le fichier attend son verdict sous son nom temporaire.
+        const result = await entry.verdict;
+        const written = entry.tempPath || item.getSavePath();
+        if (result.verdict === 'dangerous') {
+          if (state === 'completed' && written) removeFile(written);
+          entry.dangerous = true;
+          entry.record.error = 'dangerous';
+          entry.record.danger = result.threat || 'malware';
+          state = 'cancelled';
+          entry.record.state = state;
+        } else if (state === 'completed' && entry.tempPath) {
+          if (!moveFile(entry.tempPath, entry.finalPath)) {
+            state = 'interrupted';
+            entry.record.state = state;
+            entry.record.error = 'failed';
+          }
+        } else if (entry.tempPath) {
+          removeFile(entry.tempPath);
+        }
+      }
+      if (entry.dangerous) entry.record.error = 'dangerous';
+      else if (state === 'interrupted') entry.record.error = entry.record.error || 'failed';
       if (state === 'completed') entry.record.error = null;
       reserved.delete(savePath);
       announce();
@@ -184,11 +304,12 @@ function createDownloadService({
 
     announce();
     if (entry.announced) publish(id, { immediate: true });
+    guardDanger(id, item, webContents);
   }
 
   function attach(targetSession, source) {
     targetSession.on('will-download', (_event, item, webContents) => {
-      handleDownload(item, source);
+      handleDownload(item, source, webContents);
       try {
         onStarted({ webContents, source });
       } catch (_) {
@@ -252,6 +373,16 @@ function createDownloadService({
     return { ok: true };
   }
 
+  /** « Conserver quand même » : fichier signalé dangereux, téléchargé de nouveau sans avertissement. */
+  function keepDangerous({ id } = {}) {
+    const rec = store.get(id);
+    if (!rec || rec.error !== 'dangerous') return { ok: false };
+    keptAnyway.add(rec.url);
+    const res = retry({ id });
+    if (!res.ok) keptAnyway.delete(rec.url);
+    return res;
+  }
+
   function open({ id } = {}) {
     const rec = store.get(id);
     if (!rec || rec.state !== 'completed' || !fileExists(rec.savePath)) return { ok: false, error: 'missing' };
@@ -294,6 +425,7 @@ function createDownloadService({
     resume,
     cancel,
     retry,
+    keepDangerous,
     open,
     show,
     remove,

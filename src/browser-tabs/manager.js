@@ -30,6 +30,9 @@ const {
   isTabCrash,
   securityStateOf,
   errorPageQuery,
+  cleanSafeBrowsingTexts,
+  safeBrowsingGesture,
+  safeBrowsingPageFromUrl,
 } = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
 const { createHistoryStore } = require('./history');
@@ -291,7 +294,10 @@ function isBlankDownloadTab({ url, canGoBack }) {
   return !url || url === 'about:blank';
 }
 
-function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines }) {
+/** Textes de la page « Site dangereux », envoyés par le portail (communs à toutes les fenêtres). */
+let safeBrowsingTexts = null;
+
+function createBrowserTabManager({ getMainWindow, history, interceptLink, searchEngines, safeBrowsing = null }) {
   const historyStore =
     history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
@@ -505,8 +511,10 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       zoomFactor: wc.getZoomFactor(),
       // Cadenas de la barre d'adresse : secure | insecure | dangerous | local | null.
       security: securityStateOf(url, entry.errorPage),
-      // Page affichée par Lasco à la place du site : crashed | network | certificate.
+      // Page affichée par Lasco à la place du site : crashed | network | certificate | safe-browsing.
       pageError: entry.errorPage ? entry.errorPage.kind : null,
+      // Site signalé (docs/safe-browsing.md) : malware | phishing | unwanted.
+      threat: entry.errorPage && entry.errorPage.kind === 'safe-browsing' ? entry.errorPage.threat : null,
       htmlFullscreen: Boolean(entry.htmlFullscreen),
       // Piloté par un agent en arrière-plan (setAgentControl).
       agentControlled: agentControlled.has(tabId),
@@ -762,6 +770,117 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     });
   }
 
+  // --- Protection contre les sites dangereux (docs/safe-browsing.md) ---
+
+  /** Page rouge « Site trompeur » / « logiciels malveillants » à la place du site, qui n'est pas chargé. */
+  function showSafeBrowsingWarning(tabId, url, threat) {
+    const entry = tabs.get(tabId);
+    if (!entry) return;
+    entry.pendingSafeCheck = null;
+    const wc = entry.view.webContents;
+    if (!wc.isDestroyed() && wc.isLoading()) wc.stop();
+    console.warn(`[safe-browsing] site signalé (${threat}) bloqué dans l'onglet`);
+    showErrorPage(tabId, {
+      kind: 'safe-browsing',
+      url,
+      threat,
+      token: randomUUID(),
+      texts: safeBrowsingTexts,
+    });
+  }
+
+  /**
+   * Navigation du cadre principal vers `url` : true si elle est retenue (site dangereux, ou préfixe à
+   * vérifier). Après une vérification sans danger, `resume()` relance la navigation. Jamais
+   * bloquant : serveur injoignable → la page s'ouvre.
+   */
+  function guardMainNavigation(tabId, url, resume) {
+    if (!safeBrowsing) return false;
+    const safe = sanitizeBrowserUrl(url);
+    if (!safe || !/^https?:/i.test(safe)) return false;
+    const decision = safeBrowsing.classify(safe);
+    if (decision.verdict === 'safe') return false;
+    if (decision.verdict === 'dangerous') {
+      showSafeBrowsingWarning(tabId, safe, decision.threat);
+      return true;
+    }
+    const entry = tabs.get(tabId);
+    if (!entry) return false;
+    const view = entry.view;
+    entry.pendingSafeCheck = safe;
+    entry.url = safe;
+    pushState(tabId);
+    void safeBrowsing.check(safe).then((result) => {
+      if (!isCurrentTabView(tabs, tabId, view) || entry.pendingSafeCheck !== safe) return;
+      entry.pendingSafeCheck = null;
+      if (result.verdict === 'dangerous') showSafeBrowsingWarning(tabId, safe, result.threat);
+      else resume();
+    });
+    return true;
+  }
+
+  /**
+   * Sous-cadre (iframe) : bloqué dès que son adresse est connue comme dangereuse. Un préfixe à
+   * vérifier ne retient pas le cadre (on ne peut pas relancer sa navigation) : la vérification
+   * part en arrière-plan et vaut pour la suite.
+   */
+  function guardSubframeNavigation(url) {
+    if (!safeBrowsing) return false;
+    const safe = sanitizeBrowserUrl(url);
+    if (!safe || !/^https?:/i.test(safe)) return false;
+    const decision = safeBrowsing.classify(safe);
+    if (decision.verdict === 'check') void safeBrowsing.check(safe);
+    if (decision.verdict === 'dangerous') {
+      console.warn(`[safe-browsing] cadre signalé (${decision.threat}) bloqué`);
+      return true;
+    }
+    return false;
+  }
+
+  /** Retour en lieu sûr : page précédente du site (pas la page d'avertissement), sinon l'onglet est fermé. */
+  function leaveSafeBrowsingWarning(tabId) {
+    const entry = tabs.get(tabId);
+    if (!entry) return;
+    const wc = entry.view.webContents;
+    const history = wc.navigationHistory;
+    if (history && typeof history.getActiveIndex === 'function') {
+      for (let index = history.getActiveIndex() - 1; index >= 0; index -= 1) {
+        const item = history.getEntryAtIndex(index);
+        const url = item && sanitizeBrowserUrl(item.url);
+        if (!url || (safeBrowsing && safeBrowsing.classify(url).verdict === 'dangerous')) continue;
+        entry.errorPage = null;
+        entry.url = url;
+        history.goToIndex(index);
+        return;
+      }
+    }
+    // Rien avant (onglet ouvert pour ce lien) : fermé, le portail revient à l'onglet d'origine.
+    destroyTab(tabId);
+    emitToRenderer(CLOSED_CHANNEL, { tabId });
+  }
+
+  /** Clic sur la page d'avertissement (`#proceed-<jeton>` / `#back-<jeton>`). */
+  function handleSafeBrowsingGesture(tabId, url) {
+    const entry = tabs.get(tabId);
+    if (!entry) return false;
+    const gesture = safeBrowsingGesture(url, entry.errorPage);
+    if (!gesture) return false;
+    const blocked = entry.errorPage.url;
+    if (gesture === 'proceed' && safeBrowsing) {
+      // « Continuer vers ce site » : retenu pour ce site jusqu'à la fin de la session.
+      safeBrowsing.allowForSession(blocked);
+      navigate({ tabId, url: blocked });
+    } else {
+      leaveSafeBrowsingWarning(tabId);
+    }
+    return true;
+  }
+
+  function setSafeBrowsingTexts({ texts } = {}) {
+    safeBrowsingTexts = cleanSafeBrowsingTexts(texts);
+    return { ok: true };
+  }
+
   /** Page bloquée (« ne répond pas ») : Attendre ou Quitter la page, comme Chrome. */
   function promptUnresponsive(tabId) {
     const entry = tabs.get(tabId);
@@ -852,6 +971,45 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       if (!safe) {
         event.preventDefault();
         launchExternalApp(url);
+        return;
+      }
+      // Redirection vers un site dangereux (docs/safe-browsing.md).
+      if (event.isMainFrame === false) {
+        if (guardSubframeNavigation(safe)) event.preventDefault();
+        return;
+      }
+      if (guardMainNavigation(tabId, safe, () => !wc.isDestroyed() && void wc.loadURL(safe))) {
+        event.preventDefault();
+      }
+    });
+
+    // Lien suivi, formulaire envoyé ou script de la page, cadre principal et sous-cadres.
+    wc.on('will-frame-navigate', (event) => {
+      const url = event.url;
+      if (!sanitizeBrowserUrl(url)) return;
+      if (!event.isMainFrame) {
+        if (guardSubframeNavigation(url)) event.preventDefault();
+        return;
+      }
+      if (guardMainNavigation(tabId, url, () => !wc.isDestroyed() && void wc.loadURL(url))) {
+        event.preventDefault();
+      }
+    });
+
+    // Précédent / Suivant / Actualiser ne passent pas par les événements ci-dessus : arrêtés ici.
+    wc.on('did-start-navigation', (event) => {
+      if (!safeBrowsing || !event.isMainFrame || event.isSameDocument) return;
+      const url = sanitizeBrowserUrl(event.url);
+      const entry = tabs.get(tabId);
+      if (!url || !entry || !isCurrentTabView(tabs, tabId, view) || entry.pendingSafeCheck) return;
+      const decision = safeBrowsing.classify(url);
+      if (decision.verdict === 'dangerous') {
+        showSafeBrowsingWarning(tabId, url, decision.threat);
+      } else if (decision.verdict === 'check') {
+        void safeBrowsing.check(url).then((result) => {
+          if (result.verdict !== 'dangerous' || !isCurrentTabView(tabs, tabId, view)) return;
+          if (sanitizeBrowserUrl(wc.getURL()) === url || wc.isLoading()) showSafeBrowsingWarning(tabId, url, result.threat);
+        });
       }
     });
 
@@ -874,12 +1032,22 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       const entry = tabs.get(tabId);
       // Un vrai site s'affiche de nouveau : la page d'erreur est terminée.
       if (entry && entry.errorPage && sanitizeBrowserUrl(url)) entry.errorPage = null;
+      // Retour (Précédent) sur une page « Site dangereux » restée dans l'historique : elle reprend
+      // son site et ses boutons.
+      if (entry && !entry.errorPage) {
+        const restored = safeBrowsingPageFromUrl(url);
+        if (restored) {
+          entry.errorPage = restored;
+          entry.url = restored.url;
+        }
+      }
       passwords.onNavigate(tabId, url);
       formAutofill.onNavigate(tabId, url);
       historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
     });
     wc.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+      if (isMainFrame && handleSafeBrowsingGesture(tabId, url)) return;
       if (isMainFrame) historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
     });
@@ -1159,6 +1327,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     const view = new WebContentsView({ webPreferences: browserTabWebPreferences() });
     view.setBackgroundColor('#ffffff');
     const entry = {
+      tabId,
       view,
       url: initialUrl,
       title: '',
@@ -1198,7 +1367,12 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       if (!applied) console.warn(`[browser-tabs] chrome identity not applied after ${Date.now() - startedAt} ms`);
     } finally {
       entry.identityPending = false;
-      if (!wc.isDestroyed() && !entry.abortedBlank) void wc.loadURL(entry.url);
+      if (!wc.isDestroyed() && !entry.abortedBlank) {
+        const load = () => {
+          if (!wc.isDestroyed()) void wc.loadURL(entry.url);
+        };
+        if (!guardMainNavigation(entry.tabId, entry.url, load)) load();
+      }
     }
   }
 
@@ -1266,7 +1440,14 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     entry.url = safe;
     entry.abortedBlank = false;
     entry.errorPage = null;
-    if (!entry.identityPending) void entry.view.webContents.loadURL(safe);
+    entry.pendingSafeCheck = null;
+    if (!entry.identityPending) {
+      const wc = entry.view.webContents;
+      const load = () => {
+        if (!wc.isDestroyed()) void wc.loadURL(safe);
+      };
+      if (!guardMainNavigation(tabId, safe, load)) load();
+    }
     if (viewsVisible && activeTabId === tabId) {
       entry.view.setVisible(!overlayActive);
       applyBounds(entry.view);
@@ -1601,6 +1782,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
       origin,
       host: siteHost(origin),
       security: state.security,
+      threat: state.threat,
       permissions: describeSitePermissions(sitePermissions, origin),
     };
   }
@@ -1896,6 +2078,7 @@ function createBrowserTabManager({ getMainWindow, history, interceptLink, search
     goForward,
     reload,
     setMuted,
+    setSafeBrowsingTexts,
     stop,
     setBounds,
     getState,
