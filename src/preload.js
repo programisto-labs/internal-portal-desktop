@@ -88,6 +88,8 @@ const browserTabsBridge = {
   reload: (payload) => invokeBrowserTab('browser-tab-reload', payload),
   /** `{ tabId, muted }` : couper ou réactiver le son de l'onglet web. */
   setMuted: (payload) => invokeBrowserTab('browser-tab-set-muted', payload),
+  /** `{ tabId, pinnedUrl }` : onglet web épinglé, `pinnedUrl: null` = détaché (docs/pinned-tabs.md). */
+  setPinned: (payload) => invokeBrowserTab('browser-tab-set-pinned', payload),
   /** Textes de la page « Site dangereux » dans la langue de la personne (docs/safe-browsing.md). */
   setSafeBrowsingTexts: (texts) => invokeBrowserTab('browser-tab-set-safe-browsing-texts', { texts }),
   stop: (payload) => invokeBrowserTab('browser-tab-stop', payload),

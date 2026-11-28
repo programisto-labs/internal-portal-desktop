@@ -51,6 +51,7 @@ const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-au
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
 const { capturePageImage } = require('./page-capture');
+const { isPinnedCrossSiteNavigation, normalizePinnedUrl } = require('./pinned');
 const { createSiteZoomStore, nextZoomFactor, zoomSiteOf } = require('./site-zoom');
 const {
   PAGE_SLEEP_PROBE_SCRIPT,
@@ -427,6 +428,8 @@ function createBrowserTabManager({
    * l'identique. tabId → { url, title, favicon, entries, index, scroll, zoomFactor, muted, sleptAt }.
    */
   const sleepingTabs = new Map();
+  /** tabId → adresse à l'épinglage (onglets web épinglés). */
+  const pinnedUrls = new Map();
   let sleepTimer = null;
 
   const passwords = createPasswordController({
@@ -2056,6 +2059,20 @@ function createBrowserTabManager({
     return { ok: true };
   }
 
+  /**
+   * Onglet web épinglé (docs/pinned-tabs.md) : `{ tabId, pinned, pinnedUrl }`, `pinnedUrl` = adresse à
+   * l'épinglage. `pinned: false` (ou `pinnedUrl: null` sans `pinned`) le détache. Gardé hors de
+   * l'entrée de l'onglet : il survit à la veille et à la recréation de la vue. Même appel que la garde
+   * de l'économiseur de mémoire (`pinned`, perf/many-tabs) : à fusionner dans une seule fonction.
+   */
+  function setPinned({ tabId, pinned, pinnedUrl } = {}) {
+    if (typeof tabId !== 'string' || !tabId || tabId.length > 200) return { ok: false, error: 'invalid-tab' };
+    const url = pinned === false ? null : normalizePinnedUrl(pinnedUrl);
+    if (url) pinnedUrls.set(tabId, url);
+    else pinnedUrls.delete(tabId);
+    return { ok: true, tabId, pinned: pinned === true || Boolean(url) };
+  }
+
   /** Couper ou réactiver le son d'un onglet (icône haut-parleur, clic droit). */
   function setMuted({ tabId, muted }) {
     const slept = sleepingTabs.get(tabId);
@@ -2738,6 +2755,7 @@ function createBrowserTabManager({
     goForward,
     reload,
     setMuted,
+    setPinned,
     setSafeBrowsingTexts,
     stop,
     setBounds,
