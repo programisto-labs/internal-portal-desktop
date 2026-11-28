@@ -40,7 +40,7 @@
   "devDependencies": {
     "@electron/fuses": "^1.8.0",
     "@electron/osx-sign": "^2.3.0",
-    "electron": "^44.11.6",
+    "electron": "^45.5.0",
     "electron-builder": "^25.0.0",
     "sharp": "^0.34.5"
   },
@@ -158,7 +158,7 @@
     "adm-zip": "0.5.16",
     "electron-chrome-extensions": "4.10.0",
     "electron-chrome-web-store": "0.13.0",
-    "electron-updater": "^6.8.3",
+    "electron-updater": "^6.8.11",
     "node-pty": "^1.1.0"
   }
 }
