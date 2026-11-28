@@ -1180,6 +1180,8 @@ function tabManagerFor(win) {
       safeBrowsing: getSafeBrowsing(),
       // Économiseur de mémoire (docs/tab-sleep.md). Coupé en mode VM (onglets pilotés par le point de contrôle).
       getTabSleepSettings: () => (VM_MODE ? null : getSettings()),
+      // Incrustation automatique (docs/picture-in-picture.md). Coupée en mode VM.
+      getPictureInPictureAuto: () => !VM_MODE && getSettings().pictureInPictureAuto !== false,
     });
   }
   return entry.tabManager;
@@ -2746,6 +2748,7 @@ function registerWindowIPC() {
         backgroundAvailable: Boolean(trayController),
         keepInBackground: settings.keepInBackground,
         safeBrowsingEnabled: settings.safeBrowsingEnabled !== false,
+        pictureInPictureAuto: settings.pictureInPictureAuto !== false,
         loginItem: loginItemSnapshot(),
         shortcuts: shortcutsSnapshot(),
       },
@@ -2798,6 +2801,12 @@ function registerWindowIPC() {
     if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
     getSettingsStore().set({ safeBrowsingEnabled: enabled });
     if (enabled) void getSafeBrowsing().update();
+    return true;
+  });
+  // Réglages > Général > Incrustation automatique (docs/picture-in-picture.md).
+  ipcMain.handle('settings-modal-set-pip-auto', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
+    getSettingsStore().set({ pictureInPictureAuto: enabled });
     return true;
   });
   ipcMain.handle('settings-modal-set-open-at-login', (event, enabled) => {
@@ -3191,6 +3200,9 @@ function registerWindowIPC() {
     'browser-tab-set-agent-control': 'setAgentControl',
     // Économiseur de mémoire (docs/tab-sleep.md) : mettre un onglet en veille tout de suite.
     'browser-tab-sleep': 'sleep',
+    // Incrustation vidéo et fenêtre d'appel (docs/picture-in-picture.md).
+    'browser-tab-picture-in-picture': 'pictureInPicture',
+    'browser-tab-set-pip-texts': 'setPictureInPictureTexts',
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {

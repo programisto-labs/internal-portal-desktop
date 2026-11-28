@@ -36,6 +36,18 @@ const {
   safeBrowsingPageFromUrl,
 } = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
+const {
+  PIP_WORLD_ID,
+  PAGE_MEDIA_PROBE_SCRIPT,
+  VIDEO_PIP_EXIT_SCRIPT,
+  CALL_CONTROLS,
+  callControlScript,
+  videoPipEnterScript,
+  isInCall,
+  autoPipKind,
+  floatControlsState,
+  normalizePipTexts,
+} = require('./picture-in-picture');
 const { createHistoryStore } = require('./history');
 const { createAdblockService } = require('./adblock');
 const { applyChromeIdentity, chromeUserAgentOverride, installClientHintHeaders } = require('./chrome-identity');
@@ -351,6 +363,8 @@ function createBrowserTabManager({
   interceptLink,
   searchEngines,
   getTabSleepSettings,
+  // Incrustation automatique (docs/picture-in-picture.md) : vrai si activée dans les Réglages.
+  getPictureInPictureAuto = null,
   safeBrowsing = null,
   partition = BROWSER_PARTITION,
   privateMode = false,
@@ -615,6 +629,10 @@ function createBrowserTabManager({
       muted: wc.isAudioMuted(),
       // Bloqueur (docs/adblock.md) : actif sur cette page, requêtes bloquées depuis son chargement.
       adblock: { active: adblock.isActiveFor(url), blocked: entry.adblockBlocked || 0 },
+      // Incrustation (docs/picture-in-picture.md) : appel en cours, vidéo incrustable, incrustation ouverte.
+      inCall: Boolean(entry.inCall),
+      canPictureInPicture: Boolean(entry.inCall || (entry.mediaProbe && entry.mediaProbe.video)),
+      pictureInPicture: pictureInPictureOf(tabId, entry),
       // Mis en veille pour libérer la mémoire (lune sur l'onglet) : voir sleepingState.
       discarded: false,
     };
@@ -640,6 +658,9 @@ function createBrowserTabManager({
       agentControlled: false,
       audible: false,
       muted: Boolean(slept.muted),
+      inCall: false,
+      canPictureInPicture: false,
+      pictureInPicture: null,
       discarded: true,
       sleptAt: slept.sleptAt,
       adblock: { active: adblock.isActiveFor(slept.url), blocked: 0 },
@@ -673,7 +694,7 @@ function createBrowserTabManager({
   }
 
   function applyBounds(view) {
-    if (!view) return;
+    if (!view || isFloatingView(view)) return;
     const fullscreenEntry = entryOfView(view);
     if (fullscreenEntry && fullscreenEntry.htmlFullscreen) {
       const full = fullWindowBounds();
@@ -727,7 +748,7 @@ function createBrowserTabManager({
 
   function attachView(view) {
     const win = getMainWindow();
-    if (!win || win.isDestroyed()) return;
+    if (!win || win.isDestroyed() || isFloatingView(view)) return;
     try {
       // Mode responsive : le fond gris passe juste sous la vue.
       const responsive = entryOfView(view)?.responsive;
@@ -743,6 +764,10 @@ function createBrowserTabManager({
   function destroyTab(tabId) {
     const entry = tabs.get(tabId);
     if (!entry) return;
+    if (floating && floating.tabId === tabId) {
+      closeFloat({ restore: false });
+      unpinView(entry.view);
+    }
     tabs.delete(tabId);
     agentControlled.delete(tabId);
     passwords.forgetTab(tabId);
@@ -1075,6 +1100,7 @@ function createBrowserTabManager({
       if (entry && entry.view === view) entry.adblockBlocked = 0;
     });
     registerResponsiveRoute(webContentsId, (message) => handleResponsiveMessage(tabId, message));
+    wirePictureInPicture(tabId, view);
     wc.once('destroyed', () => unregisterResponsiveRoute(webContentsId));
     // Comme le mode appareil de Chrome : fermer les DevTools rend la page à tout l'onglet.
     wc.on('devtools-closed', () => {
@@ -1416,6 +1442,20 @@ function createBrowserTabManager({
           separator,
         );
       }
+      // Image dans l'image (docs/picture-in-picture.md), même pour une vidéo `blob:` (YouTube).
+      if (params.mediaType === 'video' && !(params.mediaFlags && params.mediaFlags.canShowPictureInPicture === false)) {
+        const showing = Boolean(params.mediaFlags && params.mediaFlags.isShowingPictureInPicture);
+        template.push(
+          {
+            label: showing ? "Quitter l'image dans l'image" : "Image dans l'image",
+            click: () => {
+              if (showing) void exitVideoPip(tabId);
+              else void enterVideoPip(tabId, { point: { x: params.x, y: params.y } });
+            },
+          },
+          ...(sanitizeBrowserUrl(params.srcURL) ? [] : [separator]),
+        );
+      }
       if ((params.mediaType === 'video' || params.mediaType === 'audio') && sanitizeBrowserUrl(params.srcURL)) {
         const video = params.mediaType === 'video';
         template.push(
@@ -1650,6 +1690,366 @@ function createBrowserTabManager({
     if (slept.zoomFactor && slept.zoomFactor !== 1 && !wc.isDestroyed()) wc.setZoomFactor(slept.zoomFactor);
   }
 
+  // --- Incrustation vidéo et fenêtre d'appel (docs/picture-in-picture.md) ---
+
+  /** Fenêtre flottante ouverte (une à la fois) : `{ tabId, float, kind, source }`, source auto-tab | auto-app | manual. */
+  let floating = null;
+  let pipTexts = normalizePipTexts(null);
+  let pipTimer = null;
+  let pipWindowListenersFor = null;
+  /** Onglets dont l'incrustation vidéo a été ouverte par Lasco (refermée au retour), et pourquoi. */
+  const autoVideoPip = new Map();
+
+  function isFloatingView(view) {
+    return Boolean(floating && view && tabs.get(floating.tabId) && tabs.get(floating.tabId).view === view);
+  }
+
+  function pictureInPictureOf(tabId, entry) {
+    if (floating && floating.tabId === tabId) return 'call';
+    return entry && entry.mediaProbe && entry.mediaProbe.videoPip ? 'video' : null;
+  }
+
+  function pipAutoEnabled() {
+    try {
+      return typeof getPictureInPictureAuto === 'function' ? getPictureInPictureAuto() !== false : true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  async function probeMedia(tabId) {
+    const entry = tabs.get(tabId);
+    if (!entry) return null;
+    const wc = entry.view.webContents;
+    if (wc.isDestroyed() || entry.errorPage) return null;
+    let probe = null;
+    try {
+      probe = await withTimeout(
+        wc.executeJavaScriptInIsolatedWorld(PIP_WORLD_ID, [{ code: PAGE_MEDIA_PROBE_SCRIPT }]),
+        SLEEP_PROBE_TIMEOUT_MS,
+      );
+    } catch (_) {
+      probe = null;
+    }
+    if (tabs.get(tabId) !== entry || wc.isDestroyed()) return null;
+    const before = `${Boolean(entry.inCall)}|${Boolean(entry.mediaProbe && entry.mediaProbe.video)}|${pictureInPictureOf(tabId, entry)}`;
+    entry.mediaProbe = probe && typeof probe === 'object' ? probe : null;
+    entry.inCall = isInCall({ capturingMedia: mediaCapturingWebContents.has(wc.id), probe: entry.mediaProbe });
+    const after = `${Boolean(entry.inCall)}|${Boolean(entry.mediaProbe && entry.mediaProbe.video)}|${pictureInPictureOf(tabId, entry)}`;
+    if (!entry.mediaProbe || !entry.mediaProbe.videoPip) autoVideoPip.delete(tabId);
+    if (floating && floating.tabId === tabId) {
+      floating.float.update({ title: wc.getTitle() || entry.title || '', controls: floatControlsState(entry.mediaProbe) });
+      // Appel terminé dans la page (raccroché ailleurs) : l'incrustation se ferme d'elle-même.
+      if (floating.kind === 'call' && !entry.inCall) {
+        entry.callEndedProbes = (entry.callEndedProbes || 0) + 1;
+        if (entry.callEndedProbes >= 2) closeFloat({ restore: true });
+      } else {
+        entry.callEndedProbes = 0;
+      }
+    }
+    if (before !== after) pushState(tabId);
+    return entry.mediaProbe;
+  }
+
+  /** Relevé toutes les 2 s des onglets qui ont le micro / la caméra, une lecture en cours, ou sont incrustés. */
+  function ensurePipTimer() {
+    if (pipTimer) return;
+    pipTimer = setInterval(() => {
+      if (tabs.size === 0) {
+        clearInterval(pipTimer);
+        pipTimer = null;
+        return;
+      }
+      for (const [tabId, entry] of tabs) {
+        const wc = entry.view.webContents;
+        if (wc.isDestroyed()) continue;
+        const watched = mediaCapturingWebContents.has(wc.id) || entry.mediaPlaying || entry.inCall
+          || (entry.mediaProbe && entry.mediaProbe.videoPip) || (floating && floating.tabId === tabId);
+        if (watched) void probeMedia(tabId);
+      }
+    }, 2000);
+    if (pipTimer.unref) pipTimer.unref();
+  }
+
+  function wirePictureInPicture(tabId, view) {
+    const wc = view.webContents;
+    const current = () => {
+      const entry = tabs.get(tabId);
+      return entry && entry.view === view ? entry : null;
+    };
+    wc.on('media-started-playing', () => {
+      const entry = current();
+      if (!entry) return;
+      entry.mediaPlaying = true;
+      setTimeout(() => void probeMedia(tabId), 400);
+    });
+    wc.on('media-paused', () => {
+      const entry = current();
+      if (!entry) return;
+      entry.mediaPlaying = false;
+      void probeMedia(tabId);
+    });
+    wc.on('did-start-navigation', (details) => {
+      if (!details || !details.isMainFrame || details.isSameDocument) return;
+      const entry = current();
+      if (!entry) return;
+      entry.mediaPlaying = false;
+      entry.mediaProbe = null;
+      entry.inCall = false;
+      entry.pipDismissed = false;
+      autoVideoPip.delete(tabId);
+      if (floating && floating.tabId === tabId) closeFloat({ restore: true });
+    });
+    ensurePipTimer();
+    ensurePipWindowListeners();
+  }
+
+  async function enterVideoPip(tabId, { point = null, auto = null } = {}) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    let result = null;
+    try {
+      // Geste utilisateur simulé : la page n'a pas à avoir appelé `requestPictureInPicture` elle-même.
+      result = await withTimeout(wc.executeJavaScript(videoPipEnterScript(point), true), SLEEP_PROBE_TIMEOUT_MS);
+    } catch (_) {
+      result = null;
+    }
+    if (result && result.ok && auto) autoVideoPip.set(tabId, auto);
+    await probeMedia(tabId);
+    return result && result.ok ? { ok: true, pictureInPicture: 'video' } : { ok: false, error: (result && result.error) || 'failed' };
+  }
+
+  async function exitVideoPip(tabId) {
+    const entry = tabs.get(tabId);
+    autoVideoPip.delete(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+    try {
+      await withTimeout(entry.view.webContents.executeJavaScript(VIDEO_PIP_EXIT_SCRIPT, true), SLEEP_PROBE_TIMEOUT_MS);
+    } catch (_) {
+      // Page occupée : Chromium ferme l'incrustation à la navigation.
+    }
+    await probeMedia(tabId);
+    return { ok: true, pictureInPicture: null };
+  }
+
+  /** Déplace la vue de l'onglet dans la fenêtre flottante. */
+  function openFloat(tabId, { source }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    if (floating && floating.tabId === tabId) return { ok: true, pictureInPicture: 'call' };
+    if (floating) closeFloat({ restore: true });
+    const { createCallFloat } = require('./call-float');
+    const view = entry.view;
+    exitPageFullscreen(entry);
+    detachView(view);
+    const record = { tabId, kind: 'call', source, float: null };
+    floating = record;
+    // Tant qu'elle est dans la fenêtre flottante, la vue ne suit plus la fenêtre du portail (sélection d'un
+    // autre onglet, menus de la coquille, redimensionnement) : seule la fenêtre flottante la place.
+    pinViewToFloat(view);
+    try {
+      record.float = createCallFloat({
+        view,
+        parentWindow: getMainWindow(),
+        onAction: (action) => void handleFloatAction(tabId, action),
+        onClosed: () => {
+          // Fermée par le système (fin de l'app, ⌘W) : la vue revient dans la fenêtre du portail.
+          if (floating === record) {
+            floating = null;
+            restoreViewAfterFloat(tabId);
+          }
+        },
+      });
+    } catch (error) {
+      floating = null;
+      restoreViewAfterFloat(tabId);
+      return { ok: false, error: error instanceof Error ? error.message : 'float-failed' };
+    }
+    const wc = view.webContents;
+    record.float.update({
+      kind: 'call',
+      title: wc.getTitle() || entry.title || '',
+      controls: floatControlsState(entry.mediaProbe),
+      texts: pipTexts,
+    });
+    record.float.show();
+    pushState(tabId);
+    void probeMedia(tabId);
+    return { ok: true, pictureInPicture: 'call' };
+  }
+
+  function pinViewToFloat(view) {
+    view.setVisible = () => {};
+    view.setBounds = () => {};
+  }
+
+  function unpinView(view) {
+    delete view.setVisible;
+    delete view.setBounds;
+  }
+
+  /** Remet la vue dans la fenêtre du portail : affichée si c'est l'onglet sélectionné, sinon cachée. */
+  function restoreViewAfterFloat(tabId) {
+    const entry = tabs.get(tabId);
+    if (!entry) return;
+    unpinView(entry.view);
+    if (entry.view.webContents.isDestroyed()) return;
+    if (viewsVisible && activeTabId === tabId) {
+      attachView(entry.view);
+      applyBounds(entry.view);
+    } else {
+      entry.view.setVisible(false);
+    }
+    pushState(tabId);
+  }
+
+  function closeFloat({ restore = true } = {}) {
+    const record = floating;
+    if (!record) return;
+    floating = null;
+    try {
+      if (record.float) record.float.close();
+    } catch (_) {
+      // Fenêtre déjà fermée.
+    }
+    if (restore) restoreViewAfterFloat(record.tabId);
+  }
+
+  function focusTabInPortal(tabId) {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    // Le portail sélectionne l'onglet (même message que la recherche dans les onglets, docs/tab-windows.md).
+    win.webContents.send('tab-window-tab-action', { tabId, action: 'select' });
+  }
+
+  async function handleFloatAction(tabId, action) {
+    if (action === 'back') {
+      closeFloat({ restore: true });
+      focusTabInPortal(tabId);
+      return;
+    }
+    if (action === 'close') {
+      const entry = tabs.get(tabId);
+      // Fermée à la main : plus d'incrustation automatique pour cet onglet jusqu'à ce qu'on y revienne.
+      if (entry) entry.pipDismissed = true;
+      closeFloat({ restore: true });
+      return;
+    }
+    if (!CALL_CONTROLS.includes(action)) return;
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return;
+    try {
+      await withTimeout(
+        entry.view.webContents.executeJavaScriptInIsolatedWorld(PIP_WORLD_ID, [{ code: callControlScript(action) }]),
+        SLEEP_PROBE_TIMEOUT_MS,
+      );
+    } catch (_) {
+      // Bouton absent ou page occupée : le relevé suivant remet la barre à jour.
+    }
+    if (action === 'hangup') {
+      closeFloat({ restore: true });
+      return;
+    }
+    setTimeout(() => void probeMedia(tabId), 300);
+  }
+
+  /**
+   * Incrustation automatique d'un onglet qu'on quitte (`reason` : tab = autre onglet ou page du portail,
+   * app = autre application). Appel : fenêtre flottante ; vidéo avec du son : incrustation de la vidéo.
+   */
+  async function autoPictureInPicture(tabId, reason) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.pipDismissed || entry.view.webContents.isDestroyed()) return;
+    if (!pipAutoEnabled()) return;
+    const probe = await probeMedia(tabId);
+    if (!tabs.get(tabId)) return;
+    // Revenu entre-temps (aller-retour rapide) : rien à faire.
+    if (reason === 'tab' && viewsVisible && activeTabId === tabId) return;
+    if (reason === 'app' && !appInBackground()) return;
+    const wc = entry.view.webContents;
+    const kind = autoPipKind({
+      enabled: true,
+      inCall: entry.inCall,
+      probe,
+      audible: !wc.isDestroyed() && wc.isCurrentlyAudible() && !wc.isAudioMuted(),
+      alreadyFloating: Boolean(floating && floating.tabId === tabId),
+    });
+    if (kind === 'call') openFloat(tabId, { source: reason === 'app' ? 'auto-app' : 'auto-tab' });
+    else if (kind === 'video') await enterVideoPip(tabId, { auto: reason });
+  }
+
+  /** Retour sur l'onglet (sélection) : la fenêtre flottante et l'incrustation vidéo automatiques se ferment. */
+  function returnFromPictureInPicture(tabId) {
+    const entry = tabs.get(tabId);
+    if (entry) entry.pipDismissed = false;
+    if (floating && floating.tabId === tabId) {
+      closeFloat({ restore: false });
+      if (entry) unpinView(entry.view);
+    }
+    if (autoVideoPip.has(tabId)) void exitVideoPip(tabId);
+  }
+
+  /** Aucune fenêtre de Lasco n'a le focus : la personne est dans une autre application. */
+  function appInBackground() {
+    const focused = BrowserWindow.getFocusedWindow();
+    return !focused;
+  }
+
+  function ensurePipWindowListeners() {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed() || pipWindowListenersFor === win) return;
+    pipWindowListenersFor = win;
+    const leaveApp = () => {
+      // Le focus passe parfois par une autre fenêtre de Lasco (incrustation, Réglages) : on attend un peu.
+      setTimeout(() => {
+        const shown = shownTabId();
+        if (shown && !win.isDestroyed() && appInBackground()) void autoPictureInPicture(shown, 'app');
+      }, 250);
+    };
+    win.on('blur', leaveApp);
+    win.on('minimize', () => {
+      const shown = shownTabId();
+      if (shown) void autoPictureInPicture(shown, 'app');
+    });
+    win.on('focus', () => {
+      // Retour dans Lasco : ce qui a été incrusté parce qu'on était parti dans une autre app revient.
+      if (floating && floating.source === 'auto-app') closeFloat({ restore: true });
+      for (const [tabId, reason] of autoVideoPip) {
+        if (reason === 'app' && tabId === shownTabId()) void exitVideoPip(tabId);
+      }
+    });
+  }
+
+  /**
+   * Bouton du portail et menu : `{ tabId, action?: 'toggle' | 'enter' | 'exit' }`. Appel en cours :
+   * fenêtre flottante ; sinon incrustation de la plus grande vidéo qui lit.
+   */
+  async function pictureInPicture({ tabId, action = 'toggle' } = {}) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    if (!['toggle', 'enter', 'exit'].includes(action)) return { ok: false, error: 'invalid-action' };
+    const current = pictureInPictureOf(tabId, entry);
+    if (action === 'exit' || (action === 'toggle' && current)) {
+      if (current === 'call') closeFloat({ restore: true });
+      else if (current === 'video') await exitVideoPip(tabId);
+      return { ok: true, pictureInPicture: null };
+    }
+    if (current) return { ok: true, pictureInPicture: current };
+    await probeMedia(tabId);
+    if (entry.inCall) return openFloat(tabId, { source: 'manual' });
+    return enterVideoPip(tabId);
+  }
+
+  function setPictureInPictureTexts({ texts } = {}) {
+    pipTexts = normalizePipTexts(texts);
+    if (floating) floating.float.update({ texts: pipTexts });
+    return { ok: true };
+  }
+
   // --- Mise en veille des onglets (docs/tab-sleep.md) ---
 
   function tabSleepDelayMs() {
@@ -1700,7 +2100,9 @@ function createBrowserTabManager({
       hasOpener: Boolean(entry.hasOpener),
       devToolsOpened: !wc.isDestroyed() && wc.isDevToolsOpened(),
       loading: wc.isDestroyed() || wc.isLoading() || Boolean(entry.identityPending) || Boolean(entry.errorPage),
-      capturingMedia: mediaCapturingWebContents.has(wc.id),
+      capturingMedia: mediaCapturingWebContents.has(wc.id) || Boolean(entry.inCall),
+      // En incrustation (fenêtre flottante ou vidéo) : jamais en veille.
+      pictureInPicture: Boolean(pictureInPictureOf(tabId, entry)),
       discarded: false,
     };
   }
@@ -1760,6 +2162,11 @@ function createBrowserTabManager({
         if (blocker) return { ok: false, error: blocker };
       } else if (tabId === shownTabId()) {
         return { ok: false, error: 'active' };
+      } else {
+        // Même à la demande : jamais un onglet en appel ou en incrustation (docs/picture-in-picture.md).
+        const candidate = sleepCandidate(tabId, entry);
+        if (candidate.capturingMedia) return { ok: false, error: 'media' };
+        if (candidate.pictureInPicture) return { ok: false, error: 'picture-in-picture' };
       }
       const history = wc.navigationHistory;
       let entries = [];
@@ -1920,6 +2327,9 @@ function createBrowserTabManager({
       return { ok: false, error: 'unknown-tab' };
     }
     if (activeTabId !== tabId) hideFieldPopovers();
+    const leaving = viewsVisible && activeTabId !== tabId ? activeTabId : null;
+    // Retour sur l'onglet incrusté : la vue revient dans la fenêtre (avant la boucle qui l'attache).
+    returnFromPictureInPicture(tabId);
     activeTabId = tabId;
     viewsVisible = true;
     overlayActive = false;
@@ -1939,11 +2349,13 @@ function createBrowserTabManager({
       }
     }
     pushState(tabId);
+    if (leaving) void autoPictureInPicture(leaving, 'tab');
     return { ok: true, tabId };
   }
 
   function hide() {
     hideFieldPopovers();
+    const leaving = viewsVisible ? activeTabId : null;
     viewsVisible = false;
     activeTabId = null;
     const now = Date.now();
@@ -1953,6 +2365,8 @@ function createBrowserTabManager({
       entry.view.setVisible(false);
       detachView(entry.view);
     }
+    // Une page du portail prend la place de l'onglet : comme un changement d'onglet.
+    if (leaving) void autoPictureInPicture(leaving, 'tab');
     return { ok: true };
   }
 
@@ -2709,6 +3123,9 @@ function createBrowserTabManager({
       return entry && !entry.view.webContents.isDestroyed() ? entry.view.webContents : null;
     },
     stateOf: (tabId) => buildState(tabId),
+    // Incrustation vidéo et fenêtre d'appel (docs/picture-in-picture.md).
+    pictureInPicture,
+    setPictureInPictureTexts,
     /** Mise en veille (docs/tab-sleep.md) : `sleep` met un onglet en veille tout de suite (menu, tests). */
     sleep: ({ tabId } = {}) => sleepTab(tabId, { force: true }),
     isSleeping: (tabId) => sleepingTabs.has(tabId),

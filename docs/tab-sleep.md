@@ -27,7 +27,8 @@ quand il est caché depuis le délai, **sauf** :
 - un onglet qui joue du son, en plein écran, piloté par un agent (`setAgentControl`), avec les
   outils de développement ouverts, en cours de chargement ou sur une page d'erreur de Lasco ;
 - une page qui a reçu le micro ou la caméra (appel en cours, même silencieux), jusqu'à sa
-  navigation suivante ;
+  navigation suivante ; un onglet en incrustation (vidéo ou fenêtre d'appel, docs/picture-in-picture.md).
+  Ces deux règles valent aussi pour `sleep.now` ;
 - une fenêtre ouverte par une page (`window.open` adoptée, docs/popups.md) : la détruire
   couperait `opener` (connexion OAuth) ;
 - un site de `tabSleepNeverSites` ; une page qui n'est pas en http(s) ;

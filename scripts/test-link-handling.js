@@ -4,7 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeSettings, createSettingsStore, extractPortalTarget } = require('../src/link-handling');
 const { DEFAULT_SHORTCUTS } = require('../src/background-mode');
-const BASE = { keepInBackground: true, backgroundHintShown: false, downloadsDirectory: null, downloadsAskWhere: false, tabSleepMinutes: 30, tabSleepNeverSites: [], safeBrowsingEnabled: true, shortcuts: { ...DEFAULT_SHORTCUTS } };
+const BASE = { keepInBackground: true, backgroundHintShown: false, downloadsDirectory: null, downloadsAskWhere: false, tabSleepMinutes: 30, tabSleepNeverSites: [], safeBrowsingEnabled: true, pictureInPictureAuto: true, shortcuts: { ...DEFAULT_SHORTCUTS } };
 
 const isPortal = (u) => new URL(u).hostname === 'app.lascoapp.com';
 

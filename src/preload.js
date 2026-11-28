@@ -137,6 +137,13 @@ const browserTabsBridge = {
     /** `{ tabId }` : met l'onglet en veille tout de suite (hors onglet affiché). */
     now: (payload) => invokeBrowserTab('browser-tab-sleep', payload),
   },
+  /**
+   * Incrustation (docs/picture-in-picture.md) : `{ tabId, action?: 'toggle' | 'enter' | 'exit' }`. Appel en
+   * cours : fenêtre flottante de Lasco ; sinon la vidéo qui lit. `→ { ok, pictureInPicture }`.
+   */
+  pictureInPicture: (payload) => invokeBrowserTab('browser-tab-picture-in-picture', payload),
+  /** `{ texts }` : textes de la fenêtre flottante dans la langue de la personne. */
+  setPictureInPictureTexts: (payload) => invokeBrowserTab('browser-tab-set-pip-texts', payload),
   setOverlay: (payload) => invokeBrowserTab('browser-tab-set-overlay', payload),
   showTabContextMenu: (payload) => invokeBrowserTab('browser-tab-show-context-menu', payload),
   onTabContextMenuAction: (callback) => subscribe('browser-tab-context-menu-action', callback),
