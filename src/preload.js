@@ -88,6 +88,8 @@ const browserTabsBridge = {
   reload: (payload) => invokeBrowserTab('browser-tab-reload', payload),
   /** `{ tabId, muted }` : couper ou réactiver le son de l'onglet web. */
   setMuted: (payload) => invokeBrowserTab('browser-tab-set-muted', payload),
+  /** `{ tabId, pinnedUrl }` : onglet web épinglé, `pinnedUrl: null` = détaché (docs/pinned-tabs.md). */
+  setPinned: (payload) => invokeBrowserTab('browser-tab-set-pinned', payload),
   /** Textes de la page « Site dangereux » dans la langue de la personne (docs/safe-browsing.md). */
   setSafeBrowsingTexts: (texts) => invokeBrowserTab('browser-tab-set-safe-browsing-texts', { texts }),
   stop: (payload) => invokeBrowserTab('browser-tab-stop', payload),
@@ -97,6 +99,13 @@ const browserTabsBridge = {
   findInPage: (payload) => invokeBrowserTab('browser-tab-find', payload),
   stopFindInPage: (payload) => invokeBrowserTab('browser-tab-stop-find', payload),
   print: (payload) => invokeBrowserTab('browser-tab-print', payload),
+  // « Enregistrer en PDF » dans les Téléchargements (docs/zoom-and-pdf.md).
+  pdf: {
+    /** Le portail traite l'action `save-pdf` (clic droit sur la page). */
+    ready: () => invokeBrowserTab('browser-tab-pdf-ready'),
+    /** `{ tabId }` : `{ ok, filename, item }`, `item` = élément de la liste des téléchargements. */
+    saveTab: (payload) => invokeBrowserTab('browser-tab-save-pdf', payload),
+  },
   capture: (payload) => invokeBrowserTab('browser-tab-capture', payload),
   copyScreenshot: (payload) => invokeBrowserTab('browser-tab-copy-screenshot', payload),
   // Capture d'écran enregistrée dans les Téléchargements et copiée (docs/page-capture.md).
@@ -262,7 +271,7 @@ const codeWorkspaceBridge = {
 const TAB_WINDOW_ARG_PREFIX = '--lasco-tab-window=';
 function readTabWindowArg() {
   const arg = process.argv.find((a) => typeof a === 'string' && a.startsWith(TAB_WINDOW_ARG_PREFIX));
-  if (!arg) return { role: 'main', initialTab: null };
+  if (!arg) return { role: 'main', initialTab: null, windowKey: null };
   try {
     const binary = atob(arg.slice(TAB_WINDOW_ARG_PREFIX.length));
     const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
@@ -270,12 +279,33 @@ function readTabWindowArg() {
     return {
       role: parsed && parsed.role === 'detached' ? 'detached' : 'main',
       initialTab: parsed && parsed.initialTab && typeof parsed.initialTab === 'object' ? parsed.initialTab : null,
+      windowKey: parsed && typeof parsed.windowKey === 'string' && parsed.windowKey ? parsed.windowKey : null,
     };
   } catch (_) {
-    return { role: 'main', initialTab: null };
+    return { role: 'main', initialTab: null, windowKey: null };
   }
 }
 const tabWindowInfo = readTabWindowArg();
+
+/**
+ * Tab model (docs/tab-model.md): the tab list of this window, held by the main process.
+ * `read()` is synchronous so the page's first render shows the restored strip.
+ */
+const tabModelBridge = tabWindowInfo.windowKey
+  ? {
+      version: 1,
+      windowKey: tabWindowInfo.windowKey,
+      read: () => {
+        try {
+          return ipcRenderer.sendSync('tab-model-read-sync');
+        } catch (_) {
+          return null;
+        }
+      },
+      commit: (payload) => ipcRenderer.invoke('tab-model-commit', payload),
+      onChange: (callback) => subscribe('tab-model-change', callback),
+    }
+  : undefined;
 const tabWindowsBridge = {
   role: tabWindowInfo.role,
   initialTab: tabWindowInfo.initialTab,
@@ -385,6 +415,7 @@ const desktopBridge = {
     resetVerification: () => ipcRenderer.invoke('lasco-vault-verify-reset'),
   },
   tabWindows: tabWindowsBridge,
+  tabModel: tabModelBridge,
   /**
    * « Fenêtre » menu of the menu bar: same options as the burger menu of the internal browser.
    * The page reports its state (labels, checkmarks) and runs the commands Desktop relays.
@@ -406,6 +437,18 @@ const desktopBridge = {
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposePortalBridges && { downloads: downloadsBridge }),
   ...(exposePortalBridges && !vmMode && { browserImport: browserImportBridge }),
+  /**
+   * Profils de navigation (docs/browser-profiles.md) : `setContext({ owner, profileId, workspace })` avant les
+   * onglets web de la fenêtre ; `forget({ owner, profileId })` efface un profil retiré de cet ordinateur.
+   */
+  ...(exposePortalBridges && !vmMode && {
+    browserProfiles: {
+      version: 1,
+      setContext: (payload) => ipcRenderer.invoke('browser-profile-set-context', payload),
+      getContext: () => ipcRenderer.invoke('browser-profile-get-context'),
+      forget: (payload) => ipcRenderer.invoke('browser-profile-forget', payload),
+    },
+  }),
   /** Navigation privée (docs/private-browsing.md) : menu ☰ du navigateur du portail. */
   ...(exposePortalBridges && !vmMode && {
     privateBrowsing: { openWindow: () => ipcRenderer.invoke('private-window-open') },

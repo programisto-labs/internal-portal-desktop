@@ -201,7 +201,7 @@ function createDownloadService({
   }
 
   /** `will-download` of one session. */
-  function handleDownload(item, source, webContents) {
+  function handleDownload(item, source, webContents, meta = {}) {
     const id = randomId();
     const filename = sanitizeFilename(item.getFilename());
     const dir = chooseDirectory();
@@ -238,6 +238,9 @@ function createDownloadService({
         source,
         error: null,
         danger: null,
+        // Profil de navigation de la session (docs/browser-profiles.md) : la liste du portail filtre dessus.
+        ...(meta.profileId ? { profileId: meta.profileId } : {}),
+        ...(meta.partition ? { partition: meta.partition } : {}),
       },
     };
     live.set(id, entry);
@@ -309,9 +312,9 @@ function createDownloadService({
     guardDanger(id, item, webContents);
   }
 
-  function attach(targetSession, source) {
+  function attach(targetSession, source, meta = {}) {
     targetSession.on('will-download', (_event, item, webContents) => {
-      handleDownload(item, source, webContents);
+      handleDownload(item, source, webContents, meta);
       try {
         onStarted({ webContents, source });
       } catch (_) {
@@ -406,7 +409,7 @@ function createDownloadService({
     }
     // Exports built in the page (blob:, data:) cannot be fetched again.
     if (!RETRY_PROTOCOLS.has(url.protocol)) return { ok: false, error: 'not-retryable' };
-    const targetSession = getSession(rec.source);
+    const targetSession = getSession(rec.source, rec);
     if (!targetSession) return { ok: false };
     retrying.set(url.href, rec.id);
     targetSession.downloadURL(url.href);
