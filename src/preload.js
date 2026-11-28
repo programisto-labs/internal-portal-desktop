@@ -97,6 +97,13 @@ const browserTabsBridge = {
   findInPage: (payload) => invokeBrowserTab('browser-tab-find', payload),
   stopFindInPage: (payload) => invokeBrowserTab('browser-tab-stop-find', payload),
   print: (payload) => invokeBrowserTab('browser-tab-print', payload),
+  // « Enregistrer en PDF » dans les Téléchargements (docs/zoom-and-pdf.md).
+  pdf: {
+    /** Le portail traite l'action `save-pdf` (clic droit sur la page). */
+    ready: () => invokeBrowserTab('browser-tab-pdf-ready'),
+    /** `{ tabId }` : `{ ok, filename, item }`, `item` = élément de la liste des téléchargements. */
+    saveTab: (payload) => invokeBrowserTab('browser-tab-save-pdf', payload),
+  },
   capture: (payload) => invokeBrowserTab('browser-tab-capture', payload),
   copyScreenshot: (payload) => invokeBrowserTab('browser-tab-copy-screenshot', payload),
   // Capture d'écran enregistrée dans les Téléchargements et copiée (docs/page-capture.md).

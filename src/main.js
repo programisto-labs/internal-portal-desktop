@@ -13,6 +13,7 @@ const {
   sharedExternalAppPermissions,
 } = require('./browser-tabs/manager');
 const { captureFilename, captureVisible } = require('./browser-tabs/page-capture');
+const { pdfFilename } = require('./browser-tabs/page-pdf');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
@@ -2443,6 +2444,25 @@ function registerWindowIPC() {
     const shot = await captureVisible(win.webContents, rect || undefined);
     const title = typeof p.title === 'string' ? p.title.slice(0, 120) : '';
     return deliverCapture(shot, { target: p.target, url: '', title, source: 'portal' });
+  });
+
+  // --- Enregistrer en PDF (docs/zoom-and-pdf.md) : même fenêtres que les téléchargements ---
+  ipcMain.handle('browser-tab-pdf-ready', (event) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    return manager ? manager.setPdfReady() : { ok: false, error: 'forbidden' };
+  });
+  ipcMain.handle('browser-tab-save-pdf', async (event, payload) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const pdf = await manager.renderPdf({ tabId: p.tabId });
+    if (!pdf || !pdf.ok) return pdf || { ok: false, error: 'pdf-failed' };
+    const filename = pdfFilename({ url: pdf.url, title: pdf.title });
+    const saved = getDownloadService().saveFile({ name: filename, data: pdf.data, mimeType: 'application/pdf', url: pdf.url, source: 'web' });
+    if (!saved.ok) return { ok: false, error: saved.error || 'pdf-failed' };
+    return { ok: true, filename: saved.item.filename, item: saved.item };
   });
 
   // --- Host operations: bridge for the web app (strictly validated natively) ---

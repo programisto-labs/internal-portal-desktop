@@ -102,3 +102,36 @@ describe('application menu « Fenêtre »', () => {
     assert.equal(byLabel(vmMenu.find((m) => m.label === 'Fichier').submenu, 'Nouvelle fenêtre de navigation privée'), undefined);
   });
 });
+
+describe('application menu « Présentation »', () => {
+  const viewMenu = (state, sent = []) =>
+    buildApplicationMenuTemplate({
+      isMac: true,
+      state,
+      closeTab: noop,
+      closeWindow: noop,
+      openSettings: noop,
+      send: (command) => sent.push(command),
+    }).find((m) => m.label === 'Présentation');
+
+  it("keeps Electron's window zoom for an older portal", () => {
+    assert.equal(viewMenu(null).role, 'viewMenu');
+    assert.equal(viewMenu(normalizeAppMenuState({ canCreateTab: true })).role, 'viewMenu');
+  });
+
+  it('relays zoom to the page when it zooms the active tab', () => {
+    const sent = [];
+    const menu = viewMenu(normalizeAppMenuState({ pageZoom: true }), sent);
+    assert.equal(menu.role, undefined);
+    const zoomItems = menu.submenu.filter((i) => typeof i.click === 'function');
+    assert.deepEqual(
+      zoomItems.map((i) => i.accelerator),
+      ['CmdOrCtrl+0', 'CmdOrCtrl+Plus', 'CmdOrCtrl+=', 'CmdOrCtrl+-'],
+    );
+    for (const item of zoomItems) item.click();
+    assert.deepEqual(sent, ['zoom-reset', 'zoom-in', 'zoom-in', 'zoom-out']);
+    for (const command of sent) assert.ok(APP_MENU_COMMANDS.includes(command), command);
+    assert.ok(menu.submenu.some((i) => i.role === 'reload'));
+    assert.ok(menu.submenu.some((i) => i.role === 'togglefullscreen'));
+  });
+});
