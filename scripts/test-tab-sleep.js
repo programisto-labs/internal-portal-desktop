@@ -74,7 +74,12 @@ describe('tab sleep: which tabs go to sleep', () => {
 
 describe('tab sleep settings', () => {
   it('defaults to 30 min and an empty list', () => {
-    assert.deepEqual(normalizeTabSleepSettings(null), { tabSleepMinutes: 30, tabSleepNeverSites: [] });
+    assert.deepEqual(normalizeTabSleepSettings(null), {
+      tabSleepMinutes: 30,
+      tabSleepNeverSites: [],
+      tabSleepMaxLive: 10,
+      tabSleepPinned: false,
+    });
     assert.equal(normalizeTabSleepSettings({ tabSleepMinutes: 7 }).tabSleepMinutes, 30);
     assert.equal(normalizeTabSleepSettings({ tabSleepMinutes: 0 }).tabSleepMinutes, 0);
     assert.equal(normalizeTabSleepSettings({ tabSleepMinutes: 120 }).tabSleepMinutes, 120);
@@ -113,5 +118,112 @@ describe('tab sleep settings', () => {
   it('the page probe is a self-invoking expression', () => {
     assert.match(PAGE_SLEEP_PROBE_SCRIPT, /^\(\(\) => \{/);
     assert.match(PAGE_SLEEP_PROBE_SCRIPT, /\}\)\(\)$/);
+  });
+});
+
+describe('tab sleep: live budget (docs/many-tabs-perf.md)', () => {
+  const {
+    selectTabsOverLiveBudget,
+    isMemoryPressure,
+    DEFAULT_TAB_SLEEP_MAX_LIVE,
+  } = require('../src/browser-tabs/tab-sleep');
+  const hiddenFor = (tabId, minutes, extra = {}) => tab(tabId, { hiddenSince: NOW - minutes * MIN, ...extra });
+  const budget = (extra = {}) => ({ now: NOW, maxLive: 3, activeTabId: 'shown', neverSites: [], ...extra });
+
+  it('defaults to 10 live tabs and keeps the settings valid', () => {
+    assert.equal(DEFAULT_TAB_SLEEP_MAX_LIVE, 10);
+    assert.equal(normalizeTabSleepSettings({}).tabSleepMaxLive, 10);
+    assert.equal(normalizeTabSleepSettings({ tabSleepMaxLive: 20 }).tabSleepMaxLive, 20);
+    assert.equal(normalizeTabSleepSettings({ tabSleepMaxLive: 7 }).tabSleepMaxLive, 10);
+    assert.equal(normalizeTabSleepSettings({ tabSleepMaxLive: 0 }).tabSleepMaxLive, 0);
+    assert.equal(normalizeTabSleepSettings({}).tabSleepPinned, false);
+    assert.equal(normalizeTabSleepSettings({ tabSleepPinned: true }).tabSleepPinned, true);
+  });
+
+  it('sleeps the oldest hidden tabs beyond the budget, not the recent ones', () => {
+    const tabs = [hiddenFor('a', 10), hiddenFor('b', 9), hiddenFor('c', 8), hiddenFor('d', 7), hiddenFor('e', 6), tab('shown')];
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget()), ['a', 'b']);
+  });
+
+  it('does nothing within the budget, or without a limit', () => {
+    const tabs = [hiddenFor('a', 10), hiddenFor('b', 9)];
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget()), []);
+    const many = Array.from({ length: 30 }, (_, i) => hiddenFor(`t${i}`, 10 + i));
+    assert.deepEqual(selectTabsOverLiveBudget(many, budget({ maxLive: 0 })), []);
+  });
+
+  it('keeps a tab left less than 2 minutes ago awake', () => {
+    const tabs = [hiddenFor('a', 1), hiddenFor('b', 1.5), hiddenFor('c', 0.5), hiddenFor('d', 0.2)];
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget()), []);
+  });
+
+  it('exempt tabs count in the budget but never sleep: the next oldest goes instead', () => {
+    const tabs = [
+      hiddenFor('audio', 20, { audible: true }),
+      hiddenFor('agent', 19, { agentControlled: true }),
+      hiddenFor('pinned', 18, { pinned: true }),
+      hiddenFor('call', 17, { capturingMedia: true }),
+      hiddenFor('plain', 16),
+      hiddenFor('recent', 5),
+    ];
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget()), ['plain', 'recent']);
+  });
+
+  it('pinned tabs sleep when the person chose so', () => {
+    const tabs = [hiddenFor('pinned', 20, { pinned: true }), hiddenFor('b', 10)];
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget({ maxLive: 1 })), ['b']);
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget({ maxLive: 1, sleepPinned: true })), ['pinned']);
+    assert.equal(tabSleepBlocker(tabs[0], options({ delayMs: 10 * MIN })), 'pinned');
+  });
+
+  it('under memory pressure: budget of 3, tabs left 30 s ago', () => {
+    const tabs = Array.from({ length: 6 }, (_, i) => hiddenFor(`t${i}`, 1 - i * 0.1));
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget({ maxLive: 10 })), []);
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget({ maxLive: 10, pressure: true })), ['t0', 't1', 't2']);
+    assert.deepEqual(selectTabsOverLiveBudget(tabs, budget({ maxLive: 0, pressure: true })), ['t0', 't1', 't2']);
+  });
+
+  it('recognizes memory pressure from the system memory info (KB)', () => {
+    const GB = 1024 * 1024;
+    assert.equal(isMemoryPressure({ total: 16 * GB, free: 0.5 * GB }), true);
+    assert.equal(isMemoryPressure({ total: 16 * GB, free: 4 * GB }), false);
+    // 6 % libre mais 2 Go : pas de pression sur une grosse machine.
+    assert.equal(isMemoryPressure({ total: 32 * GB, free: 2 * GB }), false);
+    assert.equal(isMemoryPressure(null), false);
+    assert.equal(isMemoryPressure({ total: 0, free: 0 }), false);
+    // macOS : la mémoire « libre » seule est toujours basse ; le cache de fichiers se libère.
+    assert.equal(isMemoryPressure({ total: 24 * GB, free: 0.6 * GB, fileBacked: 3 * GB, purgeable: 0 }), false);
+    assert.equal(isMemoryPressure({ total: 24 * GB, free: 0.3 * GB, fileBacked: 0.5 * GB, purgeable: 0.1 * GB }), true);
+  });
+});
+
+describe('perf metrics: aggregated snapshot, no personal data', () => {
+  const { summarizeAppMetrics, processKind } = require('../src/perf-metrics');
+
+  it('groups processes by kind and rounds to MB', () => {
+    const snapshot = summarizeAppMetrics(
+      [
+        { type: 'Browser', memory: { workingSetSize: 200 * 1024 }, cpu: { percentCPUUsage: 1.24 } },
+        { type: 'GPU', memory: { workingSetSize: 150 * 1024 }, cpu: { percentCPUUsage: 0.5 } },
+        { type: 'Tab', memory: { workingSetSize: 100 * 1024 }, cpu: { percentCPUUsage: 2 } },
+        { type: 'Tab', memory: { workingSetSize: 50 * 1024 + 300 }, cpu: { percentCPUUsage: 0 } },
+        { type: 'Utility', memory: { workingSetSize: 20 * 1024 } },
+      ],
+      { webLive: 3, webSleeping: 12 },
+    );
+    assert.equal(snapshot.processes, 5);
+    assert.equal(snapshot.memoryMb, 520);
+    assert.equal(snapshot.cpuPercent, 3.7);
+    assert.deepEqual(snapshot.byKind.renderer, { count: 2, memoryMb: 150, cpuPercent: 2 });
+    assert.deepEqual(snapshot.tabs, { webLive: 3, webSleeping: 12 });
+    assert.equal(processKind('Renderer'), 'renderer');
+    assert.equal(processKind('Pepper Plugin'), 'other');
+    // Aucun champ venu d'une page : ni nom, ni adresse, ni pid.
+    assert.doesNotMatch(JSON.stringify(snapshot), /pid|name|url|title/);
+  });
+
+  it('survives an empty or odd list', () => {
+    assert.equal(summarizeAppMetrics(null).processes, 0);
+    assert.equal(summarizeAppMetrics([null, {}]).processes, 1);
   });
 });

@@ -48,7 +48,7 @@ Parcours : panneau → `chrome.runtime.sendMessage({ op: 'get' | 'set' | 'off', 
 
 ## Sécurité
 
-- L'extension n'est chargée que dans la session des onglets web (`persist:browser-tabs`), jamais
+- L'extension n'est chargée que dans la session des onglets web (sessions des onglets web (`persist:bp-…` par profil et workspace, `persist:browser-tabs` sans profil, docs/browser-profiles.md)), jamais
   dans celle du portail.
 - Desktop ne répond qu'au service worker de cette extension (portée vérifiée à chaque appel) ;
   le preload ne pose rien dans les service workers des sites.

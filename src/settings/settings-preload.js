@@ -430,6 +430,11 @@ function tabSleepLabel(minutes) {
 
 let tabSleepError = null;
 
+/** Libellé du budget d'onglets vivants (0 = sans limite). */
+function tabSleepMaxLiveLabel(count) {
+  return count === 0 ? 'Sans limite' : `${count} onglets`;
+}
+
 function renderTabSleep(t) {
   if (!t) return;
   const select = $('tabSleepMinutes');
@@ -443,6 +448,18 @@ function renderTabSleep(t) {
     }
     select.value = String(t.minutes);
   }
+  const maxLive = $('tabSleepMaxLive');
+  if (document.activeElement !== maxLive && Array.isArray(t.maxLiveChoices)) {
+    maxLive.replaceChildren();
+    for (const count of t.maxLiveChoices) {
+      const option = document.createElement('option');
+      option.value = String(count);
+      option.textContent = tabSleepMaxLiveLabel(count);
+      maxLive.append(option);
+    }
+    maxLive.value = String(t.maxLive);
+  }
+  $('tabSleepPinned').checked = t.sleepPinned === true;
   $('tabSleepHint').textContent = t.overrideMs
     ? `Délai de développement : ${Math.round(t.overrideMs / 1000)} s (LASCO_TAB_SLEEP_MS).`
     : 'Onglets web et pages de Lasco. Jamais l’onglet affiché, un onglet qui joue du son, en plein écran, en appel, piloté par un agent, avec une saisie en cours, ni Lasco Code.';
@@ -791,6 +808,12 @@ window.addEventListener('DOMContentLoaded', () => {
     $('tabSleepMinutes').blur();
     render();
   };
+  $('tabSleepMaxLive').onchange = async () => {
+    await ipcRenderer.invoke('settings-modal-tab-sleep-set-max-live', Number($('tabSleepMaxLive').value));
+    $('tabSleepMaxLive').blur();
+    render();
+  };
+  bindSwitch('tabSleepPinned', 'settings-modal-tab-sleep-set-pinned');
   $('tabSleepAdd').onclick = () => addTabSleepSite();
   $('tabSleepSite').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {

@@ -3,7 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const { normalizeShortcuts } = require('./background-mode');
-const { normalizeTabSleepSettings, DEFAULT_TAB_SLEEP_MINUTES } = require('./browser-tabs/tab-sleep');
+const {
+  normalizeTabSleepSettings,
+  DEFAULT_TAB_SLEEP_MINUTES,
+  DEFAULT_TAB_SLEEP_MAX_LIVE,
+} = require('./browser-tabs/tab-sleep');
 
 const LASCO_PROTOCOL = 'lasco';
 /** `themeSource`: app appearance (Réglages > Général), applied to `nativeTheme.themeSource`. */
@@ -29,6 +33,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   // Économiseur de mémoire (docs/tab-sleep.md) : délai en minutes (0 = jamais), sites exclus.
   tabSleepMinutes: DEFAULT_TAB_SLEEP_MINUTES,
   tabSleepNeverSites: [],
+  // Onglets gardés actifs en arrière-plan (docs/many-tabs-perf.md) ; épinglés gardés éveillés.
+  tabSleepMaxLive: DEFAULT_TAB_SLEEP_MAX_LIVE,
+  tabSleepPinned: false,
 });
 
 /** Keep only known keys with valid types; unknown / invalid values fall back to defaults. */

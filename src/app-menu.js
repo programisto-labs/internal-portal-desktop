@@ -14,6 +14,10 @@ const APP_MENU_COMMANDS = Object.freeze([
   'toggle-sidebar',
   'single-tab-mode-off',
   'single-tab-mode-on',
+  // Présentation > Zoom quand la page sait zoomer l'onglet actif (docs/zoom-and-pdf.md).
+  'zoom-in',
+  'zoom-out',
+  'zoom-reset',
 ]);
 
 /** Page state shown in the menu. `null` = no portal shell reported yet (login, older portal). */
@@ -26,6 +30,8 @@ function normalizeAppMenuState(input) {
     assistantOpen: input.assistantOpen === true,
     sidebarVisible: input.sidebarVisible !== false,
     singleTabMode: input.singleTabMode === true,
+    // La page zoome l'onglet actif (page du portail ou page web), pas toute la fenêtre.
+    pageZoom: input.pageZoom === true,
   };
 }
 
@@ -87,6 +93,37 @@ function buildWindowMenuItems({ isMac, state, send }) {
 }
 
 /**
+ * « Présentation ». Portail récent (`pageZoom`) : Zoom avant / arrière / Taille réelle zooment
+ * l'onglet actif, comme Chrome (la page reçoit la commande). Sinon, rôles d'Electron : toute la
+ * fenêtre (anciens portails, page de connexion).
+ */
+function buildViewMenu({ isMac, state, send }) {
+  if (!state || !state.pageZoom) return { role: 'viewMenu', label: 'Présentation' };
+  return {
+    label: 'Présentation',
+    submenu: [
+      { role: 'reload' },
+      { role: 'forceReload' },
+      { role: 'toggleDevTools' },
+      { type: 'separator' },
+      { label: 'Taille réelle', accelerator: 'CmdOrCtrl+0', click: () => send('zoom-reset') },
+      { label: 'Zoom avant', accelerator: 'CmdOrCtrl+Plus', click: () => send('zoom-in') },
+      // ⌘= sur un clavier QWERTY (même touche que « + » sans Maj), comme Chrome.
+      {
+        label: 'Zoom avant',
+        accelerator: 'CmdOrCtrl+=',
+        visible: false,
+        acceleratorWorksWhenHidden: true,
+        click: () => send('zoom-in'),
+      },
+      { label: 'Zoom arrière', accelerator: 'CmdOrCtrl+-', click: () => send('zoom-out') },
+      { type: 'separator' },
+      { role: 'togglefullscreen' },
+    ],
+  };
+}
+
+/**
  * Full menu bar template. Callbacks are injected so the template stays testable:
  * `closeTab(win)`, `closeWindow(win)`, `openSettings()`, `send(command)`, `openPrivateWindow(win)`.
  */
@@ -145,7 +182,7 @@ function buildApplicationMenuTemplate({ isMac, state, closeTab, closeWindow, ope
       ],
     },
     { role: 'editMenu', label: 'Édition' },
-    { role: 'viewMenu', label: 'Présentation' },
+    buildViewMenu({ isMac, state, send }),
     {
       label: 'Fenêtre',
       submenu: [
@@ -163,5 +200,6 @@ module.exports = {
   APP_MENU_COMMANDS,
   normalizeAppMenuState,
   buildWindowMenuItems,
+  buildViewMenu,
   buildApplicationMenuTemplate,
 };
