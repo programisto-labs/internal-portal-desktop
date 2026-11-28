@@ -110,10 +110,12 @@ Relevé de `scripts/smoke-extensions.js` (Electron 44.5.1, Chromium 152), 28/11/
 
 | Extension | Installation (CRX3 vérifié) | Ce qui marche | Limites connues |
 |---|---|---|---|
-| uBlock Origin Lite | oui | 19 057 règles DNR actives, publicité bloquée / neutralisée, popup d'action, page d'options | service worker : plantait sur le `browser` partiel d'Electron (corrigé, à revérifier) ; `userScripts` et `offscreen` absents d'Electron (filtrage cosmétique avancé) |
+| uBlock Origin Lite | oui | service worker, 19 057 règles DNR actives, publicité bloquée / neutralisée, popup d'action, page d'options | `userScripts` et `offscreen` absents d'Electron (filtrage cosmétique avancé) |
 | Grammarly | oui | service worker, script de contenu (`grammarly-desktop-integration` dans la page), bouton | `identity.getAuthToken` absent (connexion par le site de Grammarly) ; `sidePanel` absent |
-| React Developer Tools | oui | service worker, crochet `__REACT_DEVTOOLS_GLOBAL_HOOK__`, bouton | panneau DevTools à vérifier à la main |
+| React Developer Tools | oui | service worker, crochet `__REACT_DEVTOOLS_GLOBAL_HOOK__`, bouton | crochet inscrit au démarrage du service worker : une page ouverte juste avant peut le manquer (les suivantes l'ont) ; panneau DevTools à vérifier à la main |
 | Loom | oui | chargée, service worker, bouton | capture d'écran (`desktopCapture`, `tabCapture`) non fournie par Electron : enregistrement probablement impossible |
 | 1Password | oui | chargée, bouton, 1 règle DNR | intégration à l'app 1Password (messagerie native) : 1Password vérifie la signature du navigateur, Lasco n'est pas reconnu ; connexion dans l'extension seule à vérifier |
+
+Electron définit un `browser` partiel (sans `permissions`, `tabs`…) que Chrome n'a pas : `runtime-preload.js` le retire des contextes d'extension, sans quoi uBlock Origin Lite plante au démarrage.
 
 Page du Chrome Web Store : derrière l'écran de consentement de Google, « Ajouter à Lasco » reste à vérifier à la main.
