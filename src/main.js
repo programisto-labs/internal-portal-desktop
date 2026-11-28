@@ -57,6 +57,8 @@ const {
   buildNewWindowBounds,
 } = require('./tab-windows');
 const { APP_MENU_COMMANDS, normalizeAppMenuState, buildApplicationMenuTemplate } = require('./app-menu');
+const { createTabModel, createWindowKey, MAIN_WINDOW_KEY } = require('./tab-model');
+const { createTabSessionStore } = require('./tab-session-store');
 const {
   PRIVATE_WINDOW_ARG,
   PRIVATE_WINDOW_BACKGROUND,
@@ -218,6 +220,74 @@ let mainWindowRef = null;
  * @type {Map<number, { win: BrowserWindow, role: 'main' | 'detached', tabManager: ReturnType<typeof createBrowserTabManager> | null }>}
  */
 const portalWindows = new Map();
+
+/**
+ * Tab model (docs/tab-model.md): the tabs of every portal window, saved in `tab-session.json`.
+ * Pages commit their strip; main-process changes are pushed back to the window's page.
+ */
+let tabModel = null;
+let tabSession = null;
+function getTabModel() {
+  if (tabModel) return tabModel;
+  tabSession = createTabSessionStore({ dir: app.getPath('userData') });
+  tabModel = createTabModel({
+    onPersist: () => tabSession.schedule(),
+    onChange: (windowKey, scope, strip, { origin }) => {
+      if (origin !== 'main') return;
+      for (const entry of portalWindows.values()) {
+        if (entry.windowKey !== windowKey || entry.spare || entry.win.isDestroyed()) continue;
+        entry.win.webContents.send('tab-model-change', { scope, strip });
+      }
+    },
+    // chrome.tabs-like events (created, removed, updated, moved, activated, attached, detached):
+    // the hook for extensions and later features (`tabModelEvents.on('event', …)`).
+    onEvents: (windowKey, events) => {
+      for (const event of events) tabModelEvents.emit('event', { windowKey, ...event });
+    },
+  });
+  tabModel.load(tabSession.read());
+  tabSession.bind(() => tabModel.serialize());
+  return tabModel;
+}
+const tabModelEvents = new (require('events').EventEmitter)();
+tabModelEvents.setMaxListeners(50);
+
+/** Clamp saved bounds to a connected display (a screen unplugged since). */
+function visibleWindowBounds(bounds) {
+  if (!bounds) return null;
+  try {
+    const area = screen.getDisplayMatching(bounds).workArea;
+    const width = Math.min(bounds.width, area.width);
+    const height = Math.min(bounds.height, area.height);
+    const x = Math.min(Math.max(bounds.x, area.x), area.x + area.width - width);
+    const y = Math.min(Math.max(bounds.y, area.y), area.y + area.height - height);
+    return { x, y, width, height };
+  } catch (_) {
+    return { width: bounds.width, height: bounds.height };
+  }
+}
+
+function saveTabWindowBounds(entry) {
+  if (!entry || entry.spare || entry.win.isDestroyed() || entry.win.isMinimized() || entry.win.isFullScreen()) return;
+  getTabModel().setBounds(entry.windowKey, entry.win.getNormalBounds());
+}
+
+let detachedWindowsRestored = false;
+/** Restart: reopen the detached windows of the last session, each on its tabs (once). */
+function restoreDetachedTabWindows() {
+  if (detachedWindowsRestored || VM_MODE) return;
+  detachedWindowsRestored = true;
+  for (const saved of getTabModel().windowsToRestore()) {
+    if (!isPortalPath(saved.startHref)) continue;
+    createWindow({
+      role: 'detached',
+      windowKey: saved.key,
+      startHref: saved.startHref,
+      bounds: visibleWindowBounds(saved.bounds),
+      inactive: true,
+    });
+  }
+}
 /** One history file for every window. */
 let browserHistoryStore = null;
 /** Tabs moved into a window before its page is ready to adopt them. */
@@ -1648,7 +1718,10 @@ function createWindow({
   spareHref = null,
   /** Portal path loaded by a visible detached window without a tab to adopt (⌘N). */
   startHref = null,
+  /** Key in the tab model: `main`, a saved detached window (restart), or a new one. */
+  windowKey = null,
 } = {}) {
+  const tabWindowKey = windowKey || (role === 'main' ? MAIN_WINDOW_KEY : createWindowKey());
   let iconPath;
   try {
     iconPath = getIconPath();
@@ -1700,7 +1773,7 @@ function createWindow({
       additionalArguments: [
         `${APP_VERSION_ARG_PREFIX}${app.getVersion()}`,
         `${PORTAL_ORIGIN_ARG_PREFIX}${PORTAL_ORIGIN}`,
-        encodeTabWindowArg({ role, initialTab }),
+        encodeTabWindowArg({ role, initialTab, windowKey: tabWindowKey }),
         ...(NO_AGENTS ? [NO_AGENTS_ARG] : []),
         ...(VM_MODE ? [VM_ARG_FOR_PRELOAD] : []),
       ]
@@ -1750,7 +1823,11 @@ function createWindow({
 
   const winId = win.id;
   // `spare`: hidden, pre-loaded detached window (never a drop target nor the next main window).
-  portalWindows.set(winId, { win, role, tabManager: null, browserContext: null, spare: Boolean(spareHref) });
+  portalWindows.set(winId, { win, role, windowKey: tabWindowKey, tabManager: null, browserContext: null, spare: Boolean(spareHref) });
+  // Saved with the tab model, to reopen a detached window where it was (also at quit: saveTabWindowBounds).
+  for (const name of ['moved', 'resized', 'show']) {
+    win.on(name, () => saveTabWindowBounds(portalWindows.get(winId)));
+  }
   if (role === 'main') {
     mainWindowRef = win;
     mainWindowFullPace = false;
@@ -1796,6 +1873,8 @@ function createWindow({
     stopAutoRetry();
     const entry = portalWindows.get(winId);
     if (entry && entry.tabManager) entry.tabManager.destroyAll();
+    // Closed by the person: its tabs go (like Chrome). At quit, the session keeps them for the restart.
+    if (!isQuitting && tabModel && tabWindowKey !== MAIN_WINDOW_KEY) tabModel.forgetWindow(tabWindowKey);
     portalWindows.delete(winId);
     tabAdoptQueue.forget(winId);
     if (spareTabWindow && spareTabWindow.win === win) spareTabWindow = null;
@@ -1974,6 +2053,7 @@ function showMainWindow() {
     win = mainPortalWindow();
   }
   if (!win) return null;
+  restoreDetachedTabWindows();
   // Lasco hidden by app.hide() (background mode): unhide before showing the window.
   if (process.platform === 'darwin') app.show();
   if (win.isMinimized()) win.restore();
@@ -2775,6 +2855,19 @@ function registerWindowIPC() {
     target.win.webContents.send('tab-window-tab-action', { tabId, action });
     return { ok: true };
   });
+  // --- Tab model (docs/tab-model.md): the page of a portal window reads and commits its strip ---
+  ipcMain.on('tab-model-read-sync', (event) => {
+    const entry = tabWindowSender(event);
+    event.returnValue = entry ? getTabModel().readWindow(entry.windowKey) : null;
+  });
+  ipcMain.handle('tab-model-commit', (event, payload) => {
+    const entry = tabWindowSender(event);
+    // The spare is not a window of the person yet: its « Nouvel onglet » is never saved.
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    const revision = getTabModel().commit(entry.windowKey, payload);
+    return revision ? { ok: true, revision } : { ok: false, error: 'invalid' };
+  });
+
   // A detached window whose last tab left (closed, attached or dragged away).
   ipcMain.handle('tab-window-close', (event) => {
     const entry = tabWindowSender(event);
@@ -3679,7 +3772,10 @@ if (!app.requestSingleInstanceLock()) {
     setupAutoUpdater();
     nativeTheme.on('updated', updateAllIcons);
     const startHidden = openedAtLoginInBackground();
+    getTabModel();
     createWindow({ hidden: startHidden });
+    // Opened at login in the menu bar: detached windows come back with the main window.
+    if (!startHidden) restoreDetachedTabWindows();
     setupTray();
     // No icon after all (Linux without a system tray): a hidden window could not be reached.
     if (startHidden && !trayController) showMainWindow();
@@ -3717,6 +3813,8 @@ if (!app.requestSingleInstanceLock()) {
       codeCore.watchers.stopAll();
     }
     destroyAllBrowserViews();
+    if (tabModel) for (const entry of portalWindows.values()) saveTabWindowBounds(entry);
+    if (tabSession) tabSession.flush();
     if (downloadService) downloadService.flush();
     if (searchEngineStore) searchEngineStore.flush();
     if (updateCheckIntervalId) {
