@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.13.1](https://github.com/programisto-labs/internal-portal-desktop/compare/v2.13.0...v2.13.1) (2026-11-28)
+
+
+### Corrections
+
+* **extensions:** une page qui se ferme seule ne fige plus Desktop ([eb7ef7e](https://github.com/programisto-labs/internal-portal-desktop/commit/eb7ef7e8b21b75c2b88e303160bae87c6e9dc2d0))
+* **extensions:** une page qui se ferme seule ne fige plus Desktop ([e69a4aa](https://github.com/programisto-labs/internal-portal-desktop/commit/e69a4aa58645d0cb77620707f61dec83fad6c305))
+
 ## [2.13.0](https://github.com/programisto-labs/internal-portal-desktop/compare/v2.12.0...v2.13.0) (2026-11-28)
 
 

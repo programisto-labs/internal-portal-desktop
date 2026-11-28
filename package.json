@@ -1,6 +1,6 @@
 {
   "name": "lasco-desktop",
-  "version": "2.13.0",
+  "version": "2.13.1",
   "description": "Lasco — desktop app for the Lasco web platform (my.programisto.fr)",
   "main": "src/main.js",
   "private": true,
