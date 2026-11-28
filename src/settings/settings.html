@@ -342,6 +342,20 @@
             </div>
             <select id="tabSleepMinutes" aria-label="Mettre en veille les onglets inactifs"></select>
           </div>
+          <div class="row">
+            <div class="text">
+              <div class="label">Onglets gardés actifs en arrière-plan</div>
+              <div class="hint">Au-delà, les onglets quittés depuis plus de 2 minutes sont mis en veille sans attendre, les plus anciens d’abord. Si la mémoire de l’ordinateur est presque pleine, 3 au plus.</div>
+            </div>
+            <select id="tabSleepMaxLive" aria-label="Onglets gardés actifs en arrière-plan"></select>
+          </div>
+          <div class="row">
+            <div class="text">
+              <div class="label">Mettre aussi en veille les onglets épinglés</div>
+              <div class="hint">Désactivé : un onglet épinglé reste toujours actif.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="tabSleepPinned" aria-label="Mettre aussi en veille les onglets épinglés"><span></span></label>
+          </div>
         </div>
         <h2>Ne jamais mettre en veille ces sites</h2>
         <div class="site-toolbar">

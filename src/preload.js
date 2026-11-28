@@ -137,6 +137,8 @@ const browserTabsBridge = {
     /** `{ tabId }` : met l'onglet en veille tout de suite (hors onglet affiché). */
     now: (payload) => invokeBrowserTab('browser-tab-sleep', payload),
   },
+  /** `{ tabId, pinned }` : onglet épinglé, gardé éveillé par l'économiseur de mémoire (docs/many-tabs-perf.md). */
+  setPinned: (payload) => invokeBrowserTab('browser-tab-set-pinned', payload),
   setOverlay: (payload) => invokeBrowserTab('browser-tab-set-overlay', payload),
   showTabContextMenu: (payload) => invokeBrowserTab('browser-tab-show-context-menu', payload),
   onTabContextMenuAction: (callback) => subscribe('browser-tab-context-menu-action', callback),
@@ -377,6 +379,10 @@ const desktopBridge = {
   },
   tabs: {
     onOpenTarget: onOpenPortalTab
+  },
+  /** Relevé agrégé mémoire / CPU / nombre d'onglets, sans adresse ni titre (docs/many-tabs-perf.md). */
+  perf: {
+    snapshot: () => ipcRenderer.invoke('desktop-perf-snapshot')
   },
   browserTabs: browserTabsBridge,
   /** Coffre : vérification d'identité de l'OS avant d'afficher un mot de passe (docs/passwords.md). */

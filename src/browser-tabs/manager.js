@@ -54,7 +54,10 @@ const { capturePageImage } = require('./page-capture');
 const {
   PAGE_SLEEP_PROBE_SCRIPT,
   PRELOAD_WORLD_ID,
+  isMemoryPressure,
+  normalizeTabSleepSettings,
   resolveTabSleepDelayMs,
+  selectTabsOverLiveBudget,
   selectTabsToSleep,
   tabSleepBlocker,
   tabSleepCheckIntervalMs,
@@ -417,6 +420,8 @@ function createBrowserTabManager({
    */
   const sleepingTabs = new Map();
   let sleepTimer = null;
+  /** Onglets épinglés par le portail (`setPinned`) : gardés éveillés sauf réglage contraire. Survit à la veille. */
+  const pinnedTabs = new Set();
 
   const passwords = createPasswordController({
     emit: (channel, payload) => emitToRenderer(channel, payload),
@@ -802,6 +807,7 @@ function createBrowserTabManager({
     if (sleepTimer) clearTimeout(sleepTimer);
     sleepTimer = null;
     sleepingTabs.clear();
+    pinnedTabs.clear();
     for (const tabId of [...tabs.keys()]) {
       destroyTab(tabId);
     }
@@ -1673,18 +1679,83 @@ function createBrowserTabManager({
     }
   }
 
+  /** Budget d'onglets vivants et épinglés (docs/many-tabs-perf.md). Null : veille coupée (mode VM). */
+  function liveBudgetSettings() {
+    let settings = null;
+    try {
+      settings = typeof getTabSleepSettings === 'function' ? getTabSleepSettings() : null;
+    } catch (_) {
+      settings = null;
+    }
+    if (!settings) return null;
+    const { tabSleepMaxLive, tabSleepPinned } = normalizeTabSleepSettings(settings);
+    return { maxLive: tabSleepMaxLive, sleepPinned: tabSleepPinned };
+  }
+
+  function sleepPinnedSetting() {
+    const budget = liveBudgetSettings();
+    return Boolean(budget && budget.sleepPinned);
+  }
+
+  function memoryPressure() {
+    try {
+      return isMemoryPressure(process.getSystemMemoryInfo());
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Plus de `maxLive` onglets cachés éveillés : les plus anciennement quittés dorment sans attendre
+   * le délai (docs/many-tabs-perf.md). Mémoire presque pleine : budget de 3, après 30 s.
+   */
+  async function runLiveBudgetCheck({ minHiddenMs } = {}) {
+    const budget = liveBudgetSettings();
+    if (!budget) return [];
+    const pressure = memoryPressure();
+    if (!(budget.maxLive > 0) && !pressure) return [];
+    const candidates = [];
+    for (const [tabId, entry] of tabs) {
+      if (!entry.view.webContents.isDestroyed()) candidates.push(sleepCandidate(tabId, entry));
+    }
+    const options = {
+      now: Date.now(),
+      maxLive: budget.maxLive,
+      pressure,
+      activeTabId: shownTabId(),
+      neverSites: neverSleepSites(),
+      sleepPinned: budget.sleepPinned,
+      ...(typeof minHiddenMs === 'number' ? { minHiddenMs } : {}),
+    };
+    const ids = selectTabsOverLiveBudget(candidates, options);
+    const effectiveMinHidden = typeof minHiddenMs === 'number' ? minHiddenMs : pressure ? 30_000 : 120_000;
+    const slept = [];
+    for (const tabId of ids) {
+      const result = await sleepTab(tabId, { delayMs: Math.max(1, effectiveMinHidden) });
+      if (result && result.ok) slept.push(tabId);
+    }
+    return slept;
+  }
+
+  /** Relevé : le quart du délai, au plus 15 s quand un budget d'onglets vivants s'applique. */
+  function sleepCheckIntervalMs(delayMs) {
+    const base = tabSleepCheckIntervalMs(delayMs > 0 ? delayMs : 60_000);
+    return liveBudgetSettings() ? Math.min(base, 15_000) : base;
+  }
+
   function ensureSleepTimer() {
     if (sleepTimer || typeof getTabSleepSettings !== 'function') return;
     const tick = () => {
       sleepTimer = null;
       const delayMs = tabSleepDelayMs();
-      if (delayMs > 0) void runSleepCheck(delayMs);
+      // Veille après délai, puis budget d'onglets vivants (indépendant du délai, « Jamais » compris).
+      void (delayMs > 0 ? runSleepCheck(delayMs) : Promise.resolve()).then(() => runLiveBudgetCheck());
       if (tabs.size > 0 || delayMs > 0) {
-        sleepTimer = setTimeout(tick, tabSleepCheckIntervalMs(delayMs > 0 ? delayMs : 60_000));
+        sleepTimer = setTimeout(tick, sleepCheckIntervalMs(delayMs));
         if (sleepTimer.unref) sleepTimer.unref();
       }
     };
-    sleepTimer = setTimeout(tick, tabSleepCheckIntervalMs(tabSleepDelayMs() || 60_000));
+    sleepTimer = setTimeout(tick, sleepCheckIntervalMs(tabSleepDelayMs()));
     if (sleepTimer.unref) sleepTimer.unref();
   }
 
@@ -1701,6 +1772,7 @@ function createBrowserTabManager({
       devToolsOpened: !wc.isDestroyed() && wc.isDevToolsOpened(),
       loading: wc.isDestroyed() || wc.isLoading() || Boolean(entry.identityPending) || Boolean(entry.errorPage),
       capturingMedia: mediaCapturingWebContents.has(wc.id),
+      pinned: pinnedTabs.has(tabId),
       discarded: false,
     };
   }
@@ -1721,6 +1793,7 @@ function createBrowserTabManager({
       delayMs,
       activeTabId: shownTabId(),
       neverSites: neverSleepSites(),
+      sleepPinned: sleepPinnedSetting(),
     });
     for (const tabId of ids) await sleepTab(tabId, { delayMs });
   }
@@ -1756,6 +1829,7 @@ function createBrowserTabManager({
           delayMs,
           activeTabId: shownTabId(),
           neverSites: neverSleepSites(),
+          sleepPinned: sleepPinnedSetting(),
         });
         if (blocker) return { ok: false, error: blocker };
       } else if (tabId === shownTabId()) {
@@ -1958,6 +2032,7 @@ function createBrowserTabManager({
 
   function close({ tabId }) {
     sleepingTabs.delete(tabId);
+    pinnedTabs.delete(tabId);
     if (!tabs.has(tabId)) return { ok: true, tabId };
     destroyTab(tabId);
     return { ok: true, tabId };
@@ -2523,6 +2598,14 @@ function createBrowserTabManager({
    * Onglet piloté par un agent en arrière-plan : sa page n'est pas ralentie cachée (sinon minuteries à 1 /s,
    * captures impossibles), et elle garde la taille de la zone des onglets pour que la mise en page reste juste.
    */
+  /** Onglet épinglé par le portail : gardé éveillé (sauf réglage « mettre aussi en veille les épinglés »). */
+  function setPinned({ tabId, pinned } = {}) {
+    if (typeof tabId !== 'string' || !tabId) return { ok: false, error: 'invalid-tab-id' };
+    if (pinned === true) pinnedTabs.add(tabId);
+    else pinnedTabs.delete(tabId);
+    return { ok: true, tabId, pinned: pinnedTabs.has(tabId) };
+  }
+
   function setAgentControl({ tabId, active }) {
     // Un agent reprend un onglet en veille : il se réveille (caché) pour être piloté.
     const entry = active === true ? liveOrWokenEntry(tabId) : liveEntry(tabId);
@@ -2687,6 +2770,7 @@ function createBrowserTabManager({
     setOverlay,
     agentAction,
     setAgentControl,
+    setPinned,
     passwordSetEnabled: (payload) => passwords.setEnabled(payload),
     passwordSetSuggestions: (payload) => passwords.setSuggestions(payload),
     passwordTakeCapture: (payload) => passwords.takeCapture(payload),
@@ -2713,6 +2797,8 @@ function createBrowserTabManager({
     sleep: ({ tabId } = {}) => sleepTab(tabId, { force: true }),
     isSleeping: (tabId) => sleepingTabs.has(tabId),
     sleepingTabIds: () => [...sleepingTabs.keys()],
+    /** Budget d'onglets vivants (docs/many-tabs-perf.md) ; `minHiddenMs` pour le banc et les tests. */
+    runLiveBudgetCheck: (options) => runLiveBudgetCheck(options),
     runSleepCheck: () => {
       const delayMs = tabSleepDelayMs();
       return delayMs > 0 ? runSleepCheck(delayMs) : Promise.resolve();
