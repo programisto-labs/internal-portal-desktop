@@ -83,7 +83,12 @@ const { createHostOpsStore, createJournal } = require('./host-ops/store');
 const { createHostOpsService } = require('./host-ops/service');
 const { createConfirm } = require('./host-ops/confirm');
 const { isTrustedHostOpsSender } = require('./host-ops/trust');
-const { createForcedUpdateScheduler } = require('./forced-update');
+const { createForcedUpdateScheduler, FORCED_UPDATE_MAX_DEFER_MS } = require('./forced-update');
+const {
+  createSecurityFloor,
+  fetchMinimumVersion,
+  SECURITY_CHECK_INTERVAL_MS,
+} = require('./security/minimum-version');
 const {
   isVmMode,
   applyVmSettings,
@@ -117,6 +122,31 @@ const { createTrayController } = require('./tray/tray');
 const { normalizePortalTrayState, TRAY_PORTAL_COMMANDS, buildTrayView, mainWindowNeedsFullPace } = require('./tray/tray-state');
 const { SHORTCUT_IDS, DEFAULT_SHORTCUTS, formatAccelerator, updateShortcut, acceleratorFromKeyEvent } = require('./background-mode');
 const { trayPlaceLabel } = require('./tray/tray-platform');
+const { createIpcGate } = require('./security/ipc-gate');
+const { parseExternalAppUrl } = require('./browser-tabs/external-apps');
+const { createHttpsFirst } = require('./browser-tabs/https-first');
+
+/** HTTPS d'abord (docs/security.md) : un état pour toutes les fenêtres normales, en mémoire. */
+let httpsFirstState = null;
+function getHttpsFirst() {
+  if (!httpsFirstState) httpsFirstState = createHttpsFirst({ isEnabled: () => getSettings().httpsFirstEnabled !== false });
+  return httpsFirstState;
+}
+const { WEB_PAGE_CHANNELS: ADBLOCK_PAGE_CHANNELS } = require('./browser-tabs/adblock');
+
+/**
+ * Barrière IPC (docs/security.md) : posée avant tout gestionnaire. Une page web (onglet, fenêtre
+ * ouverte par un site, page OAuth dans la fenêtre du portail) n'atteint que les canaux de ses preloads.
+ */
+const ipcGate = createIpcGate({
+  isTrustedFrameUrl: (url) => isPortalNavigationUrl(url),
+  webChannels: [...PASSWORD_PAGE_CHANNELS, ...FORM_AUTOFILL_PAGE_CHANNELS, ...ADBLOCK_PAGE_CHANNELS],
+});
+ipcGate.install(ipcMain);
+// Aucune page n'embarque de <webview> (balise désactivée partout) : refusé aussi si une page l'active.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+});
 const {
   LOGIN_HIDDEN_ARG,
   linuxLaunchPath,
@@ -858,11 +888,13 @@ function getForcedUpdateScheduler() {
         }
       },
       install: () => quitAndInstallUpdate(),
+      // Sous la version minimale (faille critique) : 10 min d'attente au plus au lieu de 2 h.
+      maxDeferMs: () => getSecurityFloor().maxDeferMs(FORCED_UPDATE_MAX_DEFER_MS),
       notify: ({ version }) => {
         try {
           if (!Notification.isSupported()) return;
           new Notification({
-            title: 'Mise à jour de Lasco',
+            title: getSecurityFloor().required() ? 'Mise à jour de sécurité de Lasco' : 'Mise à jour de Lasco',
             body: version
               ? `Lasco ${version} s'installe dans une minute : l'application va redémarrer.`
               : "Une nouvelle version s'installe dans une minute : l'application va redémarrer.",
@@ -896,11 +928,58 @@ function isUpdaterEnabled() {
 
 async function checkForUpdates() {
   if (!isUpdaterEnabled()) return;
+  await refreshSecurityFloor();
   try {
     await autoUpdater.checkForUpdates();
   } catch (error) {
     reportUpdaterError(error, 'Update check failed.');
   }
+  maybePromptManualSecurityUpdate();
+}
+
+/** Version minimale imposée après une faille critique (docs/security.md). */
+let securityFloor = null;
+let securityCheckIntervalId = null;
+function getSecurityFloor() {
+  if (!securityFloor) securityFloor = createSecurityFloor({ currentVersion: app.getVersion() });
+  return securityFloor;
+}
+
+async function refreshSecurityFloor() {
+  const { net } = require('electron');
+  const next = await fetchMinimumVersion({ fetchImpl: (url, init) => net.fetch(url, init) });
+  const floor = getSecurityFloor();
+  const wasRequired = floor.required();
+  floor.update(next);
+  if (floor.required() && !wasRequired) {
+    console.warn(`[security] Lasco ${app.getVersion()} est sous la version minimale ${floor.floor().minimumVersion}`);
+    // Vérifier plus souvent tant que la version corrigée n'est pas installée.
+    if (!securityCheckIntervalId) {
+      securityCheckIntervalId = setInterval(() => void checkForUpdates(), SECURITY_CHECK_INTERVAL_MS);
+      if (typeof securityCheckIntervalId.unref === 'function') securityCheckIntervalId.unref();
+    }
+  }
+}
+
+/** Mise à jour automatique qui n'aboutit pas sous le plancher : proposer le téléchargement, une fois. */
+function maybePromptManualSecurityUpdate() {
+  const floor = getSecurityFloor();
+  if (!floor.shouldPromptManualUpdate({ updateDownloaded: updateState.status === 'downloaded' })) return;
+  const parent = mainPortalWindow();
+  const options = {
+    type: 'warning',
+    buttons: ['Télécharger Lasco', 'Plus tard'],
+    defaultId: 0,
+    cancelId: 1,
+    message: 'Mettez Lasco à jour',
+    detail: `Cette version (${app.getVersion()}) a une faille de sécurité corrigée dans Lasco ${floor.floor().minimumVersion}, et la mise à jour automatique n'a pas abouti.${floor.floor().reason ? `\n\n${floor.floor().reason}` : ''}`,
+  };
+  const shown = parent && !parent.isDestroyed() ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+  void shown
+    .then(({ response }) => {
+      if (response === 0) void shell.openExternal('https://github.com/programisto-labs/internal-portal-desktop/releases/latest');
+    })
+    .catch(() => undefined);
 }
 
 /**
@@ -1097,7 +1176,10 @@ function shouldNavigateInApp(urlString) {
 function openUrlInDefaultBrowser(urlString) {
   try {
     const u = new URL(urlString);
-    if (u.protocol === 'javascript:' || u.protocol === 'data:' || u.protocol === 'blob:') {
+    // http(s), ou lien vers une application (mailto:, zoommtg:…). Jamais file:, smb:, réglages du
+    // système… (docs/security.md) : un lien du portail ne lance pas un programme ni ne monte un partage.
+    if (u.protocol !== 'http:' && u.protocol !== 'https:' && !parseExternalAppUrl(urlString)) {
+      console.warn(`[security] lien ${u.protocol} non ouvert`);
       return;
     }
     void shell.openExternal(urlString);
@@ -1351,6 +1433,7 @@ function tabManagerFor(win) {
       interceptLink: routePortalLinkInApp,
       searchEngines: getSearchEngineStore(),
       safeBrowsing: getSafeBrowsing(),
+      httpsFirst: getHttpsFirst(),
       // Économiseur de mémoire (docs/tab-sleep.md). Coupé en mode VM (onglets pilotés par le point de contrôle).
       getTabSleepSettings: () => (VM_MODE ? null : getSettings()),
     });
@@ -1462,6 +1545,8 @@ function openPrivateWindow(sourceWindow) {
     },
     ...(iconPath && { icon: iconPath }),
   });
+  // La coquille (fichier de Lasco) parle aux gestionnaires ; ses onglets (`partition`) restent « web ».
+  ipcGate.trustSession(session.fromPartition(`${partition}-shell`));
   const winId = win.id;
   const ses = session.fromPartition(partition);
   attachPrivateDownloads(ses);
@@ -1472,6 +1557,8 @@ function openPrivateWindow(sourceWindow) {
     searchEngines: getSearchEngineStore(),
     // Comme Chrome : la protection vaut aussi en navigation privée (vérifications en mémoire, aucune donnée de navigation écrite).
     safeBrowsing: getSafeBrowsing(),
+    // Sites sans https propres à cette fenêtre : rien ne survit à sa fermeture.
+    httpsFirst: createHttpsFirst({ isEnabled: () => getSettings().httpsFirstEnabled !== false }),
     isPortalUrl: isPortalNavigationUrl,
     onPortalUrl: openPortalUrlFromPrivateWindow,
   });
@@ -2961,6 +3048,7 @@ function registerWindowIPC() {
         backgroundAvailable: Boolean(trayController),
         keepInBackground: settings.keepInBackground,
         safeBrowsingEnabled: settings.safeBrowsingEnabled !== false,
+        httpsFirstEnabled: settings.httpsFirstEnabled !== false,
         loginItem: loginItemSnapshot(),
         shortcuts: shortcutsSnapshot(),
       },
@@ -3016,6 +3104,11 @@ function registerWindowIPC() {
     if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
     getSettingsStore().set({ safeBrowsingEnabled: enabled });
     if (enabled) void getSafeBrowsing().update();
+    return true;
+  });
+  ipcMain.handle('settings-modal-set-https-first', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
+    getSettingsStore().set({ httpsFirstEnabled: enabled });
     return true;
   });
   ipcMain.handle('settings-modal-set-open-at-login', (event, enabled) => {
@@ -3812,6 +3905,13 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     app.setName('Lasco');
+    // Sessions dont les pages sont à Lasco ; toute autre (onglets web, profils, privé) est « web ».
+    ipcGate.trustSession(session.defaultSession);
+    ipcGate.trustSession(session.fromPartition('persist:portal'));
+    // Vues locales de Lasco (réglages, popovers, cartes) : aucune autorisation de site (caméra, position…).
+    const localViewPermission = (permission) => permission === 'clipboard-sanitized-write' || permission === 'fullscreen';
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(localViewPermission(permission)));
+    session.defaultSession.setPermissionCheckHandler((_wc, permission) => localViewPermission(permission));
     nativeTheme.themeSource = getSettings().themeSource;
     // Bloqueur de pubs (docs/adblock.md) : jamais sur les pages de Lasco (portail, API, connexion).
     sharedAdblock().setProtectedUrlMatcher((url) => isPortalNavigationUrl(url) || isApiHostNavigationUrl(url));

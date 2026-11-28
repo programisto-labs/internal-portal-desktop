@@ -19,6 +19,7 @@ const THEME_SOURCES = Object.freeze(['system', 'light', 'dark']);
  * `downloadsDirectory`: folder of the downloads (null = the OS Downloads folder), `downloadsAskWhere`:
  * « Enregistrer sous » for each file. Docs: docs/downloads.md.
  * `safeBrowsingEnabled`: protection against dangerous sites (phishing, malware). Docs: docs/safe-browsing.md.
+ * `httpsFirstEnabled`: http pages of public sites are tried in https first. Docs: docs/security.md.
  */
 const DEFAULT_SETTINGS = Object.freeze({
   openLinksInApp: true,
@@ -28,6 +29,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   downloadsDirectory: null,
   downloadsAskWhere: false,
   safeBrowsingEnabled: true,
+  httpsFirstEnabled: true,
   // Économiseur de mémoire (docs/tab-sleep.md) : délai en minutes (0 = jamais), sites exclus.
   tabSleepMinutes: DEFAULT_TAB_SLEEP_MINUTES,
   tabSleepNeverSites: [],
@@ -40,7 +42,7 @@ const DEFAULT_SETTINGS = Object.freeze({
 function normalizeSettings(raw) {
   const out = { ...DEFAULT_SETTINGS };
   const obj = raw && typeof raw === 'object' ? raw : {};
-  for (const key of ['openLinksInApp', 'keepInBackground', 'backgroundHintShown', 'downloadsAskWhere', 'safeBrowsingEnabled']) {
+  for (const key of ['openLinksInApp', 'keepInBackground', 'backgroundHintShown', 'downloadsAskWhere', 'safeBrowsingEnabled', 'httpsFirstEnabled']) {
     if (typeof obj[key] === 'boolean') out[key] = obj[key];
   }
   if (THEME_SOURCES.includes(obj.themeSource)) {

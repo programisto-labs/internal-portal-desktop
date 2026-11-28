@@ -85,6 +85,7 @@ const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.
 const PASSWORD_POPOVER_PAGE = path.join(__dirname, 'password-popover.html');
 
 const BROWSER_PARTITION = 'persist:browser-tabs';
+const { UPGRADE_TIMEOUT_MS: HTTPS_UPGRADE_TIMEOUT_MS } = require('./https-first');
 const ADBLOCK_PUSH_DELAY_MS = 500;
 const STATE_CHANNEL = 'browser-tab-state';
 const OPEN_REQUEST_CHANNEL = 'browser-tab-open-request';
@@ -361,6 +362,7 @@ function createBrowserTabManager({
   searchEngines,
   getTabSleepSettings,
   safeBrowsing = null,
+  httpsFirst = null,
   partition = BROWSER_PARTITION,
   privateMode = false,
   isPortalUrl = null,
@@ -1182,6 +1184,15 @@ function createBrowserTabManager({
         launchExternalApp(url);
         return;
       }
+      // Redirection vers http : essayée d'abord en https (docs/security.md, « HTTPS d'abord »).
+      if (event.isMainFrame !== false && httpsFirst) {
+        const upgraded = httpsFirst.upgrade(safe);
+        if (upgraded) {
+          event.preventDefault();
+          loadHttpsUpgrade(upgraded);
+          return;
+        }
+      }
       // Redirection vers un site dangereux (docs/safe-browsing.md).
       if (event.isMainFrame === false) {
         if (guardSubframeNavigation(safe)) event.preventDefault();
@@ -1200,9 +1211,44 @@ function createBrowserTabManager({
         if (guardSubframeNavigation(url)) event.preventDefault();
         return;
       }
+      const upgraded = httpsFirst ? httpsFirst.upgrade(url) : null;
+      if (upgraded) {
+        event.preventDefault();
+        loadHttpsUpgrade(upgraded);
+        return;
+      }
       if (guardMainNavigation(tabId, url, () => !wc.isDestroyed() && void wc.loadURL(url))) {
         event.preventDefault();
       }
+    });
+
+    // HTTPS d'abord (docs/security.md) : la navigation vers une page http d'un site public est
+    // arrêtée avant toute requête et relancée en https (liens, formulaires, scripts, redirections ;
+    // barre d'adresse et ouverture d'onglet : `upgradeHttp` dans `create` / `navigate`). Repli en
+    // http si la version sécurisée échoue (did-fail-load) ou ne répond pas en 5 s. Jamais de
+    // `loadURL` pendant un événement de navigation (plantage natif) : relancé au tour suivant.
+    let httpsUpgradeTimer = null;
+    const loadHttpsUpgrade = (target) => {
+      setImmediate(() => {
+        if (!wc.isDestroyed()) void wc.loadURL(target).catch(() => undefined);
+      });
+    };
+    wc.on('did-start-navigation', (event) => {
+      if (!httpsFirst || !event.isMainFrame || event.isSameDocument || !httpsFirst.isPending(event.url)) return;
+      const target = event.url;
+      if (httpsUpgradeTimer) clearTimeout(httpsUpgradeTimer);
+      httpsUpgradeTimer = setTimeout(() => {
+        httpsUpgradeTimer = null;
+        if (wc.isDestroyed() || !httpsFirst.isPending(target)) return;
+        const fallback = httpsFirst.fallbackFor(target);
+        if (!fallback) return;
+        wc.stop();
+        void wc.loadURL(fallback).catch(() => undefined);
+      }, HTTPS_UPGRADE_TIMEOUT_MS);
+      if (typeof httpsUpgradeTimer.unref === 'function') httpsUpgradeTimer.unref();
+    });
+    wc.on('did-navigate', (_event, url) => {
+      if (httpsFirst) httpsFirst.committed(url);
     });
 
     // Précédent / Suivant / Actualiser ne passent pas par les événements ci-dessus : arrêtés ici.
@@ -1264,6 +1310,12 @@ function createBrowserTabManager({
     });
     wc.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return;
+      // La version https d'un site n'a pas répondu : la page s'ouvre en http (« Non sécurisé »).
+      const httpFallback = httpsFirst ? httpsFirst.fallbackFor(validatedURL) : null;
+      if (httpFallback && isCurrentTabView(tabs, tabId, view)) {
+        loadHttpsUpgrade(httpFallback);
+        return;
+      }
       const failure = classifyLoadFailure({ errorCode, errorDescription, validatedURL, isMainFrame });
       if (failure && isCurrentTabView(tabs, tabId, view)) {
         showErrorPage(tabId, failure);
@@ -2000,7 +2052,7 @@ function createBrowserTabManager({
       return { ok: false, error: 'invalid-tab-id' };
     }
     if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
-    const safe = sanitizeBrowserUrl(url);
+    const safe = upgradeHttp(sanitizeBrowserUrl(url));
     if (!safe) return { ok: false, error: 'invalid-url' };
 
     if (tabs.has(tabId)) {
@@ -2017,10 +2069,16 @@ function createBrowserTabManager({
     return { ok: true, tabId, url: safe };
   }
 
+  /** HTTPS d'abord (docs/security.md) : adresse tapée ou ouverte, essayée en https. */
+  function upgradeHttp(url) {
+    if (!url || !httpsFirst) return url;
+    return httpsFirst.upgrade(url) || url;
+  }
+
   function navigate({ tabId, url }) {
     if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
     const entry = tabs.get(tabId);
-    const safe = sanitizeBrowserUrl(url);
+    const safe = upgradeHttp(sanitizeBrowserUrl(url));
     if (!safe) return { ok: false, error: 'invalid-url' };
     if (!entry) {
       sleepingTabs.delete(tabId);

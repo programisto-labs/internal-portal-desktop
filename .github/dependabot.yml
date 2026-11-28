@@ -1,0 +1,36 @@
+# Montées de version automatiques (docs/security.md, « Electron et Chromium »).
+# Electron livre les correctifs de sécurité de Chromium dans des versions de correctif (44.x.y) :
+# vérifiées chaque jour, PR groupée, testée par .github/workflows/ci.yml (tests + build macOS).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+      time: "05:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 6
+    labels: [dependencies]
+    commit-message:
+      prefix: fix
+      prefix-development: fix
+      include: scope
+    groups:
+      # Electron + son updater : un seul PR, priorité sécurité (fix → version de correctif de Lasco).
+      electron:
+        patterns: ["electron", "electron-updater"]
+      build-tooling:
+        patterns: ["electron-builder", "@electron/*"]
+      adblock:
+        patterns: ["@ghostery/*"]
+    ignore:
+      # node-pty suit l'ABI d'Electron : monté à la main avec un essai du terminal de Lasco Code.
+      - dependency-name: node-pty
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    commit-message:
+      prefix: chore
