@@ -51,6 +51,7 @@ const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-au
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
 const { capturePageImage } = require('./page-capture');
+const { isPinnedCrossSiteNavigation, normalizePinnedUrl } = require('./pinned');
 const {
   PAGE_SLEEP_PROBE_SCRIPT,
   PRELOAD_WORLD_ID,
@@ -416,6 +417,8 @@ function createBrowserTabManager({
    * l'identique. tabId → { url, title, favicon, entries, index, scroll, zoomFactor, muted, sleptAt }.
    */
   const sleepingTabs = new Map();
+  /** tabId → adresse à l'épinglage (onglets web épinglés). */
+  const pinnedUrls = new Map();
   let sleepTimer = null;
 
   const passwords = createPasswordController({
@@ -2006,6 +2009,18 @@ function createBrowserTabManager({
     return { ok: true };
   }
 
+  /**
+   * Onglet web épinglé (docs/pinned-tabs.md) : `pinnedUrl` = adresse à l'épinglage, `null` = détaché.
+   * Gardé hors de l'entrée de l'onglet : il survit à la veille et à la recréation de la vue.
+   */
+  function setPinned({ tabId, pinnedUrl } = {}) {
+    if (typeof tabId !== 'string' || !tabId || tabId.length > 200) return { ok: false, error: 'invalid-tab' };
+    const url = normalizePinnedUrl(pinnedUrl);
+    if (url) pinnedUrls.set(tabId, url);
+    else pinnedUrls.delete(tabId);
+    return { ok: true };
+  }
+
   /** Couper ou réactiver le son d'un onglet (icône haut-parleur, clic droit). */
   function setMuted({ tabId, muted }) {
     const slept = sleepingTabs.get(tabId);
@@ -2661,6 +2676,7 @@ function createBrowserTabManager({
     goForward,
     reload,
     setMuted,
+    setPinned,
     setSafeBrowsingTexts,
     stop,
     setBounds,
