@@ -358,6 +358,11 @@ function createBrowserTabManager({
   privateMode = false,
   isPortalUrl = null,
   onPortalUrl = null,
+  // Profils de navigation (docs/browser-profiles.md) : fichiers du profil, et session prête (cookies migrés).
+  sitePermissions: profileSitePermissions = null,
+  externalAppPermissions: profileExternalAppPermissions = null,
+  sessionReady = null,
+  onSessionCreated = null,
 }) {
   const browserPartition = privateMode ? assertInMemoryPartition(partition) : partition;
   // Fenêtre privée : zoom par site en mémoire, jamais écrit (docs/private-browsing.md).
@@ -372,7 +377,9 @@ function createBrowserTabManager({
     return true;
   };
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
-  const externalAppPermissions = privateMode ? createExternalAppPermissionStore({}) : sharedExternalAppPermissions();
+  const externalAppPermissions = privateMode
+    ? createExternalAppPermissionStore({})
+    : profileExternalAppPermissions || sharedExternalAppPermissions();
   const externalApps = createExternalAppLauncher({
     shell,
     showMessageBox: (...args) => dialog.showMessageBox(...args),
@@ -382,7 +389,7 @@ function createBrowserTabManager({
   });
   const sitePermissions = privateMode
     ? createPrivateSitePermissions({ memory: createSitePermissionStore({}), base: sharedSitePermissions() })
-    : sharedSitePermissions();
+    : profileSitePermissions || sharedSitePermissions();
   const adblock = sharedAdblock();
   // Interrupteur ou exception changés (Réglages, informations du site) : l'état des onglets suit.
   const stopAdblockListener = adblock.settings.onChange(() => {
@@ -579,6 +586,8 @@ function createBrowserTabManager({
       adblock.install(browserSession);
       // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
       void installDevtoolsResponsive(browserSession);
+      // Téléchargements de cette session (docs/downloads.md), rangés sous le profil de la fenêtre.
+      if (typeof onSessionCreated === 'function') onSessionCreated(browserSession);
     }
     return browserSession;
   }
@@ -1579,6 +1588,11 @@ function createBrowserTabManager({
    */
   async function loadWithChromeIdentity(entry) {
     const wc = entry.view.webContents;
+    // Contexte d'un profil (docs/browser-profiles.md) : la page attend la copie des anciens cookies.
+    if (sessionReady) {
+      await sessionReady.catch(() => undefined);
+      if (wc.isDestroyed()) return;
+    }
     const startedAt = Date.now();
     try {
       // Never let the identity step hold the tab: past the limit, the page
@@ -2790,6 +2804,11 @@ function createBrowserTabManager({
     }
   }
   api.isPrivate = privateMode;
+  /** Fenêtre passée à un autre profil ou un autre workspace : vues détruites, plus aucun abonnement. */
+  api.dispose = () => {
+    destroyAll();
+    stopAdblockListener();
+  };
   /** Fermeture d'une fenêtre privée : vues détruites, puis cookies, cache et stockage de sa session effacés. */
   api.destroySession = async () => {
     destroyAll();
@@ -2801,6 +2820,7 @@ function createBrowserTabManager({
 module.exports = {
   createBrowserTabManager,
   sharedSitePermissions,
+  sharedExternalAppPermissions,
   sharedAdblock,
   STATE_CHANNEL,
   OPEN_REQUEST_CHANNEL,

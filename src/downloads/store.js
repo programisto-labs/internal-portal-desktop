@@ -43,6 +43,13 @@ function normalizeRecord(raw) {
     error: str(raw.error, 100) || null,
     // Safe Browsing (docs/safe-browsing.md) : 'malware' | 'phishing' | 'unwanted' quand error = 'dangerous'.
     danger: DANGERS.includes(raw.danger) ? raw.danger : null,
+    // Profil de navigation et session d'origine (docs/browser-profiles.md). Absent : profil par défaut.
+    ...(typeof raw.profileId === 'string' && /^(default|bp_[0-9a-f]{16})$/.test(raw.profileId)
+      ? { profileId: raw.profileId }
+      : {}),
+    ...(typeof raw.partition === 'string' && /^persist:[a-z0-9-]{1,120}$/.test(raw.partition)
+      ? { partition: raw.partition }
+      : {}),
   };
 }
 

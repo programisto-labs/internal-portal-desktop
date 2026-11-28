@@ -6,7 +6,7 @@ Lasco Desktop enregistre lui-même les fichiers téléchargés depuis les onglet
 
 - `src/downloads/naming.js` : nom de fichier sûr (`sanitizeFilename`), chemin libre « rapport (1).csv » (`uniqueSavePath`).
 - `src/downloads/store.js` : liste persistée (`userData/downloads.json`, 1 000 entrées au plus). Un téléchargement en cours quand Lasco quitte revient en `interrupted` / `shutdown`.
-- `src/downloads/service.js` : `will-download` des sessions `persist:browser-tabs` (`source: 'web'`) et `persist:portal` (`source: 'portal'`), progression (envoi toutes les 250 ms au plus), actions par identifiant.
+- `src/downloads/service.js` : `will-download` des sessions des onglets web (`source: 'web'`, une par profil et workspace, docs/browser-profiles.md ; `profileId` et `partition` gardés sur l'entrée) et `persist:portal` (`source: 'portal'`), progression (envoi toutes les 250 ms au plus), actions par identifiant.
 - `src/main.js` : branchement, IPC, Réglages ; progression dans le Dock / la barre des tâches (`setProgressBar`), rebond de la pile Téléchargements (`app.dock.downloadFinished`).
 
 ## Fichiers créés par Lasco
