@@ -10,6 +10,7 @@ const {
   sharedSitePermissions,
   sharedAdblock,
   BROWSER_PARTITION,
+  sharedExternalAppPermissions,
 } = require('./browser-tabs/manager');
 const { captureFilename, captureVisible } = require('./browser-tabs/page-capture');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
@@ -24,6 +25,14 @@ const {
 } = require('./default-browser');
 const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
 const { createHistoryStore } = require('./browser-tabs/history');
+const { createSitePermissionStore } = require('./browser-tabs/site-permissions');
+const { createExternalAppPermissionStore } = require('./browser-tabs/external-apps');
+const {
+  resolveBrowserContext,
+  sameBrowserContext,
+  createMigratedPartitionsStore,
+} = require('./browser-profiles/context');
+const { createBrowserProfileRegistry } = require('./browser-profiles/registry');
 const { registerBrowserImportIpc } = require('./browser-import/ipc');
 const { createSearchEngineStore } = require('./browser-tabs/search-engines');
 const { createDownloadsStore } = require('./downloads/store');
@@ -604,8 +613,13 @@ function closeSettings() {
 }
 
 /** Réglages > Autorisations des sites : libellés, réglages par défaut, sites retenus. */
+/** Autorisations du profil de la fenêtre principale (docs/browser-profiles.md). */
+function activeSitePermissions() {
+  return getBrowserProfileRegistry().storesFor(mainWindowBrowserContext()).sitePermissions;
+}
+
 function sitePermissionsSettingsState() {
-  const store = sharedSitePermissions();
+  const store = activeSitePermissions();
   return {
     names: PERMISSION_NAMES,
     defaults: store.listDefaults(),
@@ -1035,6 +1049,66 @@ function getBrowserHistoryStore() {
 }
 
 /**
+ * Profils de navigation (docs/browser-profiles.md) : une session par (compte, profil, workspace), des fichiers
+ * par (compte, profil). Sans contexte posé par le portail (ancien portail, mode VM), la session d'avant.
+ */
+let browserProfileRegistry = null;
+function getBrowserProfileRegistry() {
+  if (!browserProfileRegistry) {
+    browserProfileRegistry = createBrowserProfileRegistry({
+      fromPartition: (partition) => session.fromPartition(partition),
+      legacy: {
+        history: getBrowserHistoryStore,
+        sitePermissions: sharedSitePermissions,
+        externalAppPermissions: sharedExternalAppPermissions,
+      },
+      createHistoryStore,
+      createSitePermissionStore,
+      createExternalAppPermissionStore,
+      migrated: createMigratedPartitionsStore({
+        filePath: path.join(app.getPath('userData'), 'browser-profiles', 'migration.json'),
+      }),
+      attachDownloads: (ses, meta) => getDownloadService().attach(ses, 'web', meta),
+      log: (line) => console.log(line),
+    });
+  }
+  return browserProfileRegistry;
+}
+
+/**
+ * Profil retiré dans le portail : cookies, cache et stockage de ses sessions vidés, fichiers du profil
+ * supprimés. Jamais le profil par défaut, jamais un profil affiché par une fenêtre.
+ */
+async function forgetBrowserProfile({ owner, profileId }) {
+  const ctx = resolveBrowserContext({ owner, profileId, workspace: 'x' }, { userDataDir: app.getPath('userData') });
+  if (!ctx || ctx.isDefault || ctx.profileId !== profileId) return { ok: false, error: 'invalid-profile' };
+  for (const entry of portalWindows.values()) {
+    if (entry.browserContext && entry.browserContext.profileKey === ctx.profileKey) return { ok: false, error: 'in-use' };
+  }
+  const prefix = `bp-${ctx.owner}-${ctx.profileId}-`;
+  let names = [];
+  try {
+    names = fs.readdirSync(path.join(app.getPath('userData'), 'Partitions')).filter((name) => name.startsWith(prefix));
+  } catch (_) {
+    // Aucune session sur le disque.
+  }
+  for (const name of names) {
+    const ses = session.fromPartition(`persist:${name}`);
+    await ses.clearStorageData().catch(() => undefined);
+    await ses.clearCache().catch(() => undefined);
+  }
+  if (ctx.dataDir) fs.rmSync(ctx.dataDir, { recursive: true, force: true });
+  return { ok: true, cleared: names.length };
+}
+
+/** Contexte web de la fenêtre principale : Réglages (autorisations) et import y écrivent. */
+function mainWindowBrowserContext() {
+  const win = mainPortalWindow();
+  const entry = win ? portalWindowEntry(win) : null;
+  return entry ? entry.browserContext || null : null;
+}
+
+/**
  * Téléchargements des onglets web et des pages du portail (docs/downloads.md). Un seul service
  * pour toutes les fenêtres ; chaque fenêtre du portail reçoit les changements.
  */
@@ -1082,7 +1156,9 @@ function getDownloadService() {
         if (!entry.win.isDestroyed()) entry.win.webContents.send('downloads-changed', event);
       }
     },
-    getSession: (source) => session.fromPartition(source === 'portal' ? 'persist:portal' : BROWSER_PARTITION),
+    // Nouvel essai dans la session d'origine (profil et workspace, docs/browser-profiles.md).
+    getSession: (source, rec) =>
+      session.fromPartition(source === 'portal' ? 'persist:portal' : (rec && rec.partition) || BROWSER_PARTITION),
     onFinished: (p) => {
       if (process.platform === 'darwin' && app.dock) app.dock.downloadFinished(p);
     },
@@ -1174,7 +1250,8 @@ function tabManagerFor(win) {
   if (!entry.tabManager) {
     entry.tabManager = createBrowserTabManager({
       getMainWindow: () => (win.isDestroyed() ? null : win),
-      history: getBrowserHistoryStore(),
+      // Profil et workspace de la fenêtre (docs/browser-profiles.md) : session, historique, autorisations.
+      ...getBrowserProfileRegistry().managerOptions(entry.browserContext || null),
       interceptLink: routePortalLinkInApp,
       searchEngines: getSearchEngineStore(),
       safeBrowsing: getSafeBrowsing(),
@@ -1673,7 +1750,7 @@ function createWindow({
 
   const winId = win.id;
   // `spare`: hidden, pre-loaded detached window (never a drop target nor the next main window).
-  portalWindows.set(winId, { win, role, tabManager: null, spare: Boolean(spareHref) });
+  portalWindows.set(winId, { win, role, tabManager: null, browserContext: null, spare: Boolean(spareHref) });
   if (role === 'main') {
     mainWindowRef = win;
     mainWindowFullPace = false;
@@ -2903,20 +2980,20 @@ function registerWindowIPC() {
   // Réglages > Autorisations des sites (docs/site-permissions.md).
   ipcMain.handle('settings-modal-site-set-default', (event, permission, value) => {
     if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
-    return { ok: sharedSitePermissions().setDefault(permission, value) };
+    return { ok: activeSitePermissions().setDefault(permission, value) };
   });
   ipcMain.handle('settings-modal-site-set', (event, origin, permission, decision) => {
     if (!fromSettings(event) || typeof origin !== 'string' || siteOrigin(origin) !== origin) {
       return { ok: false, error: 'forbidden' };
     }
     const next = decision === 'ask' || decision === null ? null : decision;
-    return { ok: sharedSitePermissions().set(origin, permission, next) };
+    return { ok: activeSitePermissions().set(origin, permission, next) };
   });
   ipcMain.handle('settings-modal-site-remove', (event, origin) => {
     if (!fromSettings(event) || typeof origin !== 'string' || siteOrigin(origin) !== origin) {
       return { ok: false, error: 'forbidden' };
     }
-    sharedSitePermissions().clearOrigin(origin);
+    activeSitePermissions().clearOrigin(origin);
     return { ok: true };
   });
   ipcMain.handle('settings-modal-site-reset-all', async (event) => {
@@ -2933,7 +3010,7 @@ function registerWindowIPC() {
     };
     const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
     if (response !== 0) return { ok: false, cancelled: true };
-    sharedSitePermissions().clear();
+    activeSitePermissions().clear();
     return { ok: true };
   });
 
@@ -3067,6 +3144,36 @@ function registerWindowIPC() {
     tabManagerFor(win)?.setAdoptPopups(Boolean(payload && payload.adoptPopups === true));
     if (win === mainPortalWindow()) flushPendingWebUrls();
   });
+  // Profils de navigation (docs/browser-profiles.md) : le portail pose le contexte de la fenêtre avant ses onglets.
+  ipcMain.handle('browser-profile-set-context', (event, payload) => {
+    const entry = portalWindowEntry(BrowserWindow.fromWebContents(event.sender));
+    if (!entry || event.sender !== entry.win.webContents) return { ok: false, error: 'forbidden' };
+    const next = resolveBrowserContext(payload, { userDataDir: app.getPath('userData') });
+    if (!next) return { ok: false, error: 'invalid-context' };
+    if (!sameBrowserContext(entry.browserContext, next)) {
+      // Autre profil ou autre workspace : les vues de l'ancien contexte disparaissent, le portail recrée ses onglets.
+      if (entry.tabManager) {
+        if (typeof entry.tabManager.dispose === 'function') entry.tabManager.dispose();
+        else entry.tabManager.destroyAll();
+        entry.tabManager = null;
+      }
+      entry.browserContext = next;
+    }
+    return { ok: true, profileId: next.profileId, workspace: next.workspace };
+  });
+  ipcMain.handle('browser-profile-get-context', (event) => {
+    const entry = portalWindowEntry(BrowserWindow.fromWebContents(event.sender));
+    if (!entry) return { ok: false, error: 'forbidden' };
+    const ctx = entry.browserContext;
+    return { ok: true, profileId: ctx ? ctx.profileId : null, workspace: ctx ? ctx.workspace : null };
+  });
+  /** Profil retiré dans le portail : sessions et fichiers de ce profil effacés de cet ordinateur. */
+  ipcMain.handle('browser-profile-forget', async (event, payload) => {
+    const entry = portalWindowEntry(BrowserWindow.fromWebContents(event.sender));
+    if (!entry || event.sender !== entry.win.webContents) return { ok: false, error: 'forbidden' };
+    return forgetBrowserProfile(payload || {});
+  });
+
   ipcMain.handle('browser-tab-create', (event, payload) => {
     const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
     if (!manager) return { ok: false, error: 'forbidden' };
@@ -3277,7 +3384,10 @@ function registerWindowIPC() {
     dialog,
     shell,
     home: app.getPath('home'),
-    history: getBrowserHistoryStore(),
+    // Historique importé dans le profil de la fenêtre principale (docs/browser-profiles.md).
+    history: {
+      importEntries: (items) => getBrowserProfileRegistry().storesFor(mainWindowBrowserContext()).history.importEntries(items),
+    },
     resolveWindow: (event) => {
       const win = BrowserWindow.fromWebContents(event.sender);
       return portalWindowEntry(win) ? win : null;
@@ -3559,7 +3669,10 @@ if (!app.requestSingleInstanceLock()) {
       systemPreferences,
     });
     // Téléchargements : pages web des onglets et pages du portail (exports CSV, PDF…).
-    getDownloadService().attach(session.fromPartition(BROWSER_PARTITION), 'web');
+    getBrowserProfileRegistry().attachOnce(session.fromPartition(BROWSER_PARTITION), {
+      profileId: 'default',
+      partition: BROWSER_PARTITION,
+    });
     getDownloadService().attach(session.fromPartition('persist:portal'), 'portal');
     getSafeBrowsing().start();
     registerWindowIPC();
