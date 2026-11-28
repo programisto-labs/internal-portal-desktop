@@ -2010,15 +2010,17 @@ function createBrowserTabManager({
   }
 
   /**
-   * Onglet web épinglé (docs/pinned-tabs.md) : `pinnedUrl` = adresse à l'épinglage, `null` = détaché.
-   * Gardé hors de l'entrée de l'onglet : il survit à la veille et à la recréation de la vue.
+   * Onglet web épinglé (docs/pinned-tabs.md) : `{ tabId, pinned, pinnedUrl }`, `pinnedUrl` = adresse à
+   * l'épinglage. `pinned: false` (ou `pinnedUrl: null` sans `pinned`) le détache. Gardé hors de
+   * l'entrée de l'onglet : il survit à la veille et à la recréation de la vue. Même appel que la garde
+   * de l'économiseur de mémoire (`pinned`, perf/many-tabs) : à fusionner dans une seule fonction.
    */
-  function setPinned({ tabId, pinnedUrl } = {}) {
+  function setPinned({ tabId, pinned, pinnedUrl } = {}) {
     if (typeof tabId !== 'string' || !tabId || tabId.length > 200) return { ok: false, error: 'invalid-tab' };
-    const url = normalizePinnedUrl(pinnedUrl);
+    const url = pinned === false ? null : normalizePinnedUrl(pinnedUrl);
     if (url) pinnedUrls.set(tabId, url);
     else pinnedUrls.delete(tabId);
-    return { ok: true };
+    return { ok: true, tabId, pinned: pinned === true || Boolean(url) };
   }
 
   /** Couper ou réactiver le son d'un onglet (icône haut-parleur, clic droit). */

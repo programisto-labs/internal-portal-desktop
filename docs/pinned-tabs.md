@@ -20,8 +20,10 @@ garde son menu HTML pour les onglets du portail.
 
 ## Liens d'un onglet web épinglé
 
-`browserTabs.setPinned({ tabId, pinnedUrl })` (`browser-tab-set-pinned`) : `pinnedUrl` = adresse
-http(s) au moment de l'épinglage, `null` = détaché. Gardé par `tabId` hors de la vue (survit à la
+`browserTabs.setPinned({ tabId, pinned, pinnedUrl })` (`browser-tab-set-pinned`) : `pinnedUrl` =
+adresse http(s) au moment de l'épinglage, `pinned: false` = détaché. C'est le même appel que la garde
+de l'économiseur de mémoire (`pinned`, branche `perf/many-tabs`) : la seconde PR mergée fusionne les
+deux `setPinned` du gestionnaire. Gardé par `tabId` hors de la vue (survit à la
 veille et à la recréation), vidé quand la coquille se recharge (la page renvoie ses épingles).
 
 Une navigation de la page (`will-navigate` : lien, formulaire, `location`) vers **un autre site**
@@ -31,3 +33,9 @@ premier plan, juste après la zone épinglée. Même site (`mail.google.com` →
 redirections serveur et navigations lancées par le portail (`navigate`) : inchangées.
 
 Tests : `scripts/test-pinned-tabs.js`.
+
+## Liste des onglets tenue par Desktop (`src/tab-model.js`)
+
+La page envoie aussi `pinnedHref` sur chaque onglet épinglé de la liste. `sanitizeTabRecord` doit le
+garder (chaîne http(s) ou chemin du portail, seulement si `pinned`) ; sinon « Revenir à l'URL
+épinglée » repart de l'adresse actuelle après un redémarrage.
