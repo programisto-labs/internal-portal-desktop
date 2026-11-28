@@ -62,9 +62,10 @@ describe('tab descriptor', () => {
 
 describe('window argument', () => {
   it('round-trips role and initial tab (UTF-8 titles included)', () => {
-    const arg = encodeTabWindowArg({ role: 'detached', initialTab: { id: 't', title: 'Pédagogie — été' } });
-    assert.deepEqual(decodeTabWindowArg(['x', arg]), { role: 'detached', initialTab: { id: 't', title: 'Pédagogie — été' } });
-    assert.deepEqual(decodeTabWindowArg([encodeTabWindowArg({ role: 'bogus' })]), { role: 'main', initialTab: null });
+    const arg = encodeTabWindowArg({ role: 'detached', initialTab: { id: 't', title: 'Pédagogie — été' }, windowKey: null });
+    assert.deepEqual(decodeTabWindowArg(['x', arg]), { role: 'detached', initialTab: { id: 't', title: 'Pédagogie — été' }, windowKey: null });
+    assert.deepEqual(decodeTabWindowArg([encodeTabWindowArg({ role: 'bogus' })]), { role: 'main', initialTab: null, windowKey: null });
+    assert.equal(decodeTabWindowArg([encodeTabWindowArg({ role: 'detached', windowKey: 'w-1' })]).windowKey, 'w-1');
     assert.equal(decodeTabWindowArg(['--lasco-tab-window=%%%']), null);
     assert.equal(decodeTabWindowArg([]), null);
   });
