@@ -288,7 +288,13 @@ const tabWindowsBridge = {
   initialTab: tabWindowInfo.initialTab,
   ready: () => ipcRenderer.invoke('tab-window-ready'),
   onAdopt: (callback) => subscribe('tab-window-adopt', callback),
+  /**
+   * `{ tab, screenX?, screenY?, float? }`. `float: true` (page du portail) : petite fenêtre toujours au
+   * premier plan, l'onglet revient à la fermeture (docs/picture-in-picture.md).
+   */
   detach: (payload) => ipcRenderer.invoke('tab-window-detach', payload),
+  /** Desktop récent : `detach({ float: true })` est compris. */
+  canFloat: true,
   attach: (payload) => ipcRenderer.invoke('tab-window-attach', payload),
   dragOut: (payload) => ipcRenderer.invoke('tab-window-drag-out', payload),
   dragCancel: () => ipcRenderer.invoke('tab-window-drag-cancel'),

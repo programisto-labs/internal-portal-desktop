@@ -45,6 +45,7 @@ function render(state) {
   const $ = (id) => document.getElementById(id);
   $('name').textContent = typeof s.title === 'string' ? s.title : '';
   $('dot').hidden = s.kind !== 'call';
+  document.body.dataset.kind = s.kind || '';
   if (s.kind === 'call') $('dot').title = t.inCall || '';
 
   const mic = $('microphone');

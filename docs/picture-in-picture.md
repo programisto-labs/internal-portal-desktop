@@ -59,6 +59,23 @@ quand l'onglet navigue ailleurs ou se ferme. Pendant qu'elle est ouverte, `setVi
 vue sont neutralisés côté gestionnaire d'onglets (sélection d'un autre onglet, menus de la coquille) : seule
 la fenêtre flottante la place.
 
+## « Incruster l'onglet » : n'importe quelle page
+
+Menu natif d'un onglet (`picture-in-picture`, libellé fourni par la page, proposé par le portail sauf
+pour le nouvel onglet vide et Lasco Code) :
+
+- **Page web** : `browserTabs.pictureInPicture({ tabId, action: 'enter', mode: 'page' })`. La vue de
+  l'onglet passe dans la fenêtre flottante ci-dessus, **sans rechargement** (formulaire, lecture, session
+  gardés), barre sans contrôles d'appel (`pictureInPicture: 'page'`). Pendant un appel, c'est la fenêtre
+  d'appel. Retour : comme pour un appel (sélection de l'onglet, « Revenir à l'onglet », « Fermer »).
+- **Page de Lasco** (onglet du portail) : `tabWindows.detach({ tab, float: true })` (si
+  `tabWindows.canFloat`) → fenêtre détachée (`src/main.js`, `openFloatingPortalTab`), 420 × 560 en bas à
+  droite, taille minimale 320 × 360, toujours au premier plan, sur tous les bureaux, avec la même barre
+  (`attachFloatBar`, posée en bas de la fenêtre). La page s'y affiche en mise en page mobile, sans barre
+  d'onglets. « Revenir à l'onglet » (Lasco au premier plan), « Fermer » ou le bouton rouge : l'onglet
+  revient dans la fenêtre principale (`onAdopt`), à l'adresse où il en est, et la fenêtre se ferme. Elle
+  ne devient la fenêtre principale que s'il n'en reste aucune autre.
+
 ## Incrustation automatique
 
 Réglage : Lasco > Réglages… > Général > **Incrustation automatique** (`pictureInPictureAuto`, activé par
@@ -85,11 +102,11 @@ personne n'est jamais refermée par Lasco.
 
 - `inCall` : appel en cours ;
 - `canPictureInPicture` : une vidéo lit ou un appel est en cours ;
-- `pictureInPicture` : `'video'` (incrustation de Chromium), `'call'` (fenêtre flottante) ou `null`.
+- `pictureInPicture` : `'video'` (incrustation de Chromium), `'call'` (fenêtre d'appel), `'page'` (page incrustée) ou `null`.
 
 | Méthode | Rôle |
 | --- | --- |
-| `browserTabs.pictureInPicture({ tabId, action? })` | `toggle` (défaut), `enter`, `exit`. Appel : fenêtre flottante ; sinon la vidéo. → `{ ok, pictureInPicture }` ou `{ ok: false, error: 'unknown-tab' \| 'no-video' \| … }` |
+| `browserTabs.pictureInPicture({ tabId, action?, mode? })` | `toggle` (défaut), `enter`, `exit` ; `mode` `auto` (défaut : appel → fenêtre flottante, sinon la vidéo) ou `page` (toute la page). → `{ ok, pictureInPicture }` ou `{ ok: false, error: 'unknown-tab' \| 'no-video' \| 'not-web' \| … }` |
 | `browserTabs.setPictureInPictureTexts({ texts })` | textes de la barre dans la langue de la personne : `backToTab`, `microphoneOn`, `microphoneOff`, `cameraOn`, `cameraOff`, `hangup`, `close`, `inCall` (80 caractères au plus ; français sinon) |
 
 Un ancien Desktop n'envoie pas ces champs et n'a pas ces méthodes : le portail n'affiche rien.
@@ -102,7 +119,8 @@ npx electron scripts/e2e-picture-in-picture.js
 
 Vrai gestionnaire d'onglets, faux appel (caméra et micro factices de Chromium), vidéo avec du son :
 fenêtre flottante au changement d'onglet et en quittant l'app, boutons de la barre, retour, raccrocher,
-veille refusée, incrustation de la vidéo et retour, réglage coupé (32 vérifications). Ouvre des fenêtres
+veille refusée, incrustation de la vidéo et retour, page web incrustée sans rechargement, réglage coupé
+(36 vérifications). La fenêtre d'une page de Lasco n'est pas couverte (elle demande le portail et une session). Ouvre des fenêtres
 à l'écran quelques secondes. Règles : `scripts/test-picture-in-picture.js` (`npm run test:unit`).
 
 Non vérifié automatiquement : un vrai appel Meet, Teams ou Zoom (compte et réunion nécessaires). Les

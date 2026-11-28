@@ -18,7 +18,7 @@ const ACTION_CHANNEL = 'lasco-call-float';
 const STATE_CHANNEL = 'lasco-call-float-state';
 const ACTIONS = new Set(['ready', 'microphone', 'camera', 'hangup', 'back', 'close']);
 
-/** Barres ouvertes, par webContents de la barre : une seule écoute IPC pour toutes. */
+/** Barres ouvertes (attachFloatBar), par webContents de la barre : une seule écoute IPC pour toutes. */
 const floatsByBarId = new Map();
 let ipcInstalled = false;
 
@@ -72,19 +72,7 @@ function createCallFloat({ view, parentWindow, onAction, onClosed }) {
     // Linux sans gestionnaire compatible.
   }
 
-  const bar = new WebContentsView({
-    webPreferences: {
-      preload: path.join(__dirname, 'call-float-preload.js'),
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-      spellcheck: false,
-    },
-  });
-  const barId = bar.webContents.id;
-  bar.webContents.on('will-navigate', (event) => event.preventDefault());
-  bar.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  void bar.webContents.loadFile(path.join(__dirname, 'call-float.html'));
+  const bar = attachFloatBar(win, { onAction: (action) => onAction(action) });
 
   let tabView = view;
   let closed = false;
@@ -95,11 +83,7 @@ function createCallFloat({ view, parentWindow, onAction, onClosed }) {
     const [width, height] = win.getContentSize();
     // Méthodes du prototype : le gestionnaire d'onglets neutralise celles de la vue tant qu'elle est ici.
     if (tabView) WebContentsView.prototype.setBounds.call(tabView, { x: 0, y: 0, width, height: Math.max(0, height - BAR_HEIGHT) });
-    bar.setBounds({ x: 0, y: Math.max(0, height - BAR_HEIGHT), width, height: BAR_HEIGHT });
-  }
-
-  function sendState() {
-    if (!bar.webContents.isDestroyed()) bar.webContents.send(STATE_CHANNEL, state);
+    bar.layout();
   }
 
   /** Retire la vue de l'onglet (avant fermeture, ou pour la rendre au portail). */
@@ -116,7 +100,7 @@ function createCallFloat({ view, parentWindow, onAction, onClosed }) {
   }
 
   win.contentView.addChildView(view);
-  win.contentView.addChildView(bar);
+  bar.raise();
   WebContentsView.prototype.setVisible.call(view, true);
   layout();
   win.on('resize', layout);
@@ -131,8 +115,6 @@ function createCallFloat({ view, parentWindow, onAction, onClosed }) {
     releaseView();
   });
   win.on('closed', () => {
-    floatsByBarId.delete(barId);
-    if (!bar.webContents.isDestroyed()) bar.webContents.close();
     if (!closed) {
       closed = true;
       onClosed();
@@ -141,18 +123,11 @@ function createCallFloat({ view, parentWindow, onAction, onClosed }) {
 
   const api = {
     window: win,
-    handleAction(action) {
-      if (action === 'ready') {
-        sendState();
-        return;
-      }
-      onAction(action);
-    },
     /** `{ kind, title, controls, texts }` affichés par la barre. */
     update(next) {
       state = { ...state, ...next };
       if (!win.isDestroyed()) win.setTitle(state.title || 'Lasco');
-      sendState();
+      bar.update(state);
     },
     show() {
       // Sans prendre le focus : la personne vient de passer à une autre app ou un autre onglet.
@@ -167,8 +142,72 @@ function createCallFloat({ view, parentWindow, onAction, onClosed }) {
     isOpen: () => !win.isDestroyed(),
     isFocused: () => !win.isDestroyed() && win.isFocused(),
   };
-  floatsByBarId.set(barId, api);
   return api;
 }
 
-module.exports = { createCallFloat, BAR_HEIGHT };
+/**
+ * Barre de l'incrustation (call-float.html) posée en bas d'une fenêtre : celle de l'appel, ou une fenêtre
+ * du portail incrustée (page Lasco). `onAction` reçoit microphone | camera | hangup | back | close.
+ */
+function attachFloatBar(win, { onAction }) {
+  installIpc();
+  const view = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'call-float-preload.js'),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: false,
+    },
+  });
+  const wc = view.webContents;
+  const id = wc.id;
+  wc.on('will-navigate', (event) => event.preventDefault());
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  void wc.loadFile(path.join(__dirname, 'call-float.html'));
+  let state = {};
+  const send = () => {
+    if (!wc.isDestroyed()) wc.send(STATE_CHANNEL, state);
+  };
+  const layout = () => {
+    if (win.isDestroyed()) return;
+    const [width, height] = win.getContentSize();
+    view.setBounds({ x: 0, y: Math.max(0, height - BAR_HEIGHT), width, height: BAR_HEIGHT });
+  };
+  const bar = {
+    id,
+    view,
+    handleAction(action) {
+      if (action === 'ready') send();
+      else onAction(action);
+    },
+    update(next) {
+      state = { ...state, ...next };
+      send();
+    },
+    layout,
+    raise() {
+      if (win.isDestroyed()) return;
+      win.contentView.addChildView(view);
+      layout();
+    },
+    dispose() {
+      floatsByBarId.delete(id);
+      win.removeListener('resize', layout);
+      if (!win.isDestroyed()) {
+        try {
+          win.contentView.removeChildView(view);
+        } catch (_) {
+          // Déjà retirée.
+        }
+      }
+      if (!wc.isDestroyed()) wc.close();
+    },
+  };
+  floatsByBarId.set(id, bar);
+  win.on('resize', layout);
+  win.once('closed', () => bar.dispose());
+  return bar;
+}
+
+module.exports = { createCallFloat, attachFloatBar, BAR_HEIGHT };

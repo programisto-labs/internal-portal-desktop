@@ -1705,7 +1705,7 @@ function createBrowserTabManager({
   }
 
   function pictureInPictureOf(tabId, entry) {
-    if (floating && floating.tabId === tabId) return 'call';
+    if (floating && floating.tabId === tabId) return floating.kind;
     return entry && entry.mediaProbe && entry.mediaProbe.videoPip ? 'video' : null;
   }
 
@@ -1834,16 +1834,16 @@ function createBrowserTabManager({
   }
 
   /** Déplace la vue de l'onglet dans la fenêtre flottante. */
-  function openFloat(tabId, { source }) {
+  function openFloat(tabId, { source, kind = 'call' }) {
     const entry = liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
-    if (floating && floating.tabId === tabId) return { ok: true, pictureInPicture: 'call' };
+    if (floating && floating.tabId === tabId) return { ok: true, pictureInPicture: floating.kind };
     if (floating) closeFloat({ restore: true });
     const { createCallFloat } = require('./call-float');
     const view = entry.view;
     exitPageFullscreen(entry);
     detachView(view);
-    const record = { tabId, kind: 'call', source, float: null };
+    const record = { tabId, kind, source, float: null };
     floating = record;
     // Tant qu'elle est dans la fenêtre flottante, la vue ne suit plus la fenêtre du portail (sélection d'un
     // autre onglet, menus de la coquille, redimensionnement) : seule la fenêtre flottante la place.
@@ -1868,7 +1868,7 @@ function createBrowserTabManager({
     }
     const wc = view.webContents;
     record.float.update({
-      kind: 'call',
+      kind,
       title: wc.getTitle() || entry.title || '',
       controls: floatControlsState(entry.mediaProbe),
       texts: pipTexts,
@@ -1876,7 +1876,7 @@ function createBrowserTabManager({
     record.float.show();
     pushState(tabId);
     void probeMedia(tabId);
-    return { ok: true, pictureInPicture: 'call' };
+    return { ok: true, pictureInPicture: kind };
   }
 
   function pinViewToFloat(view) {
@@ -2025,22 +2025,29 @@ function createBrowserTabManager({
   }
 
   /**
-   * Bouton du portail et menu : `{ tabId, action?: 'toggle' | 'enter' | 'exit' }`. Appel en cours :
-   * fenêtre flottante ; sinon incrustation de la plus grande vidéo qui lit.
+   * Bouton du portail et menu : `{ tabId, action?: 'toggle' | 'enter' | 'exit', mode?: 'auto' | 'page' }`.
+   * `auto` (défaut) : appel en cours → fenêtre flottante, sinon la plus grande vidéo qui lit.
+   * `page` (« Incruster l'onglet ») : toute la page dans la fenêtre flottante, sans rechargement.
    */
-  async function pictureInPicture({ tabId, action = 'toggle' } = {}) {
+  async function pictureInPicture({ tabId, action = 'toggle', mode = 'auto' } = {}) {
     const entry = liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
     if (!['toggle', 'enter', 'exit'].includes(action)) return { ok: false, error: 'invalid-action' };
+    if (!['auto', 'page'].includes(mode)) return { ok: false, error: 'invalid-mode' };
     const current = pictureInPictureOf(tabId, entry);
     if (action === 'exit' || (action === 'toggle' && current)) {
-      if (current === 'call') closeFloat({ restore: true });
+      if (current === 'call' || current === 'page') closeFloat({ restore: true });
       else if (current === 'video') await exitVideoPip(tabId);
       return { ok: true, pictureInPicture: null };
     }
-    if (current) return { ok: true, pictureInPicture: current };
+    if (current === 'video' && mode === 'page') await exitVideoPip(tabId);
+    else if (current) return { ok: true, pictureInPicture: current };
     await probeMedia(tabId);
-    if (entry.inCall) return openFloat(tabId, { source: 'manual' });
+    if (entry.inCall) return openFloat(tabId, { source: 'manual', kind: 'call' });
+    if (mode === 'page') {
+      if (!sanitizeBrowserUrl(entry.view.webContents.getURL())) return { ok: false, error: 'not-web' };
+      return openFloat(tabId, { source: 'manual', kind: 'page' });
+    }
     return enterVideoPip(tabId);
   }
 

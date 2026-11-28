@@ -165,6 +165,24 @@ app.whenReady().then(async () => {
     await manager.pictureInPicture({ tabId: 'video', action: 'exit' });
     check('… et sortie', manager.stateOf('video').pictureInPicture === null);
 
+    // « Incruster l'onglet » : n'importe quelle page web, sans rechargement.
+    const otherWc = manager.webContentsOf('other');
+    await otherWc.executeJavaScript('window.__lascoMarker = 42');
+    manager.select({ tabId: 'video' });
+    const page = await manager.pictureInPicture({ tabId: 'other', action: 'enter', mode: 'page' });
+    check('incruster une page web', page.ok && page.pictureInPicture === 'page' && (await until(() => floats().length === 1)), JSON.stringify(page));
+    check('… la page n’est pas rechargée', (await otherWc.executeJavaScript('window.__lascoMarker')) === 42);
+    const pageBar = floats()[0] && floats()[0].contentView.children.find((v) => v.webContents !== otherWc);
+    if (pageBar) {
+      await until(async () => (await pageBar.webContents.executeJavaScript("document.body.dataset.kind")) === 'page');
+      const visible = await pageBar.webContents.executeJavaScript(
+        "['microphone','camera','hangup','back','close'].filter((id) => !document.getElementById(id).hidden)",
+      );
+      check('… barre sans contrôles d’appel', visible.join(',') === 'back,close', visible.join(','));
+      await pageBar.webContents.executeJavaScript("document.getElementById('close').click()");
+      check('… fermer rend la page à son onglet', await until(() => floats().length === 0 && manager.stateOf('other').pictureInPicture === null));
+    }
+
     // Autre application pendant un appel : fenêtre flottante, refermée au retour dans Lasco.
     manager.create({ tabId: 'call2', url: `${origin}/call.html` });
     manager.select({ tabId: 'call2' });

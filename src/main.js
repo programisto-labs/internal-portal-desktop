@@ -16,6 +16,8 @@ const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permission
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
 const { TAB_SLEEP_DELAY_CHOICES, normalizeSiteHost, resolveTabSleepDelayMs } = require('./browser-tabs/tab-sleep');
+const { floatBounds, normalizePipTexts } = require('./browser-tabs/picture-in-picture');
+const { attachFloatBar } = require('./browser-tabs/call-float');
 const {
   classifyIncomingUrl,
   defaultBrowserSnapshot,
@@ -1349,6 +1351,93 @@ function openDetachedTabWindow(tab, { point, sourceWindow } = {}) {
 }
 
 /**
+ * « Incruster l'onglet » pour une page du portail (docs/picture-in-picture.md) : une fenêtre détachée
+ * petite, toujours au premier plan, sur tous les bureaux, avec la barre de l'incrustation en bas
+ * (« Revenir à l'onglet », « Fermer » : l'onglet revient dans la fenêtre principale).
+ * Les onglets web, eux, passent dans la fenêtre flottante du gestionnaire d'onglets (sans rechargement).
+ */
+const PORTAL_FLOAT_SIZE = Object.freeze({ width: 420, height: 560 });
+const PORTAL_FLOAT_MIN_SIZE = Object.freeze({ width: 320, height: 360 });
+let lastPortalFloatBounds = null;
+
+function openFloatingPortalTab(tab, { sourceWindow } = {}) {
+  if (!tab || tab.kind !== 'internal') return null;
+  const display = sourceWindow && !sourceWindow.isDestroyed()
+    ? screen.getDisplayMatching(sourceWindow.getBounds())
+    : screen.getPrimaryDisplay();
+  const bounds = floatBounds(display.workArea, lastPortalFloatBounds || PORTAL_FLOAT_SIZE);
+  const win = takeSpareTabWindow(tab, { bounds }) || createWindow({ role: 'detached', initialTab: tab, bounds });
+  if (!win || win.isDestroyed()) return null;
+  makePortalWindowFloat(win, tab);
+  // La fenêtre de réserve avait la taille minimale d'une fenêtre du portail : on repose la taille voulue.
+  win.setBounds(bounds);
+  return win;
+}
+
+/** Onglet affiché par la fenêtre incrustée (la personne a pu naviguer) : il revient tel quel. */
+function floatingPortalTabDescriptor(win, tab) {
+  let href = tab.href;
+  try {
+    const current = new URL(win.webContents.getURL());
+    if (current.origin === PORTAL_ORIGIN && isPortalPath(current.pathname + current.search)) {
+      href = current.pathname + current.search + current.hash;
+    }
+  } catch (_) {
+    // Adresse illisible : celle de départ.
+  }
+  return sanitizeTabDescriptor(
+    { ...tab, href, locationHref: href, title: win.webContents.getTitle() || tab.title },
+    { sanitizeBrowserUrl },
+  ) || tab;
+}
+
+function makePortalWindowFloat(win, tab) {
+  const entry = portalWindows.get(win.id);
+  if (!entry || entry.floating) return;
+  win.setMinimumSize(PORTAL_FLOAT_MIN_SIZE.width, PORTAL_FLOAT_MIN_SIZE.height);
+  win.setAlwaysOnTop(true, 'floating');
+  try {
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } catch (_) {
+    // Linux sans gestionnaire compatible.
+  }
+  win.setFullScreenable(false);
+  let returned = false;
+  /** L'onglet revient dans la fenêtre principale (sélectionné), la fenêtre incrustée se ferme. */
+  const returnTab = ({ focus, closeWindow = true }) => {
+    if (returned) return;
+    returned = true;
+    const target = mainPortalWindow();
+    const back = floatingPortalTabDescriptor(win, tab);
+    if (target && target !== win && !target.isDestroyed()) {
+      if (focus) deliverTabToWindow(target, back);
+      else tabAdoptQueue.deliver(target.id, back);
+    }
+    if (closeWindow && !win.isDestroyed()) win.close();
+  };
+  const bar = attachFloatBar(win, {
+    onAction: (action) => {
+      if (action === 'back') returnTab({ focus: true });
+      else if (action === 'close') returnTab({ focus: false });
+    },
+  });
+  bar.update({ kind: 'page', title: tab.title || '', controls: {}, texts: portalFloatTexts });
+  bar.raise();
+  const remember = () => {
+    if (!win.isDestroyed()) lastPortalFloatBounds = win.getBounds();
+  };
+  win.on('moved', remember);
+  win.on('resized', remember);
+  win.webContents.on('page-title-updated', (_event, title) => bar.update({ title }));
+  // Fermée par le bouton rouge ou ⌘W : l'onglet ne se perd pas, il revient dans la fenêtre principale.
+  win.on('close', () => returnTab({ focus: false, closeWindow: false }));
+  entry.floating = { bar, returnTab };
+}
+
+/** Textes de la barre d'incrustation, fournis par le portail (setPictureInPictureTexts). */
+let portalFloatTexts = normalizePipTexts(null);
+
+/**
  * Spare detached window: a hidden portal window already loaded on the new-tab page, so
  * detaching a tab only loads the tab itself, not the whole shell (docs/tab-windows.md).
  * Loaded when the page signals the intent (tab menu, tab drag), then kept once used.
@@ -1726,7 +1815,8 @@ function createWindow({
     if (spareTabWindow && spareTabWindow.win === win) spareTabWindow = null;
     if (mainWindowRef === win) {
       // The oldest detached window becomes the main one (bridges, badge, links).
-      const next = [...portalWindows.values()].find((e) => !e.win.isDestroyed() && !e.spare);
+      const next = [...portalWindows.values()].find((e) => !e.win.isDestroyed() && !e.spare && !e.floating)
+        || [...portalWindows.values()].find((e) => !e.win.isDestroyed() && !e.spare);
       if (next) next.role = 'main';
       mainWindowRef = next ? next.win : null;
       // No portal window left on screen: the spare must not keep the app alive.
@@ -2502,6 +2592,13 @@ function registerWindowIPC() {
     if (!entry) return { ok: false, error: 'forbidden' };
     const tab = readTab(payload);
     if (!tab) return { ok: false, error: 'invalid-tab' };
+    // « Incruster l'onglet » (docs/picture-in-picture.md) : page du portail seulement.
+    if (payload && payload.float === true) {
+      if (tab.kind !== 'internal') return { ok: false, error: 'invalid-tab' };
+      return openFloatingPortalTab(tab, { sourceWindow: entry.win })
+        ? { ok: true, action: 'floated' }
+        : { ok: false, error: 'float-failed' };
+    }
     openDetachedTabWindow(tab, { point: readPoint(payload), sourceWindow: entry.win });
     return { ok: true, action: 'detached' };
   });
@@ -3202,7 +3299,6 @@ function registerWindowIPC() {
     'browser-tab-sleep': 'sleep',
     // Incrustation vidéo et fenêtre d'appel (docs/picture-in-picture.md).
     'browser-tab-picture-in-picture': 'pictureInPicture',
-    'browser-tab-set-pip-texts': 'setPictureInPictureTexts',
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {
@@ -3213,6 +3309,19 @@ function registerWindowIPC() {
       return manager[method](payload || {});
     });
   }
+
+  // Textes de la barre d'incrustation (docs/picture-in-picture.md) : fenêtre d'un onglet web et pages du
+  // portail incrustées (les mêmes pour toutes les fenêtres).
+  ipcMain.handle('browser-tab-set-pip-texts', (event, payload) => {
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    const texts = payload && typeof payload === 'object' ? payload.texts : null;
+    if (!manager.isPrivate) portalFloatTexts = normalizePipTexts(texts);
+    for (const entry of portalWindows.values()) {
+      if (entry.floating) entry.floating.bar.update({ texts: portalFloatTexts });
+    }
+    return manager.setPictureInPictureTexts({ texts });
+  });
 
   // Économiseur de mémoire : le portail applique le même délai à ses pages (docs/tab-sleep.md).
   ipcMain.handle('browser-tab-sleep-get', (event) => {
