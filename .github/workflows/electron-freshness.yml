@@ -1,0 +1,42 @@
+name: Electron security watch
+
+# Chaque jour : Lasco embarque-t-il la dernière version de correctif d'une ligne d'Electron encore
+# maintenue ? Sinon (au-delà du délai de docs/security.md), une issue « security » est ouverte ou
+# mise à jour. Les PR de montée viennent de Dependabot (.github/dependabot.yml).
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compare with releases.electronjs.org
+        id: check
+        run: |
+          set +e
+          node scripts/check-electron-freshness.js --markdown > report.md
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Open or update the issue
+        if: steps.check.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Electron en retard sur ses correctifs de sécurité"
+          existing="$(gh issue list --state open --label security --search "in:title \"$title\"" --json number -q '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file report.md
+          else
+            gh label create security --color B60205 --force >/dev/null 2>&1 || true
+            gh issue create --title "$title" --label security --body-file report.md
+          fi

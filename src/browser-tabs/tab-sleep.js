@@ -12,6 +12,18 @@
 /** Délais proposés dans Réglages > Économiseur de mémoire (minutes ; 0 = jamais). */
 const TAB_SLEEP_DELAY_CHOICES = Object.freeze([0, 5, 15, 30, 60, 120, 240]);
 const DEFAULT_TAB_SLEEP_MINUTES = 30;
+/**
+ * Onglets gardés actifs en arrière-plan (Réglages > Économiseur de mémoire ; 0 = sans limite) :
+ * au-delà, les plus anciennement quittés dorment sans attendre le délai, comme l'économiseur de
+ * mémoire de Chrome. Docs : docs/many-tabs-perf.md.
+ */
+const TAB_SLEEP_MAX_LIVE_CHOICES = Object.freeze([0, 5, 10, 20, 40]);
+const DEFAULT_TAB_SLEEP_MAX_LIVE = 10;
+/** Un onglet quitté il y a moins de 2 min reste éveillé : aller-retour entre deux onglets. */
+const LIVE_BUDGET_MIN_HIDDEN_MS = 2 * 60 * 1000;
+/** Mémoire de l'ordinateur presque pleine : budget réduit, onglets quittés depuis 30 s. */
+const PRESSURE_MAX_LIVE = 3;
+const PRESSURE_MIN_HIDDEN_MS = 30 * 1000;
 /** Sites à ne jamais mettre en veille : au plus 200, 253 caractères chacun. */
 const MAX_NEVER_SITES = 200;
 
@@ -47,7 +59,12 @@ function normalizeTabSleepSettings(raw) {
     if (host && !sites.includes(host)) sites.push(host);
     if (sites.length >= MAX_NEVER_SITES) break;
   }
-  return { tabSleepMinutes: minutes, tabSleepNeverSites: sites };
+  const maxLive = TAB_SLEEP_MAX_LIVE_CHOICES.includes(obj.tabSleepMaxLive)
+    ? obj.tabSleepMaxLive
+    : DEFAULT_TAB_SLEEP_MAX_LIVE;
+  // Onglets épinglés : gardés éveillés sauf si la personne choisit de les mettre en veille aussi.
+  const sleepPinned = obj.tabSleepPinned === true;
+  return { tabSleepMinutes: minutes, tabSleepNeverSites: sites, tabSleepMaxLive: maxLive, tabSleepPinned: sleepPinned };
 }
 
 /** Un site de la liste couvre son hôte et ses sous-domaines (`figma.com` → `www.figma.com`). */
@@ -80,7 +97,7 @@ function resolveTabSleepDelayMs(settings, env = process.env) {
 }
 
 /** Raison pour laquelle un onglet reste éveillé, ou null s'il peut dormir. */
-function tabSleepBlocker(tab, { now, delayMs, activeTabId, neverSites }) {
+function tabSleepBlocker(tab, { now, delayMs, activeTabId, neverSites, sleepPinned = false }) {
   if (!tab || tab.discarded) return 'discarded';
   if (!(delayMs > 0)) return 'disabled';
   if (tab.tabId === activeTabId) return 'active';
@@ -89,11 +106,14 @@ function tabSleepBlocker(tab, { now, delayMs, activeTabId, neverSites }) {
   if (tab.audible) return 'audible';
   if (tab.htmlFullscreen) return 'fullscreen';
   if (tab.agentControlled) return 'agent';
+  if (tab.pinned && !sleepPinned) return 'pinned';
   // Fenêtre ouverte par une page (`window.open`) : la détruire couperait `opener` (connexion OAuth).
   if (tab.hasOpener) return 'opener';
   if (tab.devToolsOpened) return 'devtools';
   if (tab.loading) return 'loading';
   if (tab.capturingMedia) return 'media';
+  // En incrustation (fenêtre d'appel flottante ou vidéo, docs/picture-in-picture.md).
+  if (tab.pictureInPicture) return 'picture-in-picture';
   if (!/^https?:\/\//i.test(tab.url || '')) return 'not-web';
   if (isNeverSleepSite(tab.url, neverSites)) return 'never-site';
   return null;
@@ -101,13 +121,58 @@ function tabSleepBlocker(tab, { now, delayMs, activeTabId, neverSites }) {
 
 /**
  * Onglets à mettre en veille maintenant. `tabs` : `{ tabId, url, hiddenSince, audible, htmlFullscreen,
- * agentControlled, hasOpener, devToolsOpened, loading, capturingMedia, discarded }`. Le formulaire modifié
+ * agentControlled, hasOpener, devToolsOpened, loading, capturingMedia, pictureInPicture, discarded }`. Le formulaire modifié
  * est vérifié ensuite dans la page (PAGE_SLEEP_PROBE_SCRIPT), juste avant de détruire la vue.
  */
 function selectTabsToSleep(tabs, options) {
   const out = [];
   for (const tab of tabs || []) {
     if (tabSleepBlocker(tab, options) === null) out.push(tab.tabId);
+  }
+  return out;
+}
+
+/**
+ * Mémoire presque pleine : moins de 8 % de mémoire disponible et moins de 1,5 Go. `info` :
+ * `process.getSystemMemoryInfo()` (Ko). Sous macOS, `free` seul est toujours bas : le cache de
+ * fichiers (`fileBacked`) et la mémoire purgeable se libèrent à la demande, ils comptent comme
+ * disponibles.
+ */
+function isMemoryPressure(info) {
+  if (!info || !(info.total > 0) || typeof info.free !== 'number') return false;
+  const availableKb = info.free + (Number(info.fileBacked) || 0) + (Number(info.purgeable) || 0);
+  return availableKb / info.total < 0.08 && availableKb < 1.5 * 1024 * 1024;
+}
+
+/**
+ * Budget d'onglets vivants : au-delà de `maxLive` onglets cachés éveillés, les plus anciennement
+ * quittés dorment, sans attendre le délai mais après `minHiddenMs`. Mêmes exceptions que la veille
+ * après délai (son, appel, agent, épinglé, saisie…) ; un onglet exempté compte dans le budget mais
+ * ne dort jamais. `pressure` : mémoire presque pleine, budget et attente réduits.
+ */
+function selectTabsOverLiveBudget(tabs, { now, maxLive, minHiddenMs = LIVE_BUDGET_MIN_HIDDEN_MS, pressure = false, ...options }) {
+  let budget = maxLive > 0 ? maxLive : Infinity;
+  let minHidden = minHiddenMs;
+  if (pressure) {
+    budget = Math.min(budget, PRESSURE_MAX_LIVE);
+    minHidden = Math.min(minHidden, PRESSURE_MIN_HIDDEN_MS);
+  }
+  if (!Number.isFinite(budget)) return [];
+  const hidden = (tabs || []).filter(
+    (tab) => tab && !tab.discarded && tab.tabId !== options.activeTabId && typeof tab.hiddenSince === 'number',
+  );
+  let excess = hidden.length - budget;
+  if (excess <= 0) return [];
+  const out = [];
+  const oldestFirst = [...hidden].sort((a, b) => a.hiddenSince - b.hiddenSince);
+  // Le délai du budget remplace celui de la veille ; « Jamais » ne coupe pas le budget.
+  const blockerOptions = { ...options, now, delayMs: Math.max(1, minHidden) };
+  for (const tab of oldestFirst) {
+    if (excess <= 0) break;
+    if (tabSleepBlocker(tab, blockerOptions) === null) {
+      out.push(tab.tabId);
+      excess -= 1;
+    }
   }
   return out;
 }
@@ -146,6 +211,10 @@ const PAGE_SLEEP_PROBE_SCRIPT = `(() => {
 module.exports = {
   TAB_SLEEP_DELAY_CHOICES,
   DEFAULT_TAB_SLEEP_MINUTES,
+  TAB_SLEEP_MAX_LIVE_CHOICES,
+  DEFAULT_TAB_SLEEP_MAX_LIVE,
+  LIVE_BUDGET_MIN_HIDDEN_MS,
+  PRESSURE_MAX_LIVE,
   MAX_NEVER_SITES,
   PAGE_SLEEP_PROBE_SCRIPT,
   PRELOAD_WORLD_ID,
@@ -155,5 +224,7 @@ module.exports = {
   resolveTabSleepDelayMs,
   tabSleepBlocker,
   selectTabsToSleep,
+  selectTabsOverLiveBudget,
+  isMemoryPressure,
   tabSleepCheckIntervalMs,
 };

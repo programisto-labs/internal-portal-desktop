@@ -247,7 +247,42 @@ function pageAgentRuntime(command) {
     return { ok: true, scrollX: Math.round(window.scrollX), scrollY: Math.round(window.scrollY) };
   };
 
+  /**
+   * Attente de stabilité (agents multi-onglets) : la page est « calme » quand aucune mutation du DOM n'a eu lieu
+   * pendant `quietMs`, au plus `maxMs`. Remplace un délai fixe après une action (rendu d'une SPA, liste chargée).
+   */
+  const settle = (opts) =>
+    new Promise((resolve) => {
+      const quietMs = Math.max(50, Math.min(Number(opts.quietMs) || 400, 2000));
+      const maxMs = Math.max(quietMs, Math.min(Number(opts.maxMs) || 3000, 8000));
+      const started = Date.now();
+      let quietTimer = null;
+      let observer = null;
+      let done = false;
+      const finish = (stable) => {
+        if (done) return;
+        done = true;
+        clearTimeout(quietTimer);
+        clearTimeout(maxTimer);
+        if (observer) observer.disconnect();
+        resolve({ ok: true, stable, waitedMs: Date.now() - started });
+      };
+      const arm = () => {
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(() => finish(true), quietMs);
+      };
+      const maxTimer = setTimeout(() => finish(false), maxMs);
+      const root = document.documentElement || document.body;
+      if (root && typeof MutationObserver === 'function') {
+        observer = new MutationObserver(arm);
+        observer.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
+      }
+      arm();
+    });
+
   switch (command && command.op) {
+    case 'settle':
+      return settle(command);
     case 'snapshot':
       return snapshot(command);
     case 'locate':

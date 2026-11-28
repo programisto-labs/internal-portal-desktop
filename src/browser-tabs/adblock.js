@@ -460,8 +460,12 @@ function compileInWorker() {
   });
 }
 
+/** Canaux appelés par le preload des pages web (filtres cosmétiques) : ouverts par la barrière IPC. */
+const WEB_PAGE_CHANNELS = [INJECT_CHANNEL, MUTATION_CHANNEL];
+
 module.exports = {
   DAY_MS,
+  WEB_PAGE_CHANNELS,
   createAdblockSettingsStore,
   createAdblockEngineLoader,
   createAdblockRequestFilter,

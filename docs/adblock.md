@@ -12,7 +12,7 @@ Comme les boucliers de Brave : les onglets web de Lasco bloquent les publicités
 
 ## Où il s'applique
 
-- Session des onglets web seulement (`persist:browser-tabs`, `getBrowserSession()` de `src/browser-tabs/manager.js`). Jamais `persist:portal`, ni la coquille, ni les fenêtres de Lasco.
+- Session des onglets web seulement (sessions des onglets web (`persist:bp-…` par profil et workspace, `persist:browser-tabs` sans profil, docs/browser-profiles.md), `getBrowserSession()` de `src/browser-tabs/manager.js`). Jamais `persist:portal`, ni la coquille, ni les fenêtres de Lasco.
 - **Pages Lasco jamais filtrées**, même ouvertes dans un onglet web : `isPortalNavigationUrl` / `isApiHostNavigationUrl` de `main.js` (portail, `*.lascoapp.com`, `*.programisto.fr`, API ; `localhost` en dev). Ni la page, ni ses requêtes.
 - Le script cosmétique ne répond qu'aux onglets web déclarés par un gestionnaire d'onglets (`trackTab`) de cette session.
 
