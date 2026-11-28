@@ -147,19 +147,23 @@ function readJson(req) {
 
 const VM_HISTORY_ACTIONS = new Set(['back', 'forward', 'reload']);
 /** Actions of `browserTabs.agentAction` (portal agents), the same engine as on a Mac. */
-const VM_AGENT_ACTIONS = new Set(['snapshot', 'screenshot', 'click', 'type', 'press', 'scroll', 'select_option', 'wait']);
+const VM_AGENT_ACTIONS = new Set(['snapshot', 'screenshot', 'click', 'hover', 'type', 'press', 'scroll', 'select_option', 'wait', 'upload', 'dialog']);
 
 /** Only the known fields, typed: the request never names another tab (`tabId` comes from the path). */
 function agentPayload(body) {
   const out = { action: body.action };
-  for (const key of ['ref', 'text', 'key', 'direction', 'value']) {
+  for (const key of ['ref', 'text', 'key', 'direction', 'value', 'url', 'fileName', 'message']) {
     if (typeof body[key] === 'string') out[key] = body[key];
   }
   for (const key of ['x', 'y', 'amount', 'ms', 'maxElements', 'maxText']) {
     if (typeof body[key] === 'number' && Number.isFinite(body[key])) out[key] = body[key];
   }
-  for (const key of ['doubleClick', 'clear', 'submit', 'includeText']) {
+  for (const key of ['doubleClick', 'clear', 'submit', 'includeText', 'accept']) {
     if (typeof body[key] === 'boolean') out[key] = body[key];
+  }
+  // Garde des écritures posée par l'API (docs/agent-actuation.md) : seulement ses deux drapeaux.
+  if (body.guard && typeof body.guard === 'object') {
+    out.guard = { writeGate: body.guard.writeGate === true, approved: body.guard.approved === true };
   }
   if (body.coordinateSpace === 'screenshot' || body.coordinateSpace === 'viewport') out.coordinateSpace = body.coordinateSpace;
   return out;

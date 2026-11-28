@@ -1,5 +1,7 @@
 # Onglet piloté par un agent, en arrière-plan
 
+Lecture et actions dans la page (arbre d’accessibilité, entrées CDP, garde des écritures) : `docs/agent-actuation.md`.
+
 Comme Claude dans Chrome : l'agent travaille dans SON onglet sans le passer au premier plan, et la personne continue dans les siens. Le portail marque l'onglet (icône sur l'onglet, bannière « {agent} travaille dans cet onglet » avec « Reprendre la main »). Voir `lib/portal-tabs/agent-tab-control.ts` du portail.
 
 ## Pont
