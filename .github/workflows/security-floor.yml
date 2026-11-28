@@ -1,0 +1,59 @@
+name: Security floor
+
+# Après une faille critique : une fois la version corrigée PUBLIÉE (release non brouillon, fichiers de
+# mise à jour présents), relève security/minimum-version.json. Chaque Lasco plus ancien installe alors
+# la mise à jour en 10 min au plus, et propose le téléchargement si la mise à jour automatique échoue
+# (docs/security.md, « Version minimale »). Ouvre une PR : la fusion sur main fait foi.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version minimale (déjà publiée), ex. 2.13.1"
+        required: true
+        type: string
+      reason:
+        description: "Raison affichée si la mise à jour automatique échoue (ex. faille Chromium CVE-2026-XXXX)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  raise:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the release is published with its update files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Version invalide: $VERSION"; exit 1; }
+          draft="$(gh release view "v$VERSION" --json isDraft -q .isDraft)" || { echo "::error::Release v$VERSION introuvable"; exit 1; }
+          [ "$draft" = "false" ] || { echo "::error::v$VERSION est encore un brouillon"; exit 1; }
+          assets="$(gh release view "v$VERSION" --json assets -q '.assets[].name')"
+          for f in latest-mac.yml latest.yml; do
+            echo "$assets" | grep -qx "$f" || { echo "::error::$f absent de v$VERSION"; exit 1; }
+          done
+      - name: Write security/minimum-version.json and open a PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const out = { minimumVersion: process.env.VERSION, reason: process.env.REASON.slice(0, 300), updatedAt: new Date().toISOString().slice(0, 10) };
+            fs.writeFileSync("security/minimum-version.json", JSON.stringify(out, null, 2) + "\n");
+          '
+          branch="security/minimum-$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add security/minimum-version.json
+          git commit -m "chore(security): version minimale $VERSION"
+          git push -u origin "$branch"
+          gh pr create --base main --head "$branch" --title "chore(security): version minimale $VERSION" \
+            --body "Relève la version minimale de Lasco Desktop à $VERSION. Raison : $REASON. Voir docs/security.md."
