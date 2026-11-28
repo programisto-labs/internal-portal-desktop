@@ -58,3 +58,11 @@ describe('browser open request', () => {
     assert.equal(buildBrowserOpenRequest(null), null);
   });
 });
+
+describe('« Incruster l’onglet »', () => {
+  it('est gardé quand la page le demande, avec son libellé par défaut', () => {
+    assert.deepEqual(normalizeMenuActions(['reload', 'picture-in-picture', 'close']), ['reload', 'picture-in-picture', 'close']);
+    const template = buildTabMenuTemplate({ tabId: 't1', actions: ['picture-in-picture'], onAction: () => {} });
+    assert.ok(byLabel(template, "Incruster l'onglet"));
+  });
+});

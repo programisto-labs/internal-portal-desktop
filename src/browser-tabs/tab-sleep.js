@@ -112,6 +112,8 @@ function tabSleepBlocker(tab, { now, delayMs, activeTabId, neverSites, sleepPinn
   if (tab.devToolsOpened) return 'devtools';
   if (tab.loading) return 'loading';
   if (tab.capturingMedia) return 'media';
+  // En incrustation (fenêtre d'appel flottante ou vidéo, docs/picture-in-picture.md).
+  if (tab.pictureInPicture) return 'picture-in-picture';
   if (!/^https?:\/\//i.test(tab.url || '')) return 'not-web';
   if (isNeverSleepSite(tab.url, neverSites)) return 'never-site';
   return null;
@@ -119,7 +121,7 @@ function tabSleepBlocker(tab, { now, delayMs, activeTabId, neverSites, sleepPinn
 
 /**
  * Onglets à mettre en veille maintenant. `tabs` : `{ tabId, url, hiddenSince, audible, htmlFullscreen,
- * agentControlled, hasOpener, devToolsOpened, loading, capturingMedia, discarded }`. Le formulaire modifié
+ * agentControlled, hasOpener, devToolsOpened, loading, capturingMedia, pictureInPicture, discarded }`. Le formulaire modifié
  * est vérifié ensuite dans la page (PAGE_SLEEP_PROBE_SCRIPT), juste avant de détruire la vue.
  */
 function selectTabsToSleep(tabs, options) {

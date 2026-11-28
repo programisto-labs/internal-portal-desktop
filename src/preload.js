@@ -146,6 +146,13 @@ const browserTabsBridge = {
     /** `{ tabId }` : met l'onglet en veille tout de suite (hors onglet affiché). */
     now: (payload) => invokeBrowserTab('browser-tab-sleep', payload),
   },
+  /**
+   * Incrustation (docs/picture-in-picture.md) : `{ tabId, action?: 'toggle' | 'enter' | 'exit' }`. Appel en
+   * cours : fenêtre flottante de Lasco ; sinon la vidéo qui lit. `→ { ok, pictureInPicture }`.
+   */
+  pictureInPicture: (payload) => invokeBrowserTab('browser-tab-picture-in-picture', payload),
+  /** `{ texts }` : textes de la fenêtre flottante dans la langue de la personne. */
+  setPictureInPictureTexts: (payload) => invokeBrowserTab('browser-tab-set-pip-texts', payload),
   /** `{ tabId, pinned }` : onglet épinglé, gardé éveillé par l'économiseur de mémoire (docs/many-tabs-perf.md). */
   setPinned: (payload) => invokeBrowserTab('browser-tab-set-pinned', payload),
   setOverlay: (payload) => invokeBrowserTab('browser-tab-set-overlay', payload),
@@ -313,7 +320,13 @@ const tabWindowsBridge = {
   initialTab: tabWindowInfo.initialTab,
   ready: () => ipcRenderer.invoke('tab-window-ready'),
   onAdopt: (callback) => subscribe('tab-window-adopt', callback),
+  /**
+   * `{ tab, screenX?, screenY?, float? }`. `float: true` (page du portail) : petite fenêtre toujours au
+   * premier plan, l'onglet revient à la fermeture (docs/picture-in-picture.md).
+   */
   detach: (payload) => ipcRenderer.invoke('tab-window-detach', payload),
+  /** Desktop récent : `detach({ float: true })` est compris. */
+  canFloat: true,
   attach: (payload) => ipcRenderer.invoke('tab-window-attach', payload),
   dragOut: (payload) => ipcRenderer.invoke('tab-window-drag-out', payload),
   dragCancel: () => ipcRenderer.invoke('tab-window-drag-cancel'),

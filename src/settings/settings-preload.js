@@ -687,6 +687,7 @@ async function render() {
   $('keepInBackground').checked = g.keepInBackground;
   $('safeBrowsingEnabled').checked = g.safeBrowsingEnabled !== false;
   $('httpsFirstEnabled').checked = g.httpsFirstEnabled !== false;
+  $('pictureInPictureAuto').checked = g.pictureInPictureAuto !== false;
   const login = g.loginItem || { available: false };
   $('openAtLoginRow').classList.toggle('disabled', !login.available);
   $('openAtLogin').disabled = !login.available;
@@ -789,6 +790,7 @@ window.addEventListener('DOMContentLoaded', () => {
   bindSwitch('keepInBackground', 'settings-modal-set-keep-in-background');
   bindSwitch('safeBrowsingEnabled', 'settings-modal-set-safe-browsing');
   bindSwitch('httpsFirstEnabled', 'settings-modal-set-https-first');
+  bindSwitch('pictureInPictureAuto', 'settings-modal-set-pip-auto');
   bindSwitch('openAtLogin', 'settings-modal-set-open-at-login');
   $('openLoginItems').onclick = () => ipcRenderer.invoke('settings-modal-open-login-items');
   $('downloadsChoose').onclick = async () => {

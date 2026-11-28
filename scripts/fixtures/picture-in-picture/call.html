@@ -1,0 +1,26 @@
+<!doctype html><html><head><title>Faux appel</title></head><body>
+<video id="remote" autoplay muted playsinline width="320" height="180"></video>
+<button id="mic" aria-label="Couper le micro" data-is-muted="false">Micro</button>
+<button id="cam" aria-label="Couper la caméra" data-is-muted="false">Caméra</button>
+<button id="leave" aria-label="Quitter l'appel">Raccrocher</button>
+<script>
+let stream = null;
+window.callReady = navigator.mediaDevices.getUserMedia({ audio: true, video: true }).then((s) => {
+  stream = s;
+  document.getElementById('remote').srcObject = s;
+  return true;
+}, (e) => 'err ' + e.name);
+const toggle = (id, word) => {
+  const b = document.getElementById(id);
+  const muted = b.getAttribute('data-is-muted') !== 'true';
+  b.setAttribute('data-is-muted', String(muted));
+  b.setAttribute('aria-label', (muted ? 'Activer ' : 'Couper ') + word);
+};
+document.getElementById('mic').onclick = () => toggle('mic', 'le micro');
+document.getElementById('cam').onclick = () => toggle('cam', 'la caméra');
+document.getElementById('leave').onclick = () => {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  document.getElementById('remote').srcObject = null;
+  document.title = 'Appel terminé';
+};
+</script></body></html>
