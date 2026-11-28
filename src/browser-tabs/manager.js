@@ -52,6 +52,7 @@ const { createExternalAppLauncher, createExternalAppPermissionStore } = require(
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
 const { capturePageImage } = require('./page-capture');
 const { isPinnedCrossSiteNavigation, normalizePinnedUrl } = require('./pinned');
+const { createSiteZoomStore, nextZoomFactor, zoomSiteOf } = require('./site-zoom');
 const {
   PAGE_SLEEP_PROBE_SCRIPT,
   PRELOAD_WORLD_ID,
@@ -88,8 +89,6 @@ const CLOSED_CHANNEL = 'browser-tab-closed';
 const FIND_RESULT_CHANNEL = 'browser-tab-find-result';
 const SHORTCUT_CHANNEL = 'browser-tab-shortcut';
 
-/** Chrome's zoom ladder. */
-const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5];
 const AGENT_WORLD_ID = 1001;
 /** Monde isolé où Desktop lit la description OpenSearch d'une page (docs/search-engines.md). */
 const SEARCH_WORLD_ID = 1003;
@@ -186,12 +185,6 @@ function buildChromiumUserAgent(platform = process.platform, chromeVersion = pro
 function buildAcceptLanguages(preferred) {
   const languages = (Array.isArray(preferred) ? preferred : []).filter(Boolean);
   return [...new Set(languages.length > 0 ? languages : ['fr-FR', 'fr', 'en-US', 'en'])].join(',');
-}
-
-function nextZoomFactor(current, direction) {
-  if (direction === 'reset') return 1;
-  if (direction === 'in') return ZOOM_LEVELS.find((level) => level > current + 0.001) ?? ZOOM_LEVELS.at(-1);
-  return [...ZOOM_LEVELS].reverse().find((level) => level < current - 0.001) ?? ZOOM_LEVELS[0];
 }
 
 /** True while `view` is still the registered view of `tabId` (not replaced by a later `create`). */
@@ -297,6 +290,15 @@ function sharedSitePermissions() {
   return sitePermissionStore;
 }
 
+/** Zoom retenu par site (docs/zoom-and-pdf.md), partagé par toutes les fenêtres (un fichier). */
+let siteZoomStore = null;
+function sharedSiteZoom() {
+  if (!siteZoomStore) {
+    siteZoomStore = createSiteZoomStore({ filePath: path.join(app.getPath('userData'), 'browser-site-zoom.json') });
+  }
+  return siteZoomStore;
+}
+
 /** Bloqueur de pubs et de traqueurs (docs/adblock.md) : un moteur et une session pour toutes les fenêtres. */
 let adblockService = null;
 function sharedAdblock() {
@@ -357,8 +359,15 @@ function createBrowserTabManager({
   privateMode = false,
   isPortalUrl = null,
   onPortalUrl = null,
+  // Profils de navigation (docs/browser-profiles.md) : fichiers du profil, et session prête (cookies migrés).
+  sitePermissions: profileSitePermissions = null,
+  externalAppPermissions: profileExternalAppPermissions = null,
+  sessionReady = null,
+  onSessionCreated = null,
 }) {
   const browserPartition = privateMode ? assertInMemoryPartition(partition) : partition;
+  // Fenêtre privée : zoom par site en mémoire, jamais écrit (docs/private-browsing.md).
+  const siteZoom = privateMode ? createSiteZoomStore({}) : sharedSiteZoom();
   const historyStore = privateMode
     ? createHistoryStore({})
     : history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
@@ -369,7 +378,9 @@ function createBrowserTabManager({
     return true;
   };
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
-  const externalAppPermissions = privateMode ? createExternalAppPermissionStore({}) : sharedExternalAppPermissions();
+  const externalAppPermissions = privateMode
+    ? createExternalAppPermissionStore({})
+    : profileExternalAppPermissions || sharedExternalAppPermissions();
   const externalApps = createExternalAppLauncher({
     shell,
     showMessageBox: (...args) => dialog.showMessageBox(...args),
@@ -379,7 +390,7 @@ function createBrowserTabManager({
   });
   const sitePermissions = privateMode
     ? createPrivateSitePermissions({ memory: createSitePermissionStore({}), base: sharedSitePermissions() })
-    : sharedSitePermissions();
+    : profileSitePermissions || sharedSitePermissions();
   const adblock = sharedAdblock();
   // Interrupteur ou exception changés (Réglages, informations du site) : l'état des onglets suit.
   const stopAdblockListener = adblock.settings.onChange(() => {
@@ -578,6 +589,8 @@ function createBrowserTabManager({
       adblock.install(browserSession);
       // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
       void installDevtoolsResponsive(browserSession);
+      // Téléchargements de cette session (docs/downloads.md), rangés sous le profil de la fenêtre.
+      if (typeof onSessionCreated === 'function') onSessionCreated(browserSession);
     }
     return browserSession;
   }
@@ -800,6 +813,22 @@ function createBrowserTabManager({
     });
     return true;
   }
+
+  // Zoom changé dans un autre onglet (ou une autre fenêtre) du même site : cette fenêtre suit,
+  // et la barre d'adresse affiche le bon pourcentage. Fenêtre fermée : désabonnement.
+  const unsubscribeSiteZoom = siteZoom.subscribe(({ host, factor }) => {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed()) {
+      unsubscribeSiteZoom();
+      return;
+    }
+    for (const [tabId, entry] of tabs) {
+      const wc = entry.view.webContents;
+      if (wc.isDestroyed() || zoomSiteOf(wc.getURL()) !== host) continue;
+      if (Math.abs((wc.getZoomFactor() || 1) - factor) > 0.001) wc.setZoomFactor(factor);
+      pushState(tabId);
+    }
+  });
 
   function destroyAll() {
     if (sleepTimer) clearTimeout(sleepTimer);
@@ -1214,6 +1243,7 @@ function createBrowserTabManager({
       }
       passwords.onNavigate(tabId, url);
       formAutofill.onNavigate(tabId, url);
+      applySiteZoom(wc, url);
       mediaCapturingWebContents.delete(webContentsId);
       historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
@@ -1475,6 +1505,8 @@ function createBrowserTabManager({
         { label: 'Actualiser', click: () => reload({ tabId }) },
         separator,
         { label: 'Imprimer…', click: () => print({ tabId }) },
+        // Le portail enregistre le PDF et affiche la notification (docs/zoom-and-pdf.md).
+        ...(pdfReady ? [{ label: 'Enregistrer en PDF…', click: () => forwardCapture('save-pdf') }] : []),
         // Capture d'écran (docs/page-capture.md) : le portail enregistre et affiche la notification.
         ...(captureReady
           ? [
@@ -1495,10 +1527,22 @@ function createBrowserTabManager({
     });
   }
 
+  /**
+   * ⌘+ / ⌘- / ⌘0, molette, menu : niveau suivant de l'échelle de Chrome, retenu pour le site
+   * de la page (les autres onglets du site suivent par `siteZoom.subscribe`).
+   */
   function applyZoom(wc, direction) {
     const next = nextZoomFactor(wc.getZoomFactor(), direction);
     wc.setZoomFactor(next);
+    siteZoom.set(wc.getURL(), next);
     return next;
+  }
+
+  /** Page chargée : le zoom retenu pour son site (100 % sans réglage), comme Chrome. */
+  function applySiteZoom(wc, url) {
+    if (wc.isDestroyed() || !zoomSiteOf(url)) return;
+    const wanted = siteZoom.get(url);
+    if (Math.abs((wc.getZoomFactor() || 1) - wanted) > 0.001) wc.setZoomFactor(wanted);
   }
 
   function browserTabWebPreferences() {
@@ -1547,6 +1591,11 @@ function createBrowserTabManager({
    */
   async function loadWithChromeIdentity(entry) {
     const wc = entry.view.webContents;
+    // Contexte d'un profil (docs/browser-profiles.md) : la page attend la copie des anciens cookies.
+    if (sessionReady) {
+      await sessionReady.catch(() => undefined);
+      if (wc.isDestroyed()) return;
+    }
     const startedAt = Date.now();
     try {
       // Never let the identity step hold the tab: past the limit, the page
@@ -1618,7 +1667,8 @@ function createBrowserTabManager({
         history.goToIndex(slept.index + 1);
         wc.once('did-finish-load', () => {
           if (wc.isDestroyed()) return;
-          if (slept.zoomFactor && slept.zoomFactor !== 1) wc.setZoomFactor(slept.zoomFactor);
+          // Zoom retenu pour le site (il a pu changer pendant la veille), sinon celui de l'onglet.
+          applySiteZoom(wc, wc.getURL());
           // État de page sans défilement (pas encore enregistré par Chromium) : position relevée.
           const scroll = slept.scroll;
           if (scroll && scroll.y > 0) {
@@ -1650,7 +1700,7 @@ function createBrowserTabManager({
         void wc.executeJavaScriptInIsolatedWorld(SLEEP_WORLD_ID, [{ code }]).catch(() => {});
       }
     }
-    if (slept.zoomFactor && slept.zoomFactor !== 1 && !wc.isDestroyed()) wc.setZoomFactor(slept.zoomFactor);
+    if (!wc.isDestroyed()) applySiteZoom(wc, wc.getURL());
   }
 
   // --- Mise en veille des onglets (docs/tab-sleep.md) ---
@@ -2183,6 +2233,33 @@ function createBrowserTabManager({
     return { ok: true };
   }
 
+  /**
+   * « Enregistrer en PDF » (docs/zoom-and-pdf.md) : la page telle que l'imprimerait Chrome
+   * (feuilles de style d'impression, arrière-plans), A4 sauf taille déclarée par la page.
+   * Renvoie le PDF au main, qui l'enregistre dans les Téléchargements.
+   */
+  async function renderPdf({ tabId }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    if (entry.errorPage) return { ok: false, error: 'not-web' };
+    const wc = entry.view.webContents;
+    const url = sanitizeBrowserUrl(wc.getURL()) || entry.url || '';
+    if (!url) return { ok: false, error: 'not-web' };
+    try {
+      const data = await wc.printToPDF({ printBackground: true, preferCSSPageSize: true, pageSize: 'A4' });
+      return { ok: true, data, url, title: wc.getTitle() || '' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'pdf-failed' };
+    }
+  }
+
+  /** Le portail sait enregistrer un PDF : le menu contextuel le propose. */
+  let pdfReady = false;
+  function setPdfReady() {
+    pdfReady = true;
+    return { ok: true };
+  }
+
   async function captureEntry(entry, { maxWidth, quality = 80 } = {}) {
     const image = await entry.view.webContents.capturePage(undefined, { stayHidden: true });
     if (image.isEmpty()) return { ok: false, error: 'empty-capture' };
@@ -2687,6 +2764,8 @@ function createBrowserTabManager({
     findInPage,
     stopFindInPage,
     print,
+    renderPdf,
+    setPdfReady,
     capture,
     copyScreenshot,
     captureImage,
@@ -2743,6 +2822,11 @@ function createBrowserTabManager({
     }
   }
   api.isPrivate = privateMode;
+  /** Fenêtre passée à un autre profil ou un autre workspace : vues détruites, plus aucun abonnement. */
+  api.dispose = () => {
+    destroyAll();
+    stopAdblockListener();
+  };
   /** Fermeture d'une fenêtre privée : vues détruites, puis cookies, cache et stockage de sa session effacés. */
   api.destroySession = async () => {
     destroyAll();
@@ -2754,6 +2838,7 @@ function createBrowserTabManager({
 module.exports = {
   createBrowserTabManager,
   sharedSitePermissions,
+  sharedExternalAppPermissions,
   sharedAdblock,
   STATE_CHANNEL,
   OPEN_REQUEST_CHANNEL,

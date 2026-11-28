@@ -44,7 +44,7 @@ Un onglet web déplacé se recharge sur son URL dans la nouvelle fenêtre (la vu
 
 Une fenêtre détachée s'ouvre sans barre latérale ni colonne Lasco AI (boutons pour les rouvrir) ; cet état reste propre à la fenêtre.
 
-Côté portail : les onglets d'une fenêtre détachée sont gardés dans le `sessionStorage` de la fenêtre (rechargement compris), jamais dans la liste partagée de la fenêtre principale.
+Onglets d'une fenêtre : tenus par le modèle d'onglets (`docs/tab-model.md`), sous la clé de la fenêtre (`windowKey` de `--lasco-tab-window=`), jamais dans la liste de la fenêtre principale. Une fenêtre détachée est rouverte au redémarrage sur ses onglets. Un portail sans le pont `tabModel` les garde dans le `sessionStorage` de la fenêtre.
 
 ## Fenêtre de réserve (détachement instantané)
 

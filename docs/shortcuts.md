@@ -15,7 +15,7 @@ La page du portail gère ses raccourcis (`lib/portal-tabs/shortcuts.ts` du porta
 | ⌘⇧J / Ctrl+J | Téléchargements | Relayé (`downloads`) |
 | ⌘⇧S / Ctrl+Shift+S | Capturer la page entière (docs/page-capture.md) | Relayé (`capture-full-page`) |
 | ⌘F, ⌘G / ⌘⇧G | Rechercher dans la page : `findInPage` de la vue pour une page web ; sur une page du portail, la page cherche elle-même dans son DOM (`lib/portal-tabs/dom-find.ts` du portail) | Vue native ou page |
-| ⌘L, ⌘T, ⌘P, ⌘R, zoom, ⌘[ ⌘] | Inchangés | Vue native ou relayé |
+| ⌘L, ⌘T, ⌘P, ⌘R, zoom, ⌘[ ⌘] | Inchangés (zoom : onglet actif, retenu par site, docs/zoom-and-pdf.md) | Vue native ou relayé |
 
 **Relayé** : `resolveRelayedShellShortcut` (`src/browser-tabs/shell-shortcuts.js`) envoie l'action sur `browser-tab-shortcut` (`{ tabId, action }`) après avoir rendu le focus à la page du portail, qui l'exécute quel que soit l'onglet. La touche physique (`input.code`) compte : sur un clavier AZERTY, ⌘1 donne `key` = « & ».
 
