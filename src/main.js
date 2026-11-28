@@ -14,6 +14,7 @@ const {
 } = require('./browser-tabs/manager');
 const { captureFilename, captureVisible } = require('./browser-tabs/page-capture');
 const { pdfFilename } = require('./browser-tabs/page-pdf');
+const { createExtensionsWiring } = require('./extensions/wiring');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
@@ -1416,6 +1417,25 @@ function getSearchEngineStore() {
   return searchEngineStore;
 }
 
+/** Extensions Chrome des onglets web (docs/extensions.md). Jamais en mode VM. */
+let extensionsWiring = null;
+
+function getExtensionsWiring() {
+  if (VM_MODE) return null;
+  if (!extensionsWiring) {
+    extensionsWiring = createExtensionsWiring({
+      electron: require('electron'),
+      userDataDir: app.getPath('userData'),
+      chromeVersion: process.versions.chrome,
+      portalWindows,
+      // Pages de Lasco : jamais touchées par une extension (règles réseau, scripts de contenu).
+      isProtectedUrl: (url) => isPortalNavigationUrl(url) || isApiHostNavigationUrl(url),
+      protectedOrigins: () => [PORTAL_ORIGIN, 'https://api.lascoapp.com', 'https://my.programisto.fr', 'https://api.programisto.fr'],
+    });
+  }
+  return extensionsWiring;
+}
+
 function portalWindowEntry(win) {
   if (!win || win.isDestroyed()) return null;
   return portalWindows.get(win.id) || null;
@@ -1440,6 +1460,7 @@ function tabManagerFor(win) {
       getTabSleepSettings: () => (VM_MODE ? null : getSettings()),
       // Incrustation automatique (docs/picture-in-picture.md). Coupée en mode VM.
       getPictureInPictureAuto: () => !VM_MODE && getSettings().pictureInPictureAuto !== false,
+      extensions: VM_MODE ? null : getExtensionsWiring().managerHooks(win),
     });
   }
   return entry.tabManager;
@@ -2583,6 +2604,8 @@ function registerWindowIPC() {
       return getDownloadService()[method](payload && typeof payload === 'object' ? payload : {});
     });
   }
+  // Extensions Chrome (docs/extensions.md) : mêmes fenêtres que les téléchargements.
+  if (!VM_MODE) getExtensionsWiring().registerIpc({ isShellSender: downloadsSender, tabManagerFor });
   ipcMain.handle('downloads-open-settings', (event) => {
     if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
     openSettings('downloads');

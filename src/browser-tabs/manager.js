@@ -368,6 +368,10 @@ let safeBrowsingTexts = null;
  * propre à la fenêtre, historique, autorisations et applications externes en mémoire, ni mots de passe,
  * ni saisie automatique, ni pilotage par un agent. `onPortalUrl(url)` : une adresse de Lasco ouverte dans un
  * onglet privé part dans la fenêtre principale (`isPortalUrl` la reconnaît), jamais dans l'onglet.
+ *
+ * `extensions` (docs/extensions.md) : rappels du service d'extensions, appelés pour chaque onglet
+ * web (`onSession(session)`, `onTabCreated(wc)`, `onTabSelected(wc)`, `onTabDestroyed(wc)`,
+ * `contextMenuItems(wc, params)`). Jamais dans une fenêtre privée.
  */
 function createBrowserTabManager({
   getMainWindow,
@@ -388,10 +392,22 @@ function createBrowserTabManager({
   externalAppPermissions: profileExternalAppPermissions = null,
   sessionReady = null,
   onSessionCreated = null,
+  extensions = null,
 }) {
   const browserPartition = privateMode ? assertInMemoryPartition(partition) : partition;
   // Fenêtre privée : zoom par site en mémoire, jamais écrit (docs/private-browsing.md).
   const siteZoom = privateMode ? createSiteZoomStore({}) : sharedSiteZoom();
+  // Extensions Chrome : jamais en navigation privée (docs/extensions.md).
+  const extensionHooks = privateMode ? null : extensions;
+  const notifyExtensions = (method, ...args) => {
+    if (!extensionHooks || typeof extensionHooks[method] !== 'function') return undefined;
+    try {
+      return extensionHooks[method](...args);
+    } catch (error) {
+      console.warn(`[browser-tabs] extensions.${method} failed:`, error && error.message);
+      return undefined;
+    }
+  };
   const historyStore = privateMode
     ? createHistoryStore({})
     : history || createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
@@ -615,6 +631,8 @@ function createBrowserTabManager({
       adblock.install(browserSession);
       // Onglet « Responsive » des DevTools (docs/devtools-responsive.md).
       void installDevtoolsResponsive(browserSession);
+      // Extensions Chrome du profil (docs/extensions.md), après le bloqueur (répartiteur webRequest).
+      notifyExtensions('onSession', browserSession, { partition: browserPartition });
       // Téléchargements de cette session (docs/downloads.md), rangés sous le profil de la fenêtre.
       if (typeof onSessionCreated === 'function') onSessionCreated(browserSession);
     }
@@ -808,6 +826,7 @@ function createBrowserTabManager({
     if (entry.hangDialog) entry.hangDialog.abort();
     const { view } = entry;
     detachView(view);
+    if (!view.webContents.isDestroyed()) notifyExtensions('onTabDestroyed', view.webContents);
     if (entry.responsive) entry.responsive.dispose();
     if (!view.webContents.isDestroyed()) unregisterResponsiveRoute(view.webContents.id);
     const wc = view.webContents;
@@ -1127,6 +1146,7 @@ function createBrowserTabManager({
     const wc = view.webContents;
     const webContentsId = wc.id;
     tabIdsByWebContents.set(webContentsId, tabId);
+    notifyExtensions('onTabCreated', wc);
     tabWindowGetters.set(webContentsId, getMainWindow);
     // Requêtes bloquées par le bloqueur : comptées par page, état poussé au plus deux fois par seconde.
     adblock.trackTab(webContentsId, () => {
@@ -1618,6 +1638,11 @@ function createBrowserTabManager({
             ]
           : []),
         separator,
+        // Entrées des extensions (chrome.contextMenus), comme Chrome : avant « Inspecter ».
+        ...(() => {
+          const items = notifyExtensions('contextMenuItems', wc, params);
+          return Array.isArray(items) && items.length > 0 ? [...items, separator] : [];
+        })(),
         {
           label: 'Inspecter',
           click: () => {
@@ -2546,8 +2571,28 @@ function createBrowserTabManager({
       }
     }
     pushState(tabId);
+    const shown = tabs.get(tabId);
+    if (shown && !shown.view.webContents.isDestroyed()) notifyExtensions('onTabSelected', shown.view.webContents);
     if (leaving) void autoPictureInPicture(leaving, 'tab');
     return { ok: true, tabId };
+  }
+
+  /**
+   * Onglet ouvert par une extension (`chrome.tabs.create`, page d'options) : vue créée ici, adoptée
+   * par le portail comme une fenêtre ouverte par une page (`adoptedTabId`). Renvoie son webContents.
+   */
+  function openExtensionTab({ url, active = true } = {}) {
+    if (typeof url !== 'string' || !url) return null;
+    if (divertPortalUrl(url)) return null;
+    const tabId = `ext-${randomUUID()}`;
+    const entry = createView(tabId, url);
+    emitToRenderer(OPEN_REQUEST_CHANNEL, {
+      url,
+      openerTabId: activeTabId,
+      adoptedTabId: tabId,
+      disposition: active ? 'foreground-tab' : 'background-tab',
+    });
+    return entry.view.webContents;
   }
 
   function hide() {
@@ -3274,6 +3319,9 @@ function createBrowserTabManager({
     const entry = liveOrWokenEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
     const wc = entry.view.webContents;
+    // Page d'une extension (coffre d'un gestionnaire de mots de passe, réglages…) : jamais lue ni
+    // pilotée par un agent (docs/extensions.md).
+    if (!wc.isDestroyed() && /^chrome-extension:/i.test(wc.getURL())) return { ok: false, error: 'extension-page' };
     const guard = payload && payload.guard && typeof payload.guard === 'object' ? payload.guard : null;
     if (payload && payload.engine === 'dom') return legacyAgentAction(payload);
     const cdp = agentCdpOf(entry);
@@ -3507,6 +3555,15 @@ function createBrowserTabManager({
     /** VM mode (docs/vm-mode.md): the control endpoint lists the tabs and finds the page of one. */
     tabIds: () => [...tabs.keys()],
     activeTabId: () => activeTabId,
+    openExtensionTab,
+    /** Onglet d'un webContents (extensions : chrome.tabs.update / remove). */
+    tabIdOfWebContents(webContents) {
+      if (!webContents || webContents.isDestroyed()) return null;
+      for (const [id, entry] of tabs) if (entry.view.webContents === webContents) return id;
+      return null;
+    },
+    /** Session des onglets web de la fenêtre (créée et configurée au premier appel). */
+    browserSession: () => getBrowserSession(),
     webContentsOf(tabId) {
       const entry = tabs.get(tabId);
       return entry && !entry.view.webContents.isDestroyed() ? entry.view.webContents : null;
