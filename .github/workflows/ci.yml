@@ -1,0 +1,66 @@
+name: CI (desktop)
+
+# Chaque PR (dont les montées d'Electron ouvertes par Dependabot) : tests unitaires, puis build macOS
+# non signé qui pose les fusibles (build/hooks/after-pack-fuses.js) et vérifie l'app empaquetée.
+on:
+  pull_request:
+    paths-ignore:
+      - "mobile/**"
+      - "**/*.md"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "mobile/**"
+      - "**/*.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Pas de scripts d'installation : ni binaire Electron ni node-pty ne sont utiles aux tests.
+      - run: npm ci --ignore-scripts
+      - run: npm run test:unit
+      - name: Electron is a supported, patched release
+        run: node scripts/check-electron-freshness.js --report
+
+  package-macos:
+    name: Package (macOS, unsigned) + fuses
+    runs-on: macos-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Build the app bundle (no signing, no notarization)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --mac dir --arm64 -c.mac.identity=null -c.mac.notarize=false
+      - name: Check fuses
+        run: |
+          npx @electron/fuses read --app dist/mac-arm64/Lasco.app | tee fuses.txt
+          grep -q "EnableNodeOptionsEnvironmentVariable is Disabled" fuses.txt
+          grep -q "EnableNodeCliInspectArguments is Disabled" fuses.txt
+          grep -q "OnlyLoadAppFromAsar is Enabled" fuses.txt
+          grep -q "EnableEmbeddedAsarIntegrityValidation is Enabled" fuses.txt
+      - name: Bundled Electron matches package-lock
+        run: |
+          want="$(node -p "require('./node_modules/electron/package.json').version")"
+          got="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' 'dist/mac-arm64/Lasco.app/Contents/Frameworks/Electron Framework.framework/Resources/Info.plist')"
+          echo "Electron $got (lock: $want)"
+          [ "$want" = "$got" ]

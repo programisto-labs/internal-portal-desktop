@@ -20,18 +20,34 @@ const TAB_WINDOW_ACTIONS = Object.freeze(['detach', 'attach']);
 /** Son de l'onglet : seulement quand la page les demande (onglet qui joue du son ou coupé). */
 const TAB_SOUND_ACTIONS = Object.freeze(['mute', 'unmute']);
 
-const TAB_MENU_ACTION_SET = new Set([...TAB_MENU_ACTIONS, ...TAB_WINDOW_ACTIONS, ...TAB_SOUND_ACTIONS]);
+/** « Incruster l'onglet » (docs/picture-in-picture.md) : seulement quand la page le demande. */
+const TAB_PIP_ACTIONS = Object.freeze(['picture-in-picture']);
+
+/** Onglets épinglés : seulement quand la page les demande (docs/pinned-tabs.md). */
+const TAB_PIN_ACTIONS = Object.freeze(['pin', 'unpin', 'pinned-url']);
+
+const TAB_MENU_ACTION_SET = new Set([
+  ...TAB_MENU_ACTIONS,
+  ...TAB_WINDOW_ACTIONS,
+  ...TAB_SOUND_ACTIONS,
+  ...TAB_PIP_ACTIONS,
+  ...TAB_PIN_ACTIONS,
+]);
 
 const DEFAULT_LABELS = Object.freeze({
   reload: 'Actualiser',
   duplicate: 'Dupliquer',
   mute: "Couper le son de l'onglet",
   unmute: "Réactiver le son de l'onglet",
+  'picture-in-picture': "Incruster l'onglet",
   close: "Fermer l'onglet",
   'close-others': 'Fermer les autres onglets',
   'close-right': 'Fermer les onglets à droite',
   detach: 'Détacher dans une nouvelle fenêtre',
   attach: 'Rattacher à la fenêtre principale',
+  pin: 'Épingler',
+  unpin: "Détacher l'épingle",
+  'pinned-url': "Revenir à l'URL épinglée",
 });
 
 /**
@@ -87,6 +103,7 @@ function resolveLabel(action, labels) {
 /** Separators between page actions, window actions and « Fermer… » actions. */
 function menuGroup(action) {
   if (TAB_WINDOW_ACTIONS.includes(action)) return 'window';
+  if (TAB_PIN_ACTIONS.includes(action)) return 'pin';
   if (action === 'close' || action === 'close-others' || action === 'close-right') return 'close';
   return 'page';
 }
@@ -124,6 +141,7 @@ module.exports = {
   TAB_MENU_ACTIONS,
   TAB_WINDOW_ACTIONS,
   TAB_SOUND_ACTIONS,
+  TAB_PIN_ACTIONS,
   resolveWindowMenuActions,
   normalizeMenuActions,
   buildTabMenuTemplate,

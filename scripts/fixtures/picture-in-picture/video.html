@@ -1,0 +1,21 @@
+<!doctype html><html><head><title>Vidéo</title></head><body>
+<canvas id="c" width="640" height="360" style="display:none"></canvas>
+<video id="v" playsinline width="640" height="360"></video>
+<script>
+const c = document.getElementById('c');
+const x = c.getContext('2d');
+let i = 0;
+setInterval(() => { x.fillStyle = 'hsl(' + (i++ % 360) + ',80%,50%)'; x.fillRect(0, 0, 640, 360); }, 30);
+const ac = new AudioContext();
+const osc = ac.createOscillator();
+const gain = ac.createGain();
+gain.gain.value = 0.02;
+const dest = ac.createMediaStreamDestination();
+osc.connect(gain).connect(dest);
+osc.start();
+const stream = c.captureStream(30);
+stream.addTrack(dest.stream.getAudioTracks()[0]);
+const v = document.getElementById('v');
+v.srcObject = stream;
+window.startVideo = () => ac.resume().then(() => v.play()).then(() => true, (e) => 'err ' + e.name);
+</script></body></html>

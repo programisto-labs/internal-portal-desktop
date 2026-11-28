@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'">
+<title>Lasco</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #1b1b1d; color: #f2f2f2; overflow: hidden; }
+  body {
+    font: 12px/1.3 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    display: flex; align-items: center; gap: 6px; padding: 0 8px;
+    -webkit-app-region: drag;
+  }
+  .title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
+  .dot { flex: none; width: 8px; height: 8px; border-radius: 999px; background: #34c759; }
+  .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: rgba(255,255,255,0.8); }
+  button {
+    -webkit-app-region: no-drag;
+    flex: none; width: 32px; height: 32px; border: 0; border-radius: 999px;
+    background: rgba(255,255,255,0.1); color: inherit; display: grid; place-items: center; cursor: default;
+  }
+  button:hover { background: rgba(255,255,255,0.18); }
+  button:focus-visible { outline: 2px solid #5ac8fa; outline-offset: 1px; }
+  button.off { background: #f2f2f2; color: #1b1b1d; }
+  button.danger { background: #ff3b30; width: 40px; }
+  button.danger:hover { background: #ff5147; }
+  button[hidden] { display: none; }
+  svg { width: 16px; height: 16px; }
+</style>
+</head>
+<body>
+  <div class="title"><span class="dot" id="dot" hidden></span><span class="name" id="name"></span></div>
+  <button id="microphone" hidden></button>
+  <button id="camera" hidden></button>
+  <button id="hangup" class="danger" hidden></button>
+  <button id="back"></button>
+  <button id="close"></button>
+</body>
+</html>

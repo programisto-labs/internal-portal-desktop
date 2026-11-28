@@ -36,6 +36,19 @@ const {
   safeBrowsingPageFromUrl,
 } = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
+const { createAgentCdp, AgentActionError, ERROR_HINTS: AGENT_ERROR_HINTS, MAX_UPLOAD_BYTES: AGENT_MAX_UPLOAD_BYTES } = require('./agent-cdp');
+const {
+  PIP_WORLD_ID,
+  PAGE_MEDIA_PROBE_SCRIPT,
+  VIDEO_PIP_EXIT_SCRIPT,
+  CALL_CONTROLS,
+  callControlScript,
+  videoPipEnterScript,
+  isInCall,
+  autoPipKind,
+  floatControlsState,
+  normalizePipTexts,
+} = require('./picture-in-picture');
 const { createHistoryStore } = require('./history');
 const { createAdblockService } = require('./adblock');
 const { applyChromeIdentity, chromeUserAgentOverride, installClientHintHeaders } = require('./chrome-identity');
@@ -51,10 +64,15 @@ const { createFormAutofillController, FORM_AUTOFILL_OWNER } = require('./form-au
 const { createExternalAppLauncher, createExternalAppPermissionStore } = require('./external-apps');
 const { resolveRelayedShellShortcut } = require('./shell-shortcuts');
 const { capturePageImage } = require('./page-capture');
+const { isPinnedCrossSiteNavigation, normalizePinnedUrl } = require('./pinned');
+const { createSiteZoomStore, nextZoomFactor, zoomSiteOf } = require('./site-zoom');
 const {
   PAGE_SLEEP_PROBE_SCRIPT,
   PRELOAD_WORLD_ID,
+  isMemoryPressure,
+  normalizeTabSleepSettings,
   resolveTabSleepDelayMs,
+  selectTabsOverLiveBudget,
   selectTabsToSleep,
   tabSleepBlocker,
   tabSleepCheckIntervalMs,
@@ -67,6 +85,7 @@ const {
   discoverSiteSearchEngine,
 } = require('./search-engines');
 const path = require('path');
+const fs = require('fs');
 const { randomUUID } = require('crypto');
 const {
   assertInMemoryPartition,
@@ -80,6 +99,7 @@ const PASSWORD_POPOVER_PRELOAD = path.join(__dirname, 'password-popover-preload.
 const PASSWORD_POPOVER_PAGE = path.join(__dirname, 'password-popover.html');
 
 const BROWSER_PARTITION = 'persist:browser-tabs';
+const { UPGRADE_TIMEOUT_MS: HTTPS_UPGRADE_TIMEOUT_MS } = require('./https-first');
 const ADBLOCK_PUSH_DELAY_MS = 500;
 const STATE_CHANNEL = 'browser-tab-state';
 const OPEN_REQUEST_CHANNEL = 'browser-tab-open-request';
@@ -87,8 +107,6 @@ const CLOSED_CHANNEL = 'browser-tab-closed';
 const FIND_RESULT_CHANNEL = 'browser-tab-find-result';
 const SHORTCUT_CHANNEL = 'browser-tab-shortcut';
 
-/** Chrome's zoom ladder. */
-const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5];
 const AGENT_WORLD_ID = 1001;
 /** Monde isolé où Desktop lit la description OpenSearch d'une page (docs/search-engines.md). */
 const SEARCH_WORLD_ID = 1003;
@@ -124,6 +142,9 @@ async function fetchSearchDescription(url) {
 }
 const AGENT_SCRIPT_TIMEOUT_MS = 10_000;
 const AGENT_SETTLE_MAX_MS = 8_000;
+/** DOM calme : aucune mutation pendant 400 ms, 3 s d'attente au plus. */
+const AGENT_QUIET_MS = 400;
+const AGENT_QUIET_MAX_MS = 3_000;
 const AGENT_MAX_WAIT_MS = 10_000;
 
 const NAMED_KEYS = {
@@ -185,12 +206,6 @@ function buildChromiumUserAgent(platform = process.platform, chromeVersion = pro
 function buildAcceptLanguages(preferred) {
   const languages = (Array.isArray(preferred) ? preferred : []).filter(Boolean);
   return [...new Set(languages.length > 0 ? languages : ['fr-FR', 'fr', 'en-US', 'en'])].join(',');
-}
-
-function nextZoomFactor(current, direction) {
-  if (direction === 'reset') return 1;
-  if (direction === 'in') return ZOOM_LEVELS.find((level) => level > current + 0.001) ?? ZOOM_LEVELS.at(-1);
-  return [...ZOOM_LEVELS].reverse().find((level) => level < current - 0.001) ?? ZOOM_LEVELS[0];
 }
 
 /** True while `view` is still the registered view of `tabId` (not replaced by a later `create`). */
@@ -296,6 +311,15 @@ function sharedSitePermissions() {
   return sitePermissionStore;
 }
 
+/** Zoom retenu par site (docs/zoom-and-pdf.md), partagé par toutes les fenêtres (un fichier). */
+let siteZoomStore = null;
+function sharedSiteZoom() {
+  if (!siteZoomStore) {
+    siteZoomStore = createSiteZoomStore({ filePath: path.join(app.getPath('userData'), 'browser-site-zoom.json') });
+  }
+  return siteZoomStore;
+}
+
 /** Bloqueur de pubs et de traqueurs (docs/adblock.md) : un moteur et une session pour toutes les fenêtres. */
 let adblockService = null;
 function sharedAdblock() {
@@ -355,14 +379,24 @@ function createBrowserTabManager({
   interceptLink,
   searchEngines,
   getTabSleepSettings,
+  // Incrustation automatique (docs/picture-in-picture.md) : vrai si activée dans les Réglages.
+  getPictureInPictureAuto = null,
   safeBrowsing = null,
+  httpsFirst = null,
   partition = BROWSER_PARTITION,
   privateMode = false,
   isPortalUrl = null,
   onPortalUrl = null,
+  // Profils de navigation (docs/browser-profiles.md) : fichiers du profil, et session prête (cookies migrés).
+  sitePermissions: profileSitePermissions = null,
+  externalAppPermissions: profileExternalAppPermissions = null,
+  sessionReady = null,
+  onSessionCreated = null,
   extensions = null,
 }) {
   const browserPartition = privateMode ? assertInMemoryPartition(partition) : partition;
+  // Fenêtre privée : zoom par site en mémoire, jamais écrit (docs/private-browsing.md).
+  const siteZoom = privateMode ? createSiteZoomStore({}) : sharedSiteZoom();
   // Extensions Chrome : jamais en navigation privée (docs/extensions.md).
   const extensionHooks = privateMode ? null : extensions;
   const notifyExtensions = (method, ...args) => {
@@ -384,7 +418,9 @@ function createBrowserTabManager({
     return true;
   };
   // Links to desktop apps (`unityhub://…`): opened after confirmation, like Chrome.
-  const externalAppPermissions = privateMode ? createExternalAppPermissionStore({}) : sharedExternalAppPermissions();
+  const externalAppPermissions = privateMode
+    ? createExternalAppPermissionStore({})
+    : profileExternalAppPermissions || sharedExternalAppPermissions();
   const externalApps = createExternalAppLauncher({
     shell,
     showMessageBox: (...args) => dialog.showMessageBox(...args),
@@ -394,7 +430,7 @@ function createBrowserTabManager({
   });
   const sitePermissions = privateMode
     ? createPrivateSitePermissions({ memory: createSitePermissionStore({}), base: sharedSitePermissions() })
-    : sharedSitePermissions();
+    : profileSitePermissions || sharedSitePermissions();
   const adblock = sharedAdblock();
   // Interrupteur ou exception changés (Réglages, informations du site) : l'état des onglets suit.
   const stopAdblockListener = adblock.settings.onChange(() => {
@@ -432,7 +468,11 @@ function createBrowserTabManager({
    * l'identique. tabId → { url, title, favicon, entries, index, scroll, zoomFactor, muted, sleptAt }.
    */
   const sleepingTabs = new Map();
+  /** tabId → adresse à l'épinglage (onglets web épinglés). */
+  const pinnedUrls = new Map();
   let sleepTimer = null;
+  /** Onglets épinglés par le portail (`setPinned`) : gardés éveillés sauf réglage contraire. Survit à la veille. */
+  const pinnedTabs = new Set();
 
   const passwords = createPasswordController({
     emit: (channel, payload) => emitToRenderer(channel, payload),
@@ -593,6 +633,8 @@ function createBrowserTabManager({
       void installDevtoolsResponsive(browserSession);
       // Extensions Chrome du profil (docs/extensions.md), après le bloqueur (répartiteur webRequest).
       notifyExtensions('onSession', browserSession, { partition: browserPartition });
+      // Téléchargements de cette session (docs/downloads.md), rangés sous le profil de la fenêtre.
+      if (typeof onSessionCreated === 'function') onSessionCreated(browserSession);
     }
     return browserSession;
   }
@@ -633,6 +675,10 @@ function createBrowserTabManager({
       muted: wc.isAudioMuted(),
       // Bloqueur (docs/adblock.md) : actif sur cette page, requêtes bloquées depuis son chargement.
       adblock: { active: adblock.isActiveFor(url), blocked: entry.adblockBlocked || 0 },
+      // Incrustation (docs/picture-in-picture.md) : appel en cours, vidéo incrustable, incrustation ouverte.
+      inCall: Boolean(entry.inCall),
+      canPictureInPicture: Boolean(entry.inCall || (entry.mediaProbe && entry.mediaProbe.video)),
+      pictureInPicture: pictureInPictureOf(tabId, entry),
       // Mis en veille pour libérer la mémoire (lune sur l'onglet) : voir sleepingState.
       discarded: false,
     };
@@ -658,6 +704,9 @@ function createBrowserTabManager({
       agentControlled: false,
       audible: false,
       muted: Boolean(slept.muted),
+      inCall: false,
+      canPictureInPicture: false,
+      pictureInPicture: null,
       discarded: true,
       sleptAt: slept.sleptAt,
       adblock: { active: adblock.isActiveFor(slept.url), blocked: 0 },
@@ -691,7 +740,7 @@ function createBrowserTabManager({
   }
 
   function applyBounds(view) {
-    if (!view) return;
+    if (!view || isFloatingView(view)) return;
     const fullscreenEntry = entryOfView(view);
     if (fullscreenEntry && fullscreenEntry.htmlFullscreen) {
       const full = fullWindowBounds();
@@ -745,7 +794,7 @@ function createBrowserTabManager({
 
   function attachView(view) {
     const win = getMainWindow();
-    if (!win || win.isDestroyed()) return;
+    if (!win || win.isDestroyed() || isFloatingView(view)) return;
     try {
       // Mode responsive : le fond gris passe juste sous la vue.
       const responsive = entryOfView(view)?.responsive;
@@ -761,6 +810,10 @@ function createBrowserTabManager({
   function destroyTab(tabId) {
     const entry = tabs.get(tabId);
     if (!entry) return;
+    if (floating && floating.tabId === tabId) {
+      closeFloat({ restore: false });
+      unpinView(entry.view);
+    }
     tabs.delete(tabId);
     agentControlled.delete(tabId);
     passwords.forgetTab(tabId);
@@ -817,10 +870,27 @@ function createBrowserTabManager({
     return true;
   }
 
+  // Zoom changé dans un autre onglet (ou une autre fenêtre) du même site : cette fenêtre suit,
+  // et la barre d'adresse affiche le bon pourcentage. Fenêtre fermée : désabonnement.
+  const unsubscribeSiteZoom = siteZoom.subscribe(({ host, factor }) => {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed()) {
+      unsubscribeSiteZoom();
+      return;
+    }
+    for (const [tabId, entry] of tabs) {
+      const wc = entry.view.webContents;
+      if (wc.isDestroyed() || zoomSiteOf(wc.getURL()) !== host) continue;
+      if (Math.abs((wc.getZoomFactor() || 1) - factor) > 0.001) wc.setZoomFactor(factor);
+      pushState(tabId);
+    }
+  });
+
   function destroyAll() {
     if (sleepTimer) clearTimeout(sleepTimer);
     sleepTimer = null;
     sleepingTabs.clear();
+    pinnedTabs.clear();
     for (const tabId of [...tabs.keys()]) {
       destroyTab(tabId);
     }
@@ -1095,6 +1165,7 @@ function createBrowserTabManager({
       if (entry && entry.view === view) entry.adblockBlocked = 0;
     });
     registerResponsiveRoute(webContentsId, (message) => handleResponsiveMessage(tabId, message));
+    wirePictureInPicture(tabId, view);
     wc.once('destroyed', () => unregisterResponsiveRoute(webContentsId));
     // Comme le mode appareil de Chrome : fermer les DevTools rend la page à tout l'onglet.
     wc.on('devtools-closed', () => {
@@ -1161,6 +1232,15 @@ function createBrowserTabManager({
         launchExternalApp(url);
         return;
       }
+      // Redirection vers http : essayée d'abord en https (docs/security.md, « HTTPS d'abord »).
+      if (event.isMainFrame !== false && httpsFirst) {
+        const upgraded = httpsFirst.upgrade(safe);
+        if (upgraded) {
+          event.preventDefault();
+          loadHttpsUpgrade(upgraded);
+          return;
+        }
+      }
       // Redirection vers un site dangereux (docs/safe-browsing.md).
       if (event.isMainFrame === false) {
         if (guardSubframeNavigation(safe)) event.preventDefault();
@@ -1179,9 +1259,44 @@ function createBrowserTabManager({
         if (guardSubframeNavigation(url)) event.preventDefault();
         return;
       }
+      const upgraded = httpsFirst ? httpsFirst.upgrade(url) : null;
+      if (upgraded) {
+        event.preventDefault();
+        loadHttpsUpgrade(upgraded);
+        return;
+      }
       if (guardMainNavigation(tabId, url, () => !wc.isDestroyed() && void wc.loadURL(url))) {
         event.preventDefault();
       }
+    });
+
+    // HTTPS d'abord (docs/security.md) : la navigation vers une page http d'un site public est
+    // arrêtée avant toute requête et relancée en https (liens, formulaires, scripts, redirections ;
+    // barre d'adresse et ouverture d'onglet : `upgradeHttp` dans `create` / `navigate`). Repli en
+    // http si la version sécurisée échoue (did-fail-load) ou ne répond pas en 5 s. Jamais de
+    // `loadURL` pendant un événement de navigation (plantage natif) : relancé au tour suivant.
+    let httpsUpgradeTimer = null;
+    const loadHttpsUpgrade = (target) => {
+      setImmediate(() => {
+        if (!wc.isDestroyed()) void wc.loadURL(target).catch(() => undefined);
+      });
+    };
+    wc.on('did-start-navigation', (event) => {
+      if (!httpsFirst || !event.isMainFrame || event.isSameDocument || !httpsFirst.isPending(event.url)) return;
+      const target = event.url;
+      if (httpsUpgradeTimer) clearTimeout(httpsUpgradeTimer);
+      httpsUpgradeTimer = setTimeout(() => {
+        httpsUpgradeTimer = null;
+        if (wc.isDestroyed() || !httpsFirst.isPending(target)) return;
+        const fallback = httpsFirst.fallbackFor(target);
+        if (!fallback) return;
+        wc.stop();
+        void wc.loadURL(fallback).catch(() => undefined);
+      }, HTTPS_UPGRADE_TIMEOUT_MS);
+      if (typeof httpsUpgradeTimer.unref === 'function') httpsUpgradeTimer.unref();
+    });
+    wc.on('did-navigate', (_event, url) => {
+      if (httpsFirst) httpsFirst.committed(url);
     });
 
     // Précédent / Suivant / Actualiser ne passent pas par les événements ci-dessus : arrêtés ici.
@@ -1231,6 +1346,7 @@ function createBrowserTabManager({
       }
       passwords.onNavigate(tabId, url);
       formAutofill.onNavigate(tabId, url);
+      applySiteZoom(wc, url);
       mediaCapturingWebContents.delete(webContentsId);
       historyStore.recordVisit(url, wc.getTitle());
       pushState(tabId);
@@ -1242,6 +1358,12 @@ function createBrowserTabManager({
     });
     wc.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return;
+      // La version https d'un site n'a pas répondu : la page s'ouvre en http (« Non sécurisé »).
+      const httpFallback = httpsFirst ? httpsFirst.fallbackFor(validatedURL) : null;
+      if (httpFallback && isCurrentTabView(tabs, tabId, view)) {
+        loadHttpsUpgrade(httpFallback);
+        return;
+      }
       const failure = classifyLoadFailure({ errorCode, errorDescription, validatedURL, isMainFrame });
       if (failure && isCurrentTabView(tabs, tabId, view)) {
         showErrorPage(tabId, failure);
@@ -1436,6 +1558,20 @@ function createBrowserTabManager({
           separator,
         );
       }
+      // Image dans l'image (docs/picture-in-picture.md), même pour une vidéo `blob:` (YouTube).
+      if (params.mediaType === 'video' && !(params.mediaFlags && params.mediaFlags.canShowPictureInPicture === false)) {
+        const showing = Boolean(params.mediaFlags && params.mediaFlags.isShowingPictureInPicture);
+        template.push(
+          {
+            label: showing ? "Quitter l'image dans l'image" : "Image dans l'image",
+            click: () => {
+              if (showing) void exitVideoPip(tabId);
+              else void enterVideoPip(tabId, { point: { x: params.x, y: params.y } });
+            },
+          },
+          ...(sanitizeBrowserUrl(params.srcURL) ? [] : [separator]),
+        );
+      }
       if ((params.mediaType === 'video' || params.mediaType === 'audio') && sanitizeBrowserUrl(params.srcURL)) {
         const video = params.mediaType === 'video';
         template.push(
@@ -1492,6 +1628,8 @@ function createBrowserTabManager({
         { label: 'Actualiser', click: () => reload({ tabId }) },
         separator,
         { label: 'Imprimer…', click: () => print({ tabId }) },
+        // Le portail enregistre le PDF et affiche la notification (docs/zoom-and-pdf.md).
+        ...(pdfReady ? [{ label: 'Enregistrer en PDF…', click: () => forwardCapture('save-pdf') }] : []),
         // Capture d'écran (docs/page-capture.md) : le portail enregistre et affiche la notification.
         ...(captureReady
           ? [
@@ -1517,10 +1655,22 @@ function createBrowserTabManager({
     });
   }
 
+  /**
+   * ⌘+ / ⌘- / ⌘0, molette, menu : niveau suivant de l'échelle de Chrome, retenu pour le site
+   * de la page (les autres onglets du site suivent par `siteZoom.subscribe`).
+   */
   function applyZoom(wc, direction) {
     const next = nextZoomFactor(wc.getZoomFactor(), direction);
     wc.setZoomFactor(next);
+    siteZoom.set(wc.getURL(), next);
     return next;
+  }
+
+  /** Page chargée : le zoom retenu pour son site (100 % sans réglage), comme Chrome. */
+  function applySiteZoom(wc, url) {
+    if (wc.isDestroyed() || !zoomSiteOf(url)) return;
+    const wanted = siteZoom.get(url);
+    if (Math.abs((wc.getZoomFactor() || 1) - wanted) > 0.001) wc.setZoomFactor(wanted);
   }
 
   function browserTabWebPreferences() {
@@ -1569,6 +1719,11 @@ function createBrowserTabManager({
    */
   async function loadWithChromeIdentity(entry) {
     const wc = entry.view.webContents;
+    // Contexte d'un profil (docs/browser-profiles.md) : la page attend la copie des anciens cookies.
+    if (sessionReady) {
+      await sessionReady.catch(() => undefined);
+      if (wc.isDestroyed()) return;
+    }
     const startedAt = Date.now();
     try {
       // Never let the identity step hold the tab: past the limit, the page
@@ -1640,7 +1795,8 @@ function createBrowserTabManager({
         history.goToIndex(slept.index + 1);
         wc.once('did-finish-load', () => {
           if (wc.isDestroyed()) return;
-          if (slept.zoomFactor && slept.zoomFactor !== 1) wc.setZoomFactor(slept.zoomFactor);
+          // Zoom retenu pour le site (il a pu changer pendant la veille), sinon celui de l'onglet.
+          applySiteZoom(wc, wc.getURL());
           // État de page sans défilement (pas encore enregistré par Chromium) : position relevée.
           const scroll = slept.scroll;
           if (scroll && scroll.y > 0) {
@@ -1672,7 +1828,374 @@ function createBrowserTabManager({
         void wc.executeJavaScriptInIsolatedWorld(SLEEP_WORLD_ID, [{ code }]).catch(() => {});
       }
     }
-    if (slept.zoomFactor && slept.zoomFactor !== 1 && !wc.isDestroyed()) wc.setZoomFactor(slept.zoomFactor);
+    if (!wc.isDestroyed()) applySiteZoom(wc, wc.getURL());
+  }
+
+  // --- Incrustation vidéo et fenêtre d'appel (docs/picture-in-picture.md) ---
+
+  /** Fenêtre flottante ouverte (une à la fois) : `{ tabId, float, kind, source }`, source auto-tab | auto-app | manual. */
+  let floating = null;
+  let pipTexts = normalizePipTexts(null);
+  let pipTimer = null;
+  let pipWindowListenersFor = null;
+  /** Onglets dont l'incrustation vidéo a été ouverte par Lasco (refermée au retour), et pourquoi. */
+  const autoVideoPip = new Map();
+
+  function isFloatingView(view) {
+    return Boolean(floating && view && tabs.get(floating.tabId) && tabs.get(floating.tabId).view === view);
+  }
+
+  function pictureInPictureOf(tabId, entry) {
+    if (floating && floating.tabId === tabId) return floating.kind;
+    return entry && entry.mediaProbe && entry.mediaProbe.videoPip ? 'video' : null;
+  }
+
+  function pipAutoEnabled() {
+    try {
+      return typeof getPictureInPictureAuto === 'function' ? getPictureInPictureAuto() !== false : true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  async function probeMedia(tabId) {
+    const entry = tabs.get(tabId);
+    if (!entry) return null;
+    const wc = entry.view.webContents;
+    if (wc.isDestroyed() || entry.errorPage) return null;
+    let probe = null;
+    try {
+      probe = await withTimeout(
+        wc.executeJavaScriptInIsolatedWorld(PIP_WORLD_ID, [{ code: PAGE_MEDIA_PROBE_SCRIPT }]),
+        SLEEP_PROBE_TIMEOUT_MS,
+      );
+    } catch (_) {
+      probe = null;
+    }
+    if (tabs.get(tabId) !== entry || wc.isDestroyed()) return null;
+    const before = `${Boolean(entry.inCall)}|${Boolean(entry.mediaProbe && entry.mediaProbe.video)}|${pictureInPictureOf(tabId, entry)}`;
+    entry.mediaProbe = probe && typeof probe === 'object' ? probe : null;
+    entry.inCall = isInCall({ capturingMedia: mediaCapturingWebContents.has(wc.id), probe: entry.mediaProbe });
+    const after = `${Boolean(entry.inCall)}|${Boolean(entry.mediaProbe && entry.mediaProbe.video)}|${pictureInPictureOf(tabId, entry)}`;
+    if (!entry.mediaProbe || !entry.mediaProbe.videoPip) autoVideoPip.delete(tabId);
+    if (floating && floating.tabId === tabId) {
+      floating.float.update({ title: wc.getTitle() || entry.title || '', controls: floatControlsState(entry.mediaProbe) });
+      // Appel terminé dans la page (raccroché ailleurs) : l'incrustation se ferme d'elle-même.
+      if (floating.kind === 'call' && !entry.inCall) {
+        entry.callEndedProbes = (entry.callEndedProbes || 0) + 1;
+        if (entry.callEndedProbes >= 2) closeFloat({ restore: true });
+      } else {
+        entry.callEndedProbes = 0;
+      }
+    }
+    if (before !== after) pushState(tabId);
+    return entry.mediaProbe;
+  }
+
+  /** Relevé toutes les 2 s des onglets qui ont le micro / la caméra, une lecture en cours, ou sont incrustés. */
+  function ensurePipTimer() {
+    if (pipTimer) return;
+    pipTimer = setInterval(() => {
+      if (tabs.size === 0) {
+        clearInterval(pipTimer);
+        pipTimer = null;
+        return;
+      }
+      for (const [tabId, entry] of tabs) {
+        const wc = entry.view.webContents;
+        if (wc.isDestroyed()) continue;
+        const watched = mediaCapturingWebContents.has(wc.id) || entry.mediaPlaying || entry.inCall
+          || (entry.mediaProbe && entry.mediaProbe.videoPip) || (floating && floating.tabId === tabId);
+        if (watched) void probeMedia(tabId);
+      }
+    }, 2000);
+    if (pipTimer.unref) pipTimer.unref();
+  }
+
+  function wirePictureInPicture(tabId, view) {
+    const wc = view.webContents;
+    const current = () => {
+      const entry = tabs.get(tabId);
+      return entry && entry.view === view ? entry : null;
+    };
+    wc.on('media-started-playing', () => {
+      const entry = current();
+      if (!entry) return;
+      entry.mediaPlaying = true;
+      setTimeout(() => void probeMedia(tabId), 400);
+    });
+    wc.on('media-paused', () => {
+      const entry = current();
+      if (!entry) return;
+      entry.mediaPlaying = false;
+      void probeMedia(tabId);
+    });
+    wc.on('did-start-navigation', (details) => {
+      if (!details || !details.isMainFrame || details.isSameDocument) return;
+      const entry = current();
+      if (!entry) return;
+      entry.mediaPlaying = false;
+      entry.mediaProbe = null;
+      entry.inCall = false;
+      entry.pipDismissed = false;
+      autoVideoPip.delete(tabId);
+      if (floating && floating.tabId === tabId) closeFloat({ restore: true });
+    });
+    ensurePipTimer();
+    ensurePipWindowListeners();
+  }
+
+  async function enterVideoPip(tabId, { point = null, auto = null } = {}) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    let result = null;
+    try {
+      // Geste utilisateur simulé : la page n'a pas à avoir appelé `requestPictureInPicture` elle-même.
+      result = await withTimeout(wc.executeJavaScript(videoPipEnterScript(point), true), SLEEP_PROBE_TIMEOUT_MS);
+    } catch (_) {
+      result = null;
+    }
+    if (result && result.ok && auto) autoVideoPip.set(tabId, auto);
+    await probeMedia(tabId);
+    return result && result.ok ? { ok: true, pictureInPicture: 'video' } : { ok: false, error: (result && result.error) || 'failed' };
+  }
+
+  async function exitVideoPip(tabId) {
+    const entry = tabs.get(tabId);
+    autoVideoPip.delete(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return { ok: false, error: 'unknown-tab' };
+    try {
+      await withTimeout(entry.view.webContents.executeJavaScript(VIDEO_PIP_EXIT_SCRIPT, true), SLEEP_PROBE_TIMEOUT_MS);
+    } catch (_) {
+      // Page occupée : Chromium ferme l'incrustation à la navigation.
+    }
+    await probeMedia(tabId);
+    return { ok: true, pictureInPicture: null };
+  }
+
+  /** Déplace la vue de l'onglet dans la fenêtre flottante. */
+  function openFloat(tabId, { source, kind = 'call' }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    if (floating && floating.tabId === tabId) return { ok: true, pictureInPicture: floating.kind };
+    if (floating) closeFloat({ restore: true });
+    const { createCallFloat } = require('./call-float');
+    const view = entry.view;
+    exitPageFullscreen(entry);
+    detachView(view);
+    const record = { tabId, kind, source, float: null };
+    floating = record;
+    // Tant qu'elle est dans la fenêtre flottante, la vue ne suit plus la fenêtre du portail (sélection d'un
+    // autre onglet, menus de la coquille, redimensionnement) : seule la fenêtre flottante la place.
+    pinViewToFloat(view);
+    try {
+      record.float = createCallFloat({
+        view,
+        parentWindow: getMainWindow(),
+        onAction: (action) => void handleFloatAction(tabId, action),
+        onClosed: () => {
+          // Fermée par le système (fin de l'app, ⌘W) : la vue revient dans la fenêtre du portail.
+          if (floating === record) {
+            floating = null;
+            restoreViewAfterFloat(tabId);
+          }
+        },
+      });
+    } catch (error) {
+      floating = null;
+      restoreViewAfterFloat(tabId);
+      return { ok: false, error: error instanceof Error ? error.message : 'float-failed' };
+    }
+    const wc = view.webContents;
+    record.float.update({
+      kind,
+      title: wc.getTitle() || entry.title || '',
+      controls: floatControlsState(entry.mediaProbe),
+      texts: pipTexts,
+    });
+    record.float.show();
+    pushState(tabId);
+    void probeMedia(tabId);
+    return { ok: true, pictureInPicture: kind };
+  }
+
+  function pinViewToFloat(view) {
+    view.setVisible = () => {};
+    view.setBounds = () => {};
+  }
+
+  function unpinView(view) {
+    delete view.setVisible;
+    delete view.setBounds;
+  }
+
+  /** Remet la vue dans la fenêtre du portail : affichée si c'est l'onglet sélectionné, sinon cachée. */
+  function restoreViewAfterFloat(tabId) {
+    const entry = tabs.get(tabId);
+    if (!entry) return;
+    unpinView(entry.view);
+    if (entry.view.webContents.isDestroyed()) return;
+    if (viewsVisible && activeTabId === tabId) {
+      attachView(entry.view);
+      applyBounds(entry.view);
+    } else {
+      entry.view.setVisible(false);
+    }
+    pushState(tabId);
+  }
+
+  function closeFloat({ restore = true } = {}) {
+    const record = floating;
+    if (!record) return;
+    floating = null;
+    try {
+      if (record.float) record.float.close();
+    } catch (_) {
+      // Fenêtre déjà fermée.
+    }
+    if (restore) restoreViewAfterFloat(record.tabId);
+  }
+
+  function focusTabInPortal(tabId) {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    // Le portail sélectionne l'onglet (même message que la recherche dans les onglets, docs/tab-windows.md).
+    win.webContents.send('tab-window-tab-action', { tabId, action: 'select' });
+  }
+
+  async function handleFloatAction(tabId, action) {
+    if (action === 'back') {
+      closeFloat({ restore: true });
+      focusTabInPortal(tabId);
+      return;
+    }
+    if (action === 'close') {
+      const entry = tabs.get(tabId);
+      // Fermée à la main : plus d'incrustation automatique pour cet onglet jusqu'à ce qu'on y revienne.
+      if (entry) entry.pipDismissed = true;
+      closeFloat({ restore: true });
+      return;
+    }
+    if (!CALL_CONTROLS.includes(action)) return;
+    const entry = tabs.get(tabId);
+    if (!entry || entry.view.webContents.isDestroyed()) return;
+    try {
+      await withTimeout(
+        entry.view.webContents.executeJavaScriptInIsolatedWorld(PIP_WORLD_ID, [{ code: callControlScript(action) }]),
+        SLEEP_PROBE_TIMEOUT_MS,
+      );
+    } catch (_) {
+      // Bouton absent ou page occupée : le relevé suivant remet la barre à jour.
+    }
+    if (action === 'hangup') {
+      closeFloat({ restore: true });
+      return;
+    }
+    setTimeout(() => void probeMedia(tabId), 300);
+  }
+
+  /**
+   * Incrustation automatique d'un onglet qu'on quitte (`reason` : tab = autre onglet ou page du portail,
+   * app = autre application). Appel : fenêtre flottante ; vidéo avec du son : incrustation de la vidéo.
+   */
+  async function autoPictureInPicture(tabId, reason) {
+    const entry = tabs.get(tabId);
+    if (!entry || entry.pipDismissed || entry.view.webContents.isDestroyed()) return;
+    if (!pipAutoEnabled()) return;
+    const probe = await probeMedia(tabId);
+    if (!tabs.get(tabId)) return;
+    // Revenu entre-temps (aller-retour rapide) : rien à faire.
+    if (reason === 'tab' && viewsVisible && activeTabId === tabId) return;
+    if (reason === 'app' && !appInBackground()) return;
+    const wc = entry.view.webContents;
+    const kind = autoPipKind({
+      enabled: true,
+      inCall: entry.inCall,
+      probe,
+      audible: !wc.isDestroyed() && wc.isCurrentlyAudible() && !wc.isAudioMuted(),
+      alreadyFloating: Boolean(floating && floating.tabId === tabId),
+    });
+    if (kind === 'call') openFloat(tabId, { source: reason === 'app' ? 'auto-app' : 'auto-tab' });
+    else if (kind === 'video') await enterVideoPip(tabId, { auto: reason });
+  }
+
+  /** Retour sur l'onglet (sélection) : la fenêtre flottante et l'incrustation vidéo automatiques se ferment. */
+  function returnFromPictureInPicture(tabId) {
+    const entry = tabs.get(tabId);
+    if (entry) entry.pipDismissed = false;
+    if (floating && floating.tabId === tabId) {
+      closeFloat({ restore: false });
+      if (entry) unpinView(entry.view);
+    }
+    if (autoVideoPip.has(tabId)) void exitVideoPip(tabId);
+  }
+
+  /** Aucune fenêtre de Lasco n'a le focus : la personne est dans une autre application. */
+  function appInBackground() {
+    const focused = BrowserWindow.getFocusedWindow();
+    return !focused;
+  }
+
+  function ensurePipWindowListeners() {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed() || pipWindowListenersFor === win) return;
+    pipWindowListenersFor = win;
+    const leaveApp = () => {
+      // Le focus passe parfois par une autre fenêtre de Lasco (incrustation, Réglages) : on attend un peu.
+      setTimeout(() => {
+        const shown = shownTabId();
+        if (shown && !win.isDestroyed() && appInBackground()) void autoPictureInPicture(shown, 'app');
+      }, 250);
+    };
+    win.on('blur', leaveApp);
+    win.on('minimize', () => {
+      const shown = shownTabId();
+      if (shown) void autoPictureInPicture(shown, 'app');
+    });
+    win.on('focus', () => {
+      // Retour dans Lasco : ce qui a été incrusté parce qu'on était parti dans une autre app revient.
+      if (floating && floating.source === 'auto-app') closeFloat({ restore: true });
+      for (const [tabId, reason] of autoVideoPip) {
+        if (reason === 'app' && tabId === shownTabId()) void exitVideoPip(tabId);
+      }
+    });
+  }
+
+  /**
+   * Bouton du portail et menu : `{ tabId, action?: 'toggle' | 'enter' | 'exit', mode?: 'auto' | 'page' }`.
+   * `auto` (défaut) : appel en cours → fenêtre flottante, sinon la plus grande vidéo qui lit.
+   * `page` (« Incruster l'onglet ») : toute la page dans la fenêtre flottante, sans rechargement.
+   */
+  async function pictureInPicture({ tabId, action = 'toggle', mode = 'auto' } = {}) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    if (!['toggle', 'enter', 'exit'].includes(action)) return { ok: false, error: 'invalid-action' };
+    if (!['auto', 'page'].includes(mode)) return { ok: false, error: 'invalid-mode' };
+    const current = pictureInPictureOf(tabId, entry);
+    if (action === 'exit' || (action === 'toggle' && current)) {
+      if (current === 'call' || current === 'page') closeFloat({ restore: true });
+      else if (current === 'video') await exitVideoPip(tabId);
+      return { ok: true, pictureInPicture: null };
+    }
+    if (current === 'video' && mode === 'page') await exitVideoPip(tabId);
+    else if (current) return { ok: true, pictureInPicture: current };
+    await probeMedia(tabId);
+    if (entry.inCall) return openFloat(tabId, { source: 'manual', kind: 'call' });
+    if (mode === 'page') {
+      if (!sanitizeBrowserUrl(entry.view.webContents.getURL())) return { ok: false, error: 'not-web' };
+      return openFloat(tabId, { source: 'manual', kind: 'page' });
+    }
+    return enterVideoPip(tabId);
+  }
+
+  function setPictureInPictureTexts({ texts } = {}) {
+    pipTexts = normalizePipTexts(texts);
+    if (floating) floating.float.update({ texts: pipTexts });
+    return { ok: true };
   }
 
   // --- Mise en veille des onglets (docs/tab-sleep.md) ---
@@ -1698,18 +2221,83 @@ function createBrowserTabManager({
     }
   }
 
+  /** Budget d'onglets vivants et épinglés (docs/many-tabs-perf.md). Null : veille coupée (mode VM). */
+  function liveBudgetSettings() {
+    let settings = null;
+    try {
+      settings = typeof getTabSleepSettings === 'function' ? getTabSleepSettings() : null;
+    } catch (_) {
+      settings = null;
+    }
+    if (!settings) return null;
+    const { tabSleepMaxLive, tabSleepPinned } = normalizeTabSleepSettings(settings);
+    return { maxLive: tabSleepMaxLive, sleepPinned: tabSleepPinned };
+  }
+
+  function sleepPinnedSetting() {
+    const budget = liveBudgetSettings();
+    return Boolean(budget && budget.sleepPinned);
+  }
+
+  function memoryPressure() {
+    try {
+      return isMemoryPressure(process.getSystemMemoryInfo());
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Plus de `maxLive` onglets cachés éveillés : les plus anciennement quittés dorment sans attendre
+   * le délai (docs/many-tabs-perf.md). Mémoire presque pleine : budget de 3, après 30 s.
+   */
+  async function runLiveBudgetCheck({ minHiddenMs } = {}) {
+    const budget = liveBudgetSettings();
+    if (!budget) return [];
+    const pressure = memoryPressure();
+    if (!(budget.maxLive > 0) && !pressure) return [];
+    const candidates = [];
+    for (const [tabId, entry] of tabs) {
+      if (!entry.view.webContents.isDestroyed()) candidates.push(sleepCandidate(tabId, entry));
+    }
+    const options = {
+      now: Date.now(),
+      maxLive: budget.maxLive,
+      pressure,
+      activeTabId: shownTabId(),
+      neverSites: neverSleepSites(),
+      sleepPinned: budget.sleepPinned,
+      ...(typeof minHiddenMs === 'number' ? { minHiddenMs } : {}),
+    };
+    const ids = selectTabsOverLiveBudget(candidates, options);
+    const effectiveMinHidden = typeof minHiddenMs === 'number' ? minHiddenMs : pressure ? 30_000 : 120_000;
+    const slept = [];
+    for (const tabId of ids) {
+      const result = await sleepTab(tabId, { delayMs: Math.max(1, effectiveMinHidden) });
+      if (result && result.ok) slept.push(tabId);
+    }
+    return slept;
+  }
+
+  /** Relevé : le quart du délai, au plus 15 s quand un budget d'onglets vivants s'applique. */
+  function sleepCheckIntervalMs(delayMs) {
+    const base = tabSleepCheckIntervalMs(delayMs > 0 ? delayMs : 60_000);
+    return liveBudgetSettings() ? Math.min(base, 15_000) : base;
+  }
+
   function ensureSleepTimer() {
     if (sleepTimer || typeof getTabSleepSettings !== 'function') return;
     const tick = () => {
       sleepTimer = null;
       const delayMs = tabSleepDelayMs();
-      if (delayMs > 0) void runSleepCheck(delayMs);
+      // Veille après délai, puis budget d'onglets vivants (indépendant du délai, « Jamais » compris).
+      void (delayMs > 0 ? runSleepCheck(delayMs) : Promise.resolve()).then(() => runLiveBudgetCheck());
       if (tabs.size > 0 || delayMs > 0) {
-        sleepTimer = setTimeout(tick, tabSleepCheckIntervalMs(delayMs > 0 ? delayMs : 60_000));
+        sleepTimer = setTimeout(tick, sleepCheckIntervalMs(delayMs));
         if (sleepTimer.unref) sleepTimer.unref();
       }
     };
-    sleepTimer = setTimeout(tick, tabSleepCheckIntervalMs(tabSleepDelayMs() || 60_000));
+    sleepTimer = setTimeout(tick, sleepCheckIntervalMs(tabSleepDelayMs()));
     if (sleepTimer.unref) sleepTimer.unref();
   }
 
@@ -1725,7 +2313,10 @@ function createBrowserTabManager({
       hasOpener: Boolean(entry.hasOpener),
       devToolsOpened: !wc.isDestroyed() && wc.isDevToolsOpened(),
       loading: wc.isDestroyed() || wc.isLoading() || Boolean(entry.identityPending) || Boolean(entry.errorPage),
-      capturingMedia: mediaCapturingWebContents.has(wc.id),
+      capturingMedia: mediaCapturingWebContents.has(wc.id) || Boolean(entry.inCall),
+      // En incrustation (fenêtre flottante ou vidéo) : jamais en veille.
+      pictureInPicture: Boolean(pictureInPictureOf(tabId, entry)),
+      pinned: pinnedTabs.has(tabId),
       discarded: false,
     };
   }
@@ -1746,6 +2337,7 @@ function createBrowserTabManager({
       delayMs,
       activeTabId: shownTabId(),
       neverSites: neverSleepSites(),
+      sleepPinned: sleepPinnedSetting(),
     });
     for (const tabId of ids) await sleepTab(tabId, { delayMs });
   }
@@ -1781,10 +2373,16 @@ function createBrowserTabManager({
           delayMs,
           activeTabId: shownTabId(),
           neverSites: neverSleepSites(),
+          sleepPinned: sleepPinnedSetting(),
         });
         if (blocker) return { ok: false, error: blocker };
       } else if (tabId === shownTabId()) {
         return { ok: false, error: 'active' };
+      } else {
+        // Même à la demande : jamais un onglet en appel ou en incrustation (docs/picture-in-picture.md).
+        const candidate = sleepCandidate(tabId, entry);
+        if (candidate.capturingMedia) return { ok: false, error: 'media' };
+        if (candidate.pictureInPicture) return { ok: false, error: 'picture-in-picture' };
       }
       const history = wc.navigationHistory;
       let entries = [];
@@ -1895,7 +2493,7 @@ function createBrowserTabManager({
       return { ok: false, error: 'invalid-tab-id' };
     }
     if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
-    const safe = sanitizeBrowserUrl(url);
+    const safe = upgradeHttp(sanitizeBrowserUrl(url));
     if (!safe) return { ok: false, error: 'invalid-url' };
 
     if (tabs.has(tabId)) {
@@ -1912,10 +2510,16 @@ function createBrowserTabManager({
     return { ok: true, tabId, url: safe };
   }
 
+  /** HTTPS d'abord (docs/security.md) : adresse tapée ou ouverte, essayée en https. */
+  function upgradeHttp(url) {
+    if (!url || !httpsFirst) return url;
+    return httpsFirst.upgrade(url) || url;
+  }
+
   function navigate({ tabId, url }) {
     if (divertPortalUrl(url)) return { ok: false, error: 'portal-url', diverted: true };
     const entry = tabs.get(tabId);
-    const safe = sanitizeBrowserUrl(url);
+    const safe = upgradeHttp(sanitizeBrowserUrl(url));
     if (!safe) return { ok: false, error: 'invalid-url' };
     if (!entry) {
       sleepingTabs.delete(tabId);
@@ -1945,6 +2549,9 @@ function createBrowserTabManager({
       return { ok: false, error: 'unknown-tab' };
     }
     if (activeTabId !== tabId) hideFieldPopovers();
+    const leaving = viewsVisible && activeTabId !== tabId ? activeTabId : null;
+    // Retour sur l'onglet incrusté : la vue revient dans la fenêtre (avant la boucle qui l'attache).
+    returnFromPictureInPicture(tabId);
     activeTabId = tabId;
     viewsVisible = true;
     overlayActive = false;
@@ -1966,6 +2573,7 @@ function createBrowserTabManager({
     pushState(tabId);
     const shown = tabs.get(tabId);
     if (shown && !shown.view.webContents.isDestroyed()) notifyExtensions('onTabSelected', shown.view.webContents);
+    if (leaving) void autoPictureInPicture(leaving, 'tab');
     return { ok: true, tabId };
   }
 
@@ -1989,6 +2597,7 @@ function createBrowserTabManager({
 
   function hide() {
     hideFieldPopovers();
+    const leaving = viewsVisible ? activeTabId : null;
     viewsVisible = false;
     activeTabId = null;
     const now = Date.now();
@@ -1998,11 +2607,14 @@ function createBrowserTabManager({
       entry.view.setVisible(false);
       detachView(entry.view);
     }
+    // Une page du portail prend la place de l'onglet : comme un changement d'onglet.
+    if (leaving) void autoPictureInPicture(leaving, 'tab');
     return { ok: true };
   }
 
   function close({ tabId }) {
     sleepingTabs.delete(tabId);
+    pinnedTabs.delete(tabId);
     if (!tabs.has(tabId)) return { ok: true, tabId };
     destroyTab(tabId);
     return { ok: true, tabId };
@@ -2049,6 +2661,20 @@ function createBrowserTabManager({
       entry.view.webContents.goForward();
     }
     return { ok: true };
+  }
+
+  /**
+   * Onglet web épinglé (docs/pinned-tabs.md) : `{ tabId, pinned, pinnedUrl }`, `pinnedUrl` = adresse à
+   * l'épinglage. `pinned: false` (ou `pinnedUrl: null` sans `pinned`) le détache. Gardé hors de
+   * l'entrée de l'onglet : il survit à la veille et à la recréation de la vue. Même appel que la garde
+   * de l'économiseur de mémoire (`pinned`, perf/many-tabs) : à fusionner dans une seule fonction.
+   */
+  function setPinned({ tabId, pinned, pinnedUrl } = {}) {
+    if (typeof tabId !== 'string' || !tabId || tabId.length > 200) return { ok: false, error: 'invalid-tab' };
+    const url = pinned === false ? null : normalizePinnedUrl(pinnedUrl);
+    if (url) pinnedUrls.set(tabId, url);
+    else pinnedUrls.delete(tabId);
+    return { ok: true, tabId, pinned: pinned === true || Boolean(url) };
   }
 
   /** Couper ou réactiver le son d'un onglet (icône haut-parleur, clic droit). */
@@ -2208,6 +2834,33 @@ function createBrowserTabManager({
     const entry = liveEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };
     entry.view.webContents.print({}, () => {});
+    return { ok: true };
+  }
+
+  /**
+   * « Enregistrer en PDF » (docs/zoom-and-pdf.md) : la page telle que l'imprimerait Chrome
+   * (feuilles de style d'impression, arrière-plans), A4 sauf taille déclarée par la page.
+   * Renvoie le PDF au main, qui l'enregistre dans les Téléchargements.
+   */
+  async function renderPdf({ tabId }) {
+    const entry = liveEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    if (entry.errorPage) return { ok: false, error: 'not-web' };
+    const wc = entry.view.webContents;
+    const url = sanitizeBrowserUrl(wc.getURL()) || entry.url || '';
+    if (!url) return { ok: false, error: 'not-web' };
+    try {
+      const data = await wc.printToPDF({ printBackground: true, preferCSSPageSize: true, pageSize: 'A4' });
+      return { ok: true, data, url, title: wc.getTitle() || '' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'pdf-failed' };
+    }
+  }
+
+  /** Le portail sait enregistrer un PDF : le menu contextuel le propose. */
+  let pdfReady = false;
+  function setPdfReady() {
+    pdfReady = true;
     return { ok: true };
   }
 
@@ -2528,9 +3181,23 @@ function createBrowserTabManager({
     }
   }
 
-  async function settleAndSnapshot(wc) {
-    await delay(350);
+  /**
+   * Après une action : chargement fini, puis DOM calme (400 ms sans mutation, 3 s au plus), au lieu d'un délai fixe.
+   * Chaque onglet piloté attend pour lui-même : plusieurs onglets d'agents avancent en parallèle (docs/agent-tabs.md).
+   */
+  async function waitForStablePage(wc) {
+    await delay(120);
     await waitForLoadStop(wc, AGENT_SETTLE_MAX_MS);
+    try {
+      await runPageScript(wc, { op: 'settle', quietMs: AGENT_QUIET_MS, maxMs: AGENT_QUIET_MAX_MS });
+    } catch (_) {
+      // Navigation pendant l'attente : le document change, la fin du chargement suffit.
+      await waitForLoadStop(wc, AGENT_SETTLE_MAX_MS);
+    }
+  }
+
+  async function settleAndSnapshot(wc) {
+    await waitForStablePage(wc);
     try {
       return await runPageScript(wc, { op: 'snapshot', maxElements: 120, maxText: 3000 });
     } catch (_) {
@@ -2568,6 +3235,14 @@ function createBrowserTabManager({
    * Onglet piloté par un agent en arrière-plan : sa page n'est pas ralentie cachée (sinon minuteries à 1 /s,
    * captures impossibles), et elle garde la taille de la zone des onglets pour que la mise en page reste juste.
    */
+  /** Onglet épinglé par le portail : gardé éveillé (sauf réglage « mettre aussi en veille les épinglés »). */
+  function setPinned({ tabId, pinned } = {}) {
+    if (typeof tabId !== 'string' || !tabId) return { ok: false, error: 'invalid-tab-id' };
+    if (pinned === true) pinnedTabs.add(tabId);
+    else pinnedTabs.delete(tabId);
+    return { ok: true, tabId, pinned: pinnedTabs.has(tabId) };
+  }
+
   function setAgentControl({ tabId, active }) {
     // Un agent reprend un onglet en veille : il se réveille (caché) pour être piloté.
     const entry = active === true ? liveOrWokenEntry(tabId) : liveEntry(tabId);
@@ -2592,6 +3267,53 @@ function createBrowserTabManager({
     return { ok: true, tabId, active: agentControlled.has(tabId) };
   }
 
+  /** Moteur CDP de l'onglet (docs/agent-actuation.md), recréé quand la vue change. */
+  function agentCdpOf(entry) {
+    const wc = entry.view.webContents;
+    if (!entry.agentCdp || entry.agentCdpWc !== wc) {
+      entry.agentCdp = createAgentCdp(wc);
+      entry.agentCdpWc = wc;
+    }
+    return entry.agentCdp;
+  }
+
+  /** Fichier Lasco à déposer : téléchargé (http(s), 25 Mo au plus) dans un dossier temporaire, effacé après 10 min. */
+  async function downloadAgentUpload(url, fileName) {
+    let parsed;
+    try {
+      parsed = new URL(String(url || ''));
+    } catch (_) {
+      throw new AgentActionError('upload-failed');
+    }
+    const local = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+    if (parsed.protocol !== 'https:' && !(local && parsed.protocol === 'http:')) throw new AgentActionError('upload-failed');
+    const response = await net.fetch(parsed.href, { redirect: 'follow' });
+    if (!response.ok) throw new AgentActionError('upload-failed');
+    const declared = Number(response.headers.get('content-length') || 0);
+    if (declared > AGENT_MAX_UPLOAD_BYTES) throw new AgentActionError('file-too-large');
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > AGENT_MAX_UPLOAD_BYTES) throw new AgentActionError('file-too-large');
+    const safeName = String(fileName || 'fichier').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 120) || 'fichier';
+    const dir = fs.mkdtempSync(path.join(app.getPath('temp'), 'lasco-agent-upload-'));
+    const file = path.join(dir, safeName);
+    fs.writeFileSync(file, buffer, { mode: 0o600 });
+    setTimeout(() => fs.rm(dir, { recursive: true, force: true }, () => {}), 10 * 60_000).unref?.();
+    return file;
+  }
+
+  function agentFailure(error) {
+    if (error instanceof AgentActionError) {
+      const hint = AGENT_ERROR_HINTS[error.code];
+      return { ok: false, error: error.code, ...(hint ? { message: hint } : {}), ...error.details };
+    }
+    return null;
+  }
+
+  /**
+   * AI agent browser automation on one tab (docs/agent-actuation.md). CDP engine: accessibility tree with
+   * stable refs, real input events, wait for stability, guard on writes and sensitive fields. Returns the
+   * new page state after every action. The legacy DOM engine (agent-dom.js) stays as a fallback.
+   */
   async function agentAction(payload) {
     const { tabId, action } = payload || {};
     const entry = liveOrWokenEntry(tabId);
@@ -2600,11 +3322,88 @@ function createBrowserTabManager({
     // Page d'une extension (coffre d'un gestionnaire de mots de passe, réglages…) : jamais lue ni
     // pilotée par un agent (docs/extensions.md).
     if (!wc.isDestroyed() && /^chrome-extension:/i.test(wc.getURL())) return { ok: false, error: 'extension-page' };
-
+    const guard = payload && payload.guard && typeof payload.guard === 'object' ? payload.guard : null;
+    if (payload && payload.engine === 'dom') return legacyAgentAction(payload);
+    const cdp = agentCdpOf(entry);
     try {
       switch (action) {
         case 'snapshot': {
           await waitForLoadStop(wc, AGENT_SETTLE_MAX_MS);
+          const page = await cdp.snapshot({
+            maxElements: payload.maxElements,
+            maxText: payload.maxText,
+            includeText: payload.includeText !== false,
+          });
+          return { ok: true, page };
+        }
+        case 'screenshot':
+        case 'wait':
+          return action === 'wait' ? await cdp.wait(payload.ms) : legacyAgentAction(payload);
+        case 'click': {
+          if (typeof payload.ref === 'string' && payload.ref) {
+            return await withPageFocus(wc, () => cdp.click(payload.ref, { doubleClick: Boolean(payload.doubleClick), guard }), tabId);
+          }
+          const point = await resolvePoint(entry, payload);
+          if (!point.ok) return point;
+          const zoomFactor = wc.getZoomFactor() || 1;
+          // DIP de la vue → CSS px de la page.
+          return await withPageFocus(wc, () => cdp.clickPoint({ x: point.x / zoomFactor, y: point.y / zoomFactor }, { guard }), tabId);
+        }
+        case 'hover':
+          return await cdp.hover(payload.ref);
+        case 'type':
+          return await withPageFocus(
+            wc,
+            () => cdp.type(payload.ref, typeof payload.text === 'string' ? payload.text : '', {
+              clear: payload.ref ? payload.clear !== false : Boolean(payload.clear),
+              submit: Boolean(payload.submit),
+              guard,
+            }),
+            tabId,
+          );
+        case 'press':
+          return await withPageFocus(wc, () => cdp.press(payload.key, { ref: payload.ref, guard }), tabId);
+        case 'scroll':
+          return await cdp.scroll({ ref: payload.ref, direction: payload.direction, amount: payload.amount });
+        case 'select_option':
+          return await cdp.select(payload.ref, payload.value);
+        case 'upload': {
+          // Garde d'abord (sans télécharger le fichier pour rien), puis dépôt.
+          if (guard && guard.writeGate && guard.approved !== true) {
+            return await cdp.upload(payload.ref, '', { guard });
+          }
+          const file = await downloadAgentUpload(payload.url, payload.fileName);
+          return await cdp.upload(payload.ref, file, { guard });
+        }
+        case 'dialog':
+          return cdp.planDialog({ accept: payload.accept === true, text: payload.text, message: payload.message, guard });
+        default:
+          return { ok: false, error: 'unknown-action' };
+      }
+    } catch (error) {
+      const failure = agentFailure(error);
+      if (failure) return failure;
+      // CDP indisponible (débogueur pris par un autre outil, ancien Chromium) : moteur DOM.
+      if (['snapshot', 'click', 'type', 'press', 'scroll', 'select_option'].includes(action) && !wc.isDestroyed()) {
+        if (guard && guard.writeGate && guard.approved !== true && (action === 'click' || action === 'press' || (action === 'type' && payload.submit))) {
+          return { ok: false, error: 'engine-unavailable', message: "Moteur de pilotage indisponible sur cette page : l'action d'écriture n'est pas faite. Réessaie dans un instant." };
+        }
+        return legacyAgentAction(payload);
+      }
+      return { ok: false, error: error instanceof Error ? error.message : 'agent-action-failed' };
+    }
+  }
+
+  async function legacyAgentAction(payload) {
+    const { tabId, action } = payload || {};
+    const entry = liveOrWokenEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+
+    try {
+      switch (action) {
+        case 'snapshot': {
+          await waitForStablePage(wc);
           const page = await runPageScript(wc, {
             op: 'snapshot',
             maxElements: payload.maxElements,
@@ -2709,6 +3508,7 @@ function createBrowserTabManager({
     goForward,
     reload,
     setMuted,
+    setPinned,
     setSafeBrowsingTexts,
     stop,
     setBounds,
@@ -2717,6 +3517,8 @@ function createBrowserTabManager({
     findInPage,
     stopFindInPage,
     print,
+    renderPdf,
+    setPdfReady,
     capture,
     copyScreenshot,
     captureImage,
@@ -2735,6 +3537,7 @@ function createBrowserTabManager({
     setOverlay,
     agentAction,
     setAgentControl,
+    setPinned,
     passwordSetEnabled: (payload) => passwords.setEnabled(payload),
     passwordSetSuggestions: (payload) => passwords.setSuggestions(payload),
     passwordTakeCapture: (payload) => passwords.takeCapture(payload),
@@ -2766,10 +3569,15 @@ function createBrowserTabManager({
       return entry && !entry.view.webContents.isDestroyed() ? entry.view.webContents : null;
     },
     stateOf: (tabId) => buildState(tabId),
+    // Incrustation vidéo et fenêtre d'appel (docs/picture-in-picture.md).
+    pictureInPicture,
+    setPictureInPictureTexts,
     /** Mise en veille (docs/tab-sleep.md) : `sleep` met un onglet en veille tout de suite (menu, tests). */
     sleep: ({ tabId } = {}) => sleepTab(tabId, { force: true }),
     isSleeping: (tabId) => sleepingTabs.has(tabId),
     sleepingTabIds: () => [...sleepingTabs.keys()],
+    /** Budget d'onglets vivants (docs/many-tabs-perf.md) ; `minHiddenMs` pour le banc et les tests. */
+    runLiveBudgetCheck: (options) => runLiveBudgetCheck(options),
     runSleepCheck: () => {
       const delayMs = tabSleepDelayMs();
       return delayMs > 0 ? runSleepCheck(delayMs) : Promise.resolve();
@@ -2782,6 +3590,11 @@ function createBrowserTabManager({
     }
   }
   api.isPrivate = privateMode;
+  /** Fenêtre passée à un autre profil ou un autre workspace : vues détruites, plus aucun abonnement. */
+  api.dispose = () => {
+    destroyAll();
+    stopAdblockListener();
+  };
   /** Fermeture d'une fenêtre privée : vues détruites, puis cookies, cache et stockage de sa session effacés. */
   api.destroySession = async () => {
     destroyAll();
@@ -2793,6 +3606,7 @@ function createBrowserTabManager({
 module.exports = {
   createBrowserTabManager,
   sharedSitePermissions,
+  sharedExternalAppPermissions,
   sharedAdblock,
   STATE_CHANNEL,
   OPEN_REQUEST_CHANNEL,

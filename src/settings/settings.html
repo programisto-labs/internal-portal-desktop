@@ -256,6 +256,23 @@
             </div>
             <label class="switch"><input type="checkbox" id="safeBrowsingEnabled" aria-label="Protection contre les sites dangereux"><span></span></label>
           </div>
+          <div class="row">
+            <div class="text">
+              <div class="label">Toujours essayer une connexion sécurisée</div>
+              <div class="hint">Ouvre d’abord en https les sites demandés en http. Sans version sécurisée, la page s’ouvre en http, marquée « Non sécurisé ».</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="httpsFirstEnabled" aria-label="Toujours essayer une connexion sécurisée"><span></span></label>
+          </div>
+        </div>
+        <h2>Incrustation vidéo</h2>
+        <div class="group">
+          <div class="row">
+            <div class="text">
+              <div class="label">Incrustation automatique</div>
+              <div class="hint">Quand vous quittez un onglet ou Lasco pendant un appel (Meet, Teams, Zoom) ou une vidéo qui joue avec le son, une petite fenêtre reste au premier plan. Elle se referme quand vous revenez.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="pictureInPictureAuto" aria-label="Incrustation automatique"><span></span></label>
+          </div>
         </div>
         <h2>Démarrage et arrière-plan</h2>
         <div class="group">
@@ -341,6 +358,20 @@
               <div class="hint" id="tabSleepHint">Onglets web et pages de Lasco. Jamais l’onglet affiché, un onglet qui joue du son, en plein écran, en appel, piloté par un agent, avec une saisie en cours, ni Lasco Code.</div>
             </div>
             <select id="tabSleepMinutes" aria-label="Mettre en veille les onglets inactifs"></select>
+          </div>
+          <div class="row">
+            <div class="text">
+              <div class="label">Onglets gardés actifs en arrière-plan</div>
+              <div class="hint">Au-delà, les onglets quittés depuis plus de 2 minutes sont mis en veille sans attendre, les plus anciens d’abord. Si la mémoire de l’ordinateur est presque pleine, 3 au plus.</div>
+            </div>
+            <select id="tabSleepMaxLive" aria-label="Onglets gardés actifs en arrière-plan"></select>
+          </div>
+          <div class="row">
+            <div class="text">
+              <div class="label">Mettre aussi en veille les onglets épinglés</div>
+              <div class="hint">Désactivé : un onglet épinglé reste toujours actif.</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="tabSleepPinned" aria-label="Mettre aussi en veille les onglets épinglés"><span></span></label>
           </div>
         </div>
         <h2>Ne jamais mettre en veille ces sites</h2>

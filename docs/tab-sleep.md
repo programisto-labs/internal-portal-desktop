@@ -17,6 +17,8 @@ Lasco > Réglages… > **Économiseur de mémoire** (`settings.json`) :
 - `LASCO_TAB_SLEEP_MS` (environnement, développement et tests) remplace le délai, ex.
   `LASCO_TAB_SLEEP_MS=20000 npm run dev`. Les Réglages l'affichent.
 - Mode VM (`--vm`) : jamais de veille (le point de contrôle pilote les onglets par leur vue).
+- `tabSleepMaxLive` (défaut 10) et `tabSleepPinned` : budget d'onglets vivants et onglets
+  épinglés, voir [many-tabs-perf.md](many-tabs-perf.md).
 
 ## Onglets web (Desktop)
 
@@ -27,7 +29,8 @@ quand il est caché depuis le délai, **sauf** :
 - un onglet qui joue du son, en plein écran, piloté par un agent (`setAgentControl`), avec les
   outils de développement ouverts, en cours de chargement ou sur une page d'erreur de Lasco ;
 - une page qui a reçu le micro ou la caméra (appel en cours, même silencieux), jusqu'à sa
-  navigation suivante ;
+  navigation suivante ; un onglet en incrustation (vidéo ou fenêtre d'appel, docs/picture-in-picture.md).
+  Ces deux règles valent aussi pour `sleep.now` ;
 - une fenêtre ouverte par une page (`window.open` adoptée, docs/popups.md) : la détruire
   couperait `opener` (connexion OAuth) ;
 - un site de `tabSleepNeverSites` ; une page qui n'est pas en http(s) ;
@@ -55,7 +58,7 @@ chargement de l'adresse puis défilement relevé. Le portail reçoit aussitôt u
 
 | Méthode | Rôle |
 | --- | --- |
-| `get()` | `{ ok, delayMs, minutes, neverSites }` (`delayMs` = 0 : jamais) |
+| `get()` | `{ ok, delayMs, minutes, neverSites, maxLive, sleepPinned }` (`delayMs` = 0 : jamais) |
 | `onChange(cb)` | même instantané à chaque changement des Réglages |
 | `manage()` | ouvre Réglages > Économiseur de mémoire |
 | `now({ tabId })` | met l'onglet en veille tout de suite (hors onglet affiché) |

@@ -26,7 +26,7 @@ function decideForcedInstall({ downloadedAt, now, busy, noticeMs = FORCED_UPDATE
  * Planifie l'installation d'une version téléchargée. `install` n'est appelé qu'une fois.
  * @param {{ isBusy: () => boolean, install: () => void, notify?: (info: { version: string | null }) => void,
  *   now?: () => number, setInterval?: typeof setInterval, clearInterval?: typeof clearInterval,
- *   tickMs?: number, noticeMs?: number, maxDeferMs?: number }} deps
+ *   tickMs?: number, noticeMs?: number, maxDeferMs?: number | (() => number) }} deps
  */
 function createForcedUpdateScheduler(deps) {
   const now = deps.now || Date.now;
@@ -49,7 +49,8 @@ function createForcedUpdateScheduler(deps) {
       now: now(),
       busy,
       noticeMs: deps.noticeMs,
-      maxDeferMs: deps.maxDeferMs,
+      // Nombre, ou fonction relue à chaque tour (plancher de sécurité : docs/security.md).
+      maxDeferMs: typeof deps.maxDeferMs === 'function' ? deps.maxDeferMs() : deps.maxDeferMs,
     });
     if (decision !== 'install') return;
     done = true;

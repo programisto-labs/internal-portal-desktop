@@ -10,13 +10,23 @@ const {
   sharedSitePermissions,
   sharedAdblock,
   BROWSER_PARTITION,
+  sharedExternalAppPermissions,
 } = require('./browser-tabs/manager');
 const { captureFilename, captureVisible } = require('./browser-tabs/page-capture');
+const { pdfFilename } = require('./browser-tabs/page-pdf');
 const { createExtensionsWiring } = require('./extensions/wiring');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
-const { TAB_SLEEP_DELAY_CHOICES, normalizeSiteHost, resolveTabSleepDelayMs } = require('./browser-tabs/tab-sleep');
+const {
+  TAB_SLEEP_DELAY_CHOICES,
+  TAB_SLEEP_MAX_LIVE_CHOICES,
+  normalizeSiteHost,
+  resolveTabSleepDelayMs,
+} = require('./browser-tabs/tab-sleep');
+const { summarizeAppMetrics } = require('./perf-metrics');
+const { floatBounds, normalizePipTexts } = require('./browser-tabs/picture-in-picture');
+const { attachFloatBar } = require('./browser-tabs/call-float');
 const {
   classifyIncomingUrl,
   defaultBrowserSnapshot,
@@ -25,6 +35,14 @@ const {
 } = require('./default-browser');
 const { buildTabMenuTemplate, resolveWindowMenuActions } = require('./browser-tabs/tab-menu');
 const { createHistoryStore } = require('./browser-tabs/history');
+const { createSitePermissionStore } = require('./browser-tabs/site-permissions');
+const { createExternalAppPermissionStore } = require('./browser-tabs/external-apps');
+const {
+  resolveBrowserContext,
+  sameBrowserContext,
+  createMigratedPartitionsStore,
+} = require('./browser-profiles/context');
+const { createBrowserProfileRegistry } = require('./browser-profiles/registry');
 const { registerBrowserImportIpc } = require('./browser-import/ipc');
 const { createSearchEngineStore } = require('./browser-tabs/search-engines');
 const { createDownloadsStore } = require('./downloads/store');
@@ -49,6 +67,8 @@ const {
   buildNewWindowBounds,
 } = require('./tab-windows');
 const { APP_MENU_COMMANDS, normalizeAppMenuState, buildApplicationMenuTemplate } = require('./app-menu');
+const { createTabModel, createWindowKey, MAIN_WINDOW_KEY } = require('./tab-model');
+const { createTabSessionStore } = require('./tab-session-store');
 const {
   PRIVATE_WINDOW_ARG,
   PRIVATE_WINDOW_BACKGROUND,
@@ -66,7 +86,12 @@ const { createHostOpsStore, createJournal } = require('./host-ops/store');
 const { createHostOpsService } = require('./host-ops/service');
 const { createConfirm } = require('./host-ops/confirm');
 const { isTrustedHostOpsSender } = require('./host-ops/trust');
-const { createForcedUpdateScheduler } = require('./forced-update');
+const { createForcedUpdateScheduler, FORCED_UPDATE_MAX_DEFER_MS } = require('./forced-update');
+const {
+  createSecurityFloor,
+  fetchMinimumVersion,
+  SECURITY_CHECK_INTERVAL_MS,
+} = require('./security/minimum-version');
 const {
   isVmMode,
   applyVmSettings,
@@ -100,6 +125,31 @@ const { createTrayController } = require('./tray/tray');
 const { normalizePortalTrayState, TRAY_PORTAL_COMMANDS, buildTrayView, mainWindowNeedsFullPace } = require('./tray/tray-state');
 const { SHORTCUT_IDS, DEFAULT_SHORTCUTS, formatAccelerator, updateShortcut, acceleratorFromKeyEvent } = require('./background-mode');
 const { trayPlaceLabel } = require('./tray/tray-platform');
+const { createIpcGate } = require('./security/ipc-gate');
+const { parseExternalAppUrl } = require('./browser-tabs/external-apps');
+const { createHttpsFirst } = require('./browser-tabs/https-first');
+
+/** HTTPS d'abord (docs/security.md) : un état pour toutes les fenêtres normales, en mémoire. */
+let httpsFirstState = null;
+function getHttpsFirst() {
+  if (!httpsFirstState) httpsFirstState = createHttpsFirst({ isEnabled: () => getSettings().httpsFirstEnabled !== false });
+  return httpsFirstState;
+}
+const { WEB_PAGE_CHANNELS: ADBLOCK_PAGE_CHANNELS } = require('./browser-tabs/adblock');
+
+/**
+ * Barrière IPC (docs/security.md) : posée avant tout gestionnaire. Une page web (onglet, fenêtre
+ * ouverte par un site, page OAuth dans la fenêtre du portail) n'atteint que les canaux de ses preloads.
+ */
+const ipcGate = createIpcGate({
+  isTrustedFrameUrl: (url) => isPortalNavigationUrl(url),
+  webChannels: [...PASSWORD_PAGE_CHANNELS, ...FORM_AUTOFILL_PAGE_CHANNELS, ...ADBLOCK_PAGE_CHANNELS],
+});
+ipcGate.install(ipcMain);
+// Aucune page n'embarque de <webview> (balise désactivée partout) : refusé aussi si une page l'active.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+});
 const {
   LOGIN_HIDDEN_ARG,
   linuxLaunchPath,
@@ -210,6 +260,74 @@ let mainWindowRef = null;
  * @type {Map<number, { win: BrowserWindow, role: 'main' | 'detached', tabManager: ReturnType<typeof createBrowserTabManager> | null }>}
  */
 const portalWindows = new Map();
+
+/**
+ * Tab model (docs/tab-model.md): the tabs of every portal window, saved in `tab-session.json`.
+ * Pages commit their strip; main-process changes are pushed back to the window's page.
+ */
+let tabModel = null;
+let tabSession = null;
+function getTabModel() {
+  if (tabModel) return tabModel;
+  tabSession = createTabSessionStore({ dir: app.getPath('userData') });
+  tabModel = createTabModel({
+    onPersist: () => tabSession.schedule(),
+    onChange: (windowKey, scope, strip, { origin }) => {
+      if (origin !== 'main') return;
+      for (const entry of portalWindows.values()) {
+        if (entry.windowKey !== windowKey || entry.spare || entry.win.isDestroyed()) continue;
+        entry.win.webContents.send('tab-model-change', { scope, strip });
+      }
+    },
+    // chrome.tabs-like events (created, removed, updated, moved, activated, attached, detached):
+    // the hook for extensions and later features (`tabModelEvents.on('event', …)`).
+    onEvents: (windowKey, events) => {
+      for (const event of events) tabModelEvents.emit('event', { windowKey, ...event });
+    },
+  });
+  tabModel.load(tabSession.read());
+  tabSession.bind(() => tabModel.serialize());
+  return tabModel;
+}
+const tabModelEvents = new (require('events').EventEmitter)();
+tabModelEvents.setMaxListeners(50);
+
+/** Clamp saved bounds to a connected display (a screen unplugged since). */
+function visibleWindowBounds(bounds) {
+  if (!bounds) return null;
+  try {
+    const area = screen.getDisplayMatching(bounds).workArea;
+    const width = Math.min(bounds.width, area.width);
+    const height = Math.min(bounds.height, area.height);
+    const x = Math.min(Math.max(bounds.x, area.x), area.x + area.width - width);
+    const y = Math.min(Math.max(bounds.y, area.y), area.y + area.height - height);
+    return { x, y, width, height };
+  } catch (_) {
+    return { width: bounds.width, height: bounds.height };
+  }
+}
+
+function saveTabWindowBounds(entry) {
+  if (!entry || entry.spare || entry.win.isDestroyed() || entry.win.isMinimized() || entry.win.isFullScreen()) return;
+  getTabModel().setBounds(entry.windowKey, entry.win.getNormalBounds());
+}
+
+let detachedWindowsRestored = false;
+/** Restart: reopen the detached windows of the last session, each on its tabs (once). */
+function restoreDetachedTabWindows() {
+  if (detachedWindowsRestored || VM_MODE) return;
+  detachedWindowsRestored = true;
+  for (const saved of getTabModel().windowsToRestore()) {
+    if (!isPortalPath(saved.startHref)) continue;
+    createWindow({
+      role: 'detached',
+      windowKey: saved.key,
+      startHref: saved.startHref,
+      bounds: visibleWindowBounds(saved.bounds),
+      inactive: true,
+    });
+  }
+}
 /** One history file for every window. */
 let browserHistoryStore = null;
 /** Tabs moved into a window before its page is ready to adopt them. */
@@ -605,8 +723,13 @@ function closeSettings() {
 }
 
 /** Réglages > Autorisations des sites : libellés, réglages par défaut, sites retenus. */
+/** Autorisations du profil de la fenêtre principale (docs/browser-profiles.md). */
+function activeSitePermissions() {
+  return getBrowserProfileRegistry().storesFor(mainWindowBrowserContext()).sitePermissions;
+}
+
 function sitePermissionsSettingsState() {
-  const store = sharedSitePermissions();
+  const store = activeSitePermissions();
   return {
     names: PERMISSION_NAMES,
     defaults: store.listDefaults(),
@@ -768,11 +891,13 @@ function getForcedUpdateScheduler() {
         }
       },
       install: () => quitAndInstallUpdate(),
+      // Sous la version minimale (faille critique) : 10 min d'attente au plus au lieu de 2 h.
+      maxDeferMs: () => getSecurityFloor().maxDeferMs(FORCED_UPDATE_MAX_DEFER_MS),
       notify: ({ version }) => {
         try {
           if (!Notification.isSupported()) return;
           new Notification({
-            title: 'Mise à jour de Lasco',
+            title: getSecurityFloor().required() ? 'Mise à jour de sécurité de Lasco' : 'Mise à jour de Lasco',
             body: version
               ? `Lasco ${version} s'installe dans une minute : l'application va redémarrer.`
               : "Une nouvelle version s'installe dans une minute : l'application va redémarrer.",
@@ -806,11 +931,58 @@ function isUpdaterEnabled() {
 
 async function checkForUpdates() {
   if (!isUpdaterEnabled()) return;
+  await refreshSecurityFloor();
   try {
     await autoUpdater.checkForUpdates();
   } catch (error) {
     reportUpdaterError(error, 'Update check failed.');
   }
+  maybePromptManualSecurityUpdate();
+}
+
+/** Version minimale imposée après une faille critique (docs/security.md). */
+let securityFloor = null;
+let securityCheckIntervalId = null;
+function getSecurityFloor() {
+  if (!securityFloor) securityFloor = createSecurityFloor({ currentVersion: app.getVersion() });
+  return securityFloor;
+}
+
+async function refreshSecurityFloor() {
+  const { net } = require('electron');
+  const next = await fetchMinimumVersion({ fetchImpl: (url, init) => net.fetch(url, init) });
+  const floor = getSecurityFloor();
+  const wasRequired = floor.required();
+  floor.update(next);
+  if (floor.required() && !wasRequired) {
+    console.warn(`[security] Lasco ${app.getVersion()} est sous la version minimale ${floor.floor().minimumVersion}`);
+    // Vérifier plus souvent tant que la version corrigée n'est pas installée.
+    if (!securityCheckIntervalId) {
+      securityCheckIntervalId = setInterval(() => void checkForUpdates(), SECURITY_CHECK_INTERVAL_MS);
+      if (typeof securityCheckIntervalId.unref === 'function') securityCheckIntervalId.unref();
+    }
+  }
+}
+
+/** Mise à jour automatique qui n'aboutit pas sous le plancher : proposer le téléchargement, une fois. */
+function maybePromptManualSecurityUpdate() {
+  const floor = getSecurityFloor();
+  if (!floor.shouldPromptManualUpdate({ updateDownloaded: updateState.status === 'downloaded' })) return;
+  const parent = mainPortalWindow();
+  const options = {
+    type: 'warning',
+    buttons: ['Télécharger Lasco', 'Plus tard'],
+    defaultId: 0,
+    cancelId: 1,
+    message: 'Mettez Lasco à jour',
+    detail: `Cette version (${app.getVersion()}) a une faille de sécurité corrigée dans Lasco ${floor.floor().minimumVersion}, et la mise à jour automatique n'a pas abouti.${floor.floor().reason ? `\n\n${floor.floor().reason}` : ''}`,
+  };
+  const shown = parent && !parent.isDestroyed() ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+  void shown
+    .then(({ response }) => {
+      if (response === 0) void shell.openExternal('https://github.com/programisto-labs/internal-portal-desktop/releases/latest');
+    })
+    .catch(() => undefined);
 }
 
 /**
@@ -1007,7 +1179,10 @@ function shouldNavigateInApp(urlString) {
 function openUrlInDefaultBrowser(urlString) {
   try {
     const u = new URL(urlString);
-    if (u.protocol === 'javascript:' || u.protocol === 'data:' || u.protocol === 'blob:') {
+    // http(s), ou lien vers une application (mailto:, zoommtg:…). Jamais file:, smb:, réglages du
+    // système… (docs/security.md) : un lien du portail ne lance pas un programme ni ne monte un partage.
+    if (u.protocol !== 'http:' && u.protocol !== 'https:' && !parseExternalAppUrl(urlString)) {
+      console.warn(`[security] lien ${u.protocol} non ouvert`);
       return;
     }
     void shell.openExternal(urlString);
@@ -1033,6 +1208,66 @@ function getBrowserHistoryStore() {
     browserHistoryStore = createHistoryStore({ filePath: path.join(app.getPath('userData'), 'browser-history.json') });
   }
   return browserHistoryStore;
+}
+
+/**
+ * Profils de navigation (docs/browser-profiles.md) : une session par (compte, profil, workspace), des fichiers
+ * par (compte, profil). Sans contexte posé par le portail (ancien portail, mode VM), la session d'avant.
+ */
+let browserProfileRegistry = null;
+function getBrowserProfileRegistry() {
+  if (!browserProfileRegistry) {
+    browserProfileRegistry = createBrowserProfileRegistry({
+      fromPartition: (partition) => session.fromPartition(partition),
+      legacy: {
+        history: getBrowserHistoryStore,
+        sitePermissions: sharedSitePermissions,
+        externalAppPermissions: sharedExternalAppPermissions,
+      },
+      createHistoryStore,
+      createSitePermissionStore,
+      createExternalAppPermissionStore,
+      migrated: createMigratedPartitionsStore({
+        filePath: path.join(app.getPath('userData'), 'browser-profiles', 'migration.json'),
+      }),
+      attachDownloads: (ses, meta) => getDownloadService().attach(ses, 'web', meta),
+      log: (line) => console.log(line),
+    });
+  }
+  return browserProfileRegistry;
+}
+
+/**
+ * Profil retiré dans le portail : cookies, cache et stockage de ses sessions vidés, fichiers du profil
+ * supprimés. Jamais le profil par défaut, jamais un profil affiché par une fenêtre.
+ */
+async function forgetBrowserProfile({ owner, profileId }) {
+  const ctx = resolveBrowserContext({ owner, profileId, workspace: 'x' }, { userDataDir: app.getPath('userData') });
+  if (!ctx || ctx.isDefault || ctx.profileId !== profileId) return { ok: false, error: 'invalid-profile' };
+  for (const entry of portalWindows.values()) {
+    if (entry.browserContext && entry.browserContext.profileKey === ctx.profileKey) return { ok: false, error: 'in-use' };
+  }
+  const prefix = `bp-${ctx.owner}-${ctx.profileId}-`;
+  let names = [];
+  try {
+    names = fs.readdirSync(path.join(app.getPath('userData'), 'Partitions')).filter((name) => name.startsWith(prefix));
+  } catch (_) {
+    // Aucune session sur le disque.
+  }
+  for (const name of names) {
+    const ses = session.fromPartition(`persist:${name}`);
+    await ses.clearStorageData().catch(() => undefined);
+    await ses.clearCache().catch(() => undefined);
+  }
+  if (ctx.dataDir) fs.rmSync(ctx.dataDir, { recursive: true, force: true });
+  return { ok: true, cleared: names.length };
+}
+
+/** Contexte web de la fenêtre principale : Réglages (autorisations) et import y écrivent. */
+function mainWindowBrowserContext() {
+  const win = mainPortalWindow();
+  const entry = win ? portalWindowEntry(win) : null;
+  return entry ? entry.browserContext || null : null;
 }
 
 /**
@@ -1083,7 +1318,9 @@ function getDownloadService() {
         if (!entry.win.isDestroyed()) entry.win.webContents.send('downloads-changed', event);
       }
     },
-    getSession: (source) => session.fromPartition(source === 'portal' ? 'persist:portal' : BROWSER_PARTITION),
+    // Nouvel essai dans la session d'origine (profil et workspace, docs/browser-profiles.md).
+    getSession: (source, rec) =>
+      session.fromPartition(source === 'portal' ? 'persist:portal' : (rec && rec.partition) || BROWSER_PARTITION),
     onFinished: (p) => {
       if (process.platform === 'darwin' && app.dock) app.dock.downloadFinished(p);
     },
@@ -1132,7 +1369,26 @@ const TAB_SLEEP_CHANNEL = 'browser-tab-sleep-changed';
 function tabSleepSnapshot() {
   const settings = getSettings();
   const delayMs = VM_MODE ? 0 : resolveTabSleepDelayMs(settings);
-  return { delayMs, minutes: settings.tabSleepMinutes, neverSites: settings.tabSleepNeverSites || [] };
+  return {
+    delayMs,
+    minutes: settings.tabSleepMinutes,
+    neverSites: settings.tabSleepNeverSites || [],
+    // Onglets gardés actifs en arrière-plan (0 = sans limite), épinglés mis en veille ou non (docs/many-tabs-perf.md).
+    maxLive: VM_MODE ? 0 : settings.tabSleepMaxLive,
+    sleepPinned: settings.tabSleepPinned === true,
+  };
+}
+
+/** Relevé agrégé de la mémoire et du CPU (docs/many-tabs-perf.md) : totaux seulement, aucune adresse. */
+function perfSnapshot() {
+  let webLive = 0;
+  let webSleeping = 0;
+  for (const entry of portalWindows.values()) {
+    if (!entry.tabManager) continue;
+    webLive += entry.tabManager.tabIds().length;
+    webSleeping += entry.tabManager.sleepingTabIds().length;
+  }
+  return summarizeAppMetrics(app.getAppMetrics(), { webLive, webSleeping });
 }
 
 function broadcastTabSleepSettings() {
@@ -1194,12 +1450,16 @@ function tabManagerFor(win) {
   if (!entry.tabManager) {
     entry.tabManager = createBrowserTabManager({
       getMainWindow: () => (win.isDestroyed() ? null : win),
-      history: getBrowserHistoryStore(),
+      // Profil et workspace de la fenêtre (docs/browser-profiles.md) : session, historique, autorisations.
+      ...getBrowserProfileRegistry().managerOptions(entry.browserContext || null),
       interceptLink: routePortalLinkInApp,
       searchEngines: getSearchEngineStore(),
       safeBrowsing: getSafeBrowsing(),
+      httpsFirst: getHttpsFirst(),
       // Économiseur de mémoire (docs/tab-sleep.md). Coupé en mode VM (onglets pilotés par le point de contrôle).
       getTabSleepSettings: () => (VM_MODE ? null : getSettings()),
+      // Incrustation automatique (docs/picture-in-picture.md). Coupée en mode VM.
+      getPictureInPictureAuto: () => !VM_MODE && getSettings().pictureInPictureAuto !== false,
       extensions: VM_MODE ? null : getExtensionsWiring().managerHooks(win),
     });
   }
@@ -1310,6 +1570,8 @@ function openPrivateWindow(sourceWindow) {
     },
     ...(iconPath && { icon: iconPath }),
   });
+  // La coquille (fichier de Lasco) parle aux gestionnaires ; ses onglets (`partition`) restent « web ».
+  ipcGate.trustSession(session.fromPartition(`${partition}-shell`));
   const winId = win.id;
   const ses = session.fromPartition(partition);
   attachPrivateDownloads(ses);
@@ -1320,6 +1582,8 @@ function openPrivateWindow(sourceWindow) {
     searchEngines: getSearchEngineStore(),
     // Comme Chrome : la protection vaut aussi en navigation privée (vérifications en mémoire, aucune donnée de navigation écrite).
     safeBrowsing: getSafeBrowsing(),
+    // Sites sans https propres à cette fenêtre : rien ne survit à sa fermeture.
+    httpsFirst: createHttpsFirst({ isEnabled: () => getSettings().httpsFirstEnabled !== false }),
     isPortalUrl: isPortalNavigationUrl,
     onPortalUrl: openPortalUrlFromPrivateWindow,
   });
@@ -1366,6 +1630,93 @@ function openDetachedTabWindow(tab, { point, sourceWindow } = {}) {
   const bounds = buildDetachedWindowBounds({ point, size, workArea });
   return takeSpareTabWindow(tab, { bounds }) || createWindow({ role: 'detached', initialTab: tab, bounds });
 }
+
+/**
+ * « Incruster l'onglet » pour une page du portail (docs/picture-in-picture.md) : une fenêtre détachée
+ * petite, toujours au premier plan, sur tous les bureaux, avec la barre de l'incrustation en bas
+ * (« Revenir à l'onglet », « Fermer » : l'onglet revient dans la fenêtre principale).
+ * Les onglets web, eux, passent dans la fenêtre flottante du gestionnaire d'onglets (sans rechargement).
+ */
+const PORTAL_FLOAT_SIZE = Object.freeze({ width: 420, height: 560 });
+const PORTAL_FLOAT_MIN_SIZE = Object.freeze({ width: 320, height: 360 });
+let lastPortalFloatBounds = null;
+
+function openFloatingPortalTab(tab, { sourceWindow } = {}) {
+  if (!tab || tab.kind !== 'internal') return null;
+  const display = sourceWindow && !sourceWindow.isDestroyed()
+    ? screen.getDisplayMatching(sourceWindow.getBounds())
+    : screen.getPrimaryDisplay();
+  const bounds = floatBounds(display.workArea, lastPortalFloatBounds || PORTAL_FLOAT_SIZE);
+  const win = takeSpareTabWindow(tab, { bounds }) || createWindow({ role: 'detached', initialTab: tab, bounds });
+  if (!win || win.isDestroyed()) return null;
+  makePortalWindowFloat(win, tab);
+  // La fenêtre de réserve avait la taille minimale d'une fenêtre du portail : on repose la taille voulue.
+  win.setBounds(bounds);
+  return win;
+}
+
+/** Onglet affiché par la fenêtre incrustée (la personne a pu naviguer) : il revient tel quel. */
+function floatingPortalTabDescriptor(win, tab) {
+  let href = tab.href;
+  try {
+    const current = new URL(win.webContents.getURL());
+    if (current.origin === PORTAL_ORIGIN && isPortalPath(current.pathname + current.search)) {
+      href = current.pathname + current.search + current.hash;
+    }
+  } catch (_) {
+    // Adresse illisible : celle de départ.
+  }
+  return sanitizeTabDescriptor(
+    { ...tab, href, locationHref: href, title: win.webContents.getTitle() || tab.title },
+    { sanitizeBrowserUrl },
+  ) || tab;
+}
+
+function makePortalWindowFloat(win, tab) {
+  const entry = portalWindows.get(win.id);
+  if (!entry || entry.floating) return;
+  win.setMinimumSize(PORTAL_FLOAT_MIN_SIZE.width, PORTAL_FLOAT_MIN_SIZE.height);
+  win.setAlwaysOnTop(true, 'floating');
+  try {
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } catch (_) {
+    // Linux sans gestionnaire compatible.
+  }
+  win.setFullScreenable(false);
+  let returned = false;
+  /** L'onglet revient dans la fenêtre principale (sélectionné), la fenêtre incrustée se ferme. */
+  const returnTab = ({ focus, closeWindow = true }) => {
+    if (returned) return;
+    returned = true;
+    const target = mainPortalWindow();
+    const back = floatingPortalTabDescriptor(win, tab);
+    if (target && target !== win && !target.isDestroyed()) {
+      if (focus) deliverTabToWindow(target, back);
+      else tabAdoptQueue.deliver(target.id, back);
+    }
+    if (closeWindow && !win.isDestroyed()) win.close();
+  };
+  const bar = attachFloatBar(win, {
+    onAction: (action) => {
+      if (action === 'back') returnTab({ focus: true });
+      else if (action === 'close') returnTab({ focus: false });
+    },
+  });
+  bar.update({ kind: 'page', title: tab.title || '', controls: {}, texts: portalFloatTexts });
+  bar.raise();
+  const remember = () => {
+    if (!win.isDestroyed()) lastPortalFloatBounds = win.getBounds();
+  };
+  win.on('moved', remember);
+  win.on('resized', remember);
+  win.webContents.on('page-title-updated', (_event, title) => bar.update({ title }));
+  // Fermée par le bouton rouge ou ⌘W : l'onglet ne se perd pas, il revient dans la fenêtre principale.
+  win.on('close', () => returnTab({ focus: false, closeWindow: false }));
+  entry.floating = { bar, returnTab };
+}
+
+/** Textes de la barre d'incrustation, fournis par le portail (setPictureInPictureTexts). */
+let portalFloatTexts = normalizePipTexts(null);
 
 /**
  * Spare detached window: a hidden portal window already loaded on the new-tab page, so
@@ -1592,7 +1943,10 @@ function createWindow({
   spareHref = null,
   /** Portal path loaded by a visible detached window without a tab to adopt (⌘N). */
   startHref = null,
+  /** Key in the tab model: `main`, a saved detached window (restart), or a new one. */
+  windowKey = null,
 } = {}) {
+  const tabWindowKey = windowKey || (role === 'main' ? MAIN_WINDOW_KEY : createWindowKey());
   let iconPath;
   try {
     iconPath = getIconPath();
@@ -1644,7 +1998,7 @@ function createWindow({
       additionalArguments: [
         `${APP_VERSION_ARG_PREFIX}${app.getVersion()}`,
         `${PORTAL_ORIGIN_ARG_PREFIX}${PORTAL_ORIGIN}`,
-        encodeTabWindowArg({ role, initialTab }),
+        encodeTabWindowArg({ role, initialTab, windowKey: tabWindowKey }),
         ...(NO_AGENTS ? [NO_AGENTS_ARG] : []),
         ...(VM_MODE ? [VM_ARG_FOR_PRELOAD] : []),
       ]
@@ -1694,7 +2048,11 @@ function createWindow({
 
   const winId = win.id;
   // `spare`: hidden, pre-loaded detached window (never a drop target nor the next main window).
-  portalWindows.set(winId, { win, role, tabManager: null, spare: Boolean(spareHref) });
+  portalWindows.set(winId, { win, role, windowKey: tabWindowKey, tabManager: null, browserContext: null, spare: Boolean(spareHref) });
+  // Saved with the tab model, to reopen a detached window where it was (also at quit: saveTabWindowBounds).
+  for (const name of ['moved', 'resized', 'show']) {
+    win.on(name, () => saveTabWindowBounds(portalWindows.get(winId)));
+  }
   if (role === 'main') {
     mainWindowRef = win;
     mainWindowFullPace = false;
@@ -1740,12 +2098,15 @@ function createWindow({
     stopAutoRetry();
     const entry = portalWindows.get(winId);
     if (entry && entry.tabManager) entry.tabManager.destroyAll();
+    // Closed by the person: its tabs go (like Chrome). At quit, the session keeps them for the restart.
+    if (!isQuitting && tabModel && tabWindowKey !== MAIN_WINDOW_KEY) tabModel.forgetWindow(tabWindowKey);
     portalWindows.delete(winId);
     tabAdoptQueue.forget(winId);
     if (spareTabWindow && spareTabWindow.win === win) spareTabWindow = null;
     if (mainWindowRef === win) {
       // The oldest detached window becomes the main one (bridges, badge, links).
-      const next = [...portalWindows.values()].find((e) => !e.win.isDestroyed() && !e.spare);
+      const next = [...portalWindows.values()].find((e) => !e.win.isDestroyed() && !e.spare && !e.floating)
+        || [...portalWindows.values()].find((e) => !e.win.isDestroyed() && !e.spare);
       if (next) next.role = 'main';
       mainWindowRef = next ? next.win : null;
       // No portal window left on screen: the spare must not keep the app alive.
@@ -1918,6 +2279,7 @@ function showMainWindow() {
     win = mainPortalWindow();
   }
   if (!win) return null;
+  restoreDetachedTabWindows();
   // Lasco hidden by app.hide() (background mode): unhide before showing the window.
   if (process.platform === 'darwin') app.show();
   if (win.isMinimized()) win.restore();
@@ -2311,6 +2673,25 @@ function registerWindowIPC() {
     return deliverCapture(shot, { target: p.target, url: '', title, source: 'portal' });
   });
 
+  // --- Enregistrer en PDF (docs/zoom-and-pdf.md) : même fenêtres que les téléchargements ---
+  ipcMain.handle('browser-tab-pdf-ready', (event) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    return manager ? manager.setPdfReady() : { ok: false, error: 'forbidden' };
+  });
+  ipcMain.handle('browser-tab-save-pdf', async (event, payload) => {
+    if (!downloadsSender(event)) return { ok: false, error: 'forbidden' };
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const pdf = await manager.renderPdf({ tabId: p.tabId });
+    if (!pdf || !pdf.ok) return pdf || { ok: false, error: 'pdf-failed' };
+    const filename = pdfFilename({ url: pdf.url, title: pdf.title });
+    const saved = getDownloadService().saveFile({ name: filename, data: pdf.data, mimeType: 'application/pdf', url: pdf.url, source: 'web' });
+    if (!saved.ok) return { ok: false, error: saved.error || 'pdf-failed' };
+    return { ok: true, filename: saved.item.filename, item: saved.item };
+  });
+
   // --- Host operations: bridge for the web app (strictly validated natively) ---
   /** Cadre principal de la fenêtre principale, chargé depuis l'origine exacte du portail. */
   const trustedPortalSender = (event) => {
@@ -2523,6 +2904,13 @@ function registerWindowIPC() {
     if (!entry) return { ok: false, error: 'forbidden' };
     const tab = readTab(payload);
     if (!tab) return { ok: false, error: 'invalid-tab' };
+    // « Incruster l'onglet » (docs/picture-in-picture.md) : page du portail seulement.
+    if (payload && payload.float === true) {
+      if (tab.kind !== 'internal') return { ok: false, error: 'invalid-tab' };
+      return openFloatingPortalTab(tab, { sourceWindow: entry.win })
+        ? { ok: true, action: 'floated' }
+        : { ok: false, error: 'float-failed' };
+    }
     openDetachedTabWindow(tab, { point: readPoint(payload), sourceWindow: entry.win });
     return { ok: true, action: 'detached' };
   });
@@ -2721,6 +3109,19 @@ function registerWindowIPC() {
     target.win.webContents.send('tab-window-tab-action', { tabId, action });
     return { ok: true };
   });
+  // --- Tab model (docs/tab-model.md): the page of a portal window reads and commits its strip ---
+  ipcMain.on('tab-model-read-sync', (event) => {
+    const entry = tabWindowSender(event);
+    event.returnValue = entry ? getTabModel().readWindow(entry.windowKey) : null;
+  });
+  ipcMain.handle('tab-model-commit', (event, payload) => {
+    const entry = tabWindowSender(event);
+    // The spare is not a window of the person yet: its « Nouvel onglet » is never saved.
+    if (!entry || entry.spare) return { ok: false, error: 'forbidden' };
+    const revision = getTabModel().commit(entry.windowKey, payload);
+    return revision ? { ok: true, revision } : { ok: false, error: 'invalid' };
+  });
+
   // A detached window whose last tab left (closed, attached or dragged away).
   ipcMain.handle('tab-window-close', (event) => {
     const entry = tabWindowSender(event);
@@ -2769,6 +3170,8 @@ function registerWindowIPC() {
         backgroundAvailable: Boolean(trayController),
         keepInBackground: settings.keepInBackground,
         safeBrowsingEnabled: settings.safeBrowsingEnabled !== false,
+        pictureInPictureAuto: settings.pictureInPictureAuto !== false,
+        httpsFirstEnabled: settings.httpsFirstEnabled !== false,
         loginItem: loginItemSnapshot(),
         shortcuts: shortcutsSnapshot(),
       },
@@ -2780,6 +3183,9 @@ function registerWindowIPC() {
         minutes: settings.tabSleepMinutes,
         choices: TAB_SLEEP_DELAY_CHOICES,
         neverSites: settings.tabSleepNeverSites || [],
+        maxLive: settings.tabSleepMaxLive,
+        maxLiveChoices: TAB_SLEEP_MAX_LIVE_CHOICES,
+        sleepPinned: settings.tabSleepPinned === true,
         // LASCO_TAB_SLEEP_MS (développement) remplace le délai choisi.
         overrideMs: Number(process.env.LASCO_TAB_SLEEP_MS) > 0 ? resolveTabSleepDelayMs(settings) : null,
       },
@@ -2821,6 +3227,17 @@ function registerWindowIPC() {
     if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
     getSettingsStore().set({ safeBrowsingEnabled: enabled });
     if (enabled) void getSafeBrowsing().update();
+    return true;
+  });
+  ipcMain.handle('settings-modal-set-https-first', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
+    getSettingsStore().set({ httpsFirstEnabled: enabled });
+    return true;
+  });
+  // Réglages > Général > Incrustation automatique (docs/picture-in-picture.md).
+  ipcMain.handle('settings-modal-set-pip-auto', (event, enabled) => {
+    if (!fromSettings(event) || typeof enabled !== 'boolean') return false;
+    getSettingsStore().set({ pictureInPictureAuto: enabled });
     return true;
   });
   ipcMain.handle('settings-modal-set-open-at-login', (event, enabled) => {
@@ -2926,20 +3343,20 @@ function registerWindowIPC() {
   // Réglages > Autorisations des sites (docs/site-permissions.md).
   ipcMain.handle('settings-modal-site-set-default', (event, permission, value) => {
     if (!fromSettings(event)) return { ok: false, error: 'forbidden' };
-    return { ok: sharedSitePermissions().setDefault(permission, value) };
+    return { ok: activeSitePermissions().setDefault(permission, value) };
   });
   ipcMain.handle('settings-modal-site-set', (event, origin, permission, decision) => {
     if (!fromSettings(event) || typeof origin !== 'string' || siteOrigin(origin) !== origin) {
       return { ok: false, error: 'forbidden' };
     }
     const next = decision === 'ask' || decision === null ? null : decision;
-    return { ok: sharedSitePermissions().set(origin, permission, next) };
+    return { ok: activeSitePermissions().set(origin, permission, next) };
   });
   ipcMain.handle('settings-modal-site-remove', (event, origin) => {
     if (!fromSettings(event) || typeof origin !== 'string' || siteOrigin(origin) !== origin) {
       return { ok: false, error: 'forbidden' };
     }
-    sharedSitePermissions().clearOrigin(origin);
+    activeSitePermissions().clearOrigin(origin);
     return { ok: true };
   });
   ipcMain.handle('settings-modal-site-reset-all', async (event) => {
@@ -2956,7 +3373,7 @@ function registerWindowIPC() {
     };
     const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
     if (response !== 0) return { ok: false, cancelled: true };
-    sharedSitePermissions().clear();
+    activeSitePermissions().clear();
     return { ok: true };
   });
 
@@ -3090,6 +3507,36 @@ function registerWindowIPC() {
     tabManagerFor(win)?.setAdoptPopups(Boolean(payload && payload.adoptPopups === true));
     if (win === mainPortalWindow()) flushPendingWebUrls();
   });
+  // Profils de navigation (docs/browser-profiles.md) : le portail pose le contexte de la fenêtre avant ses onglets.
+  ipcMain.handle('browser-profile-set-context', (event, payload) => {
+    const entry = portalWindowEntry(BrowserWindow.fromWebContents(event.sender));
+    if (!entry || event.sender !== entry.win.webContents) return { ok: false, error: 'forbidden' };
+    const next = resolveBrowserContext(payload, { userDataDir: app.getPath('userData') });
+    if (!next) return { ok: false, error: 'invalid-context' };
+    if (!sameBrowserContext(entry.browserContext, next)) {
+      // Autre profil ou autre workspace : les vues de l'ancien contexte disparaissent, le portail recrée ses onglets.
+      if (entry.tabManager) {
+        if (typeof entry.tabManager.dispose === 'function') entry.tabManager.dispose();
+        else entry.tabManager.destroyAll();
+        entry.tabManager = null;
+      }
+      entry.browserContext = next;
+    }
+    return { ok: true, profileId: next.profileId, workspace: next.workspace };
+  });
+  ipcMain.handle('browser-profile-get-context', (event) => {
+    const entry = portalWindowEntry(BrowserWindow.fromWebContents(event.sender));
+    if (!entry) return { ok: false, error: 'forbidden' };
+    const ctx = entry.browserContext;
+    return { ok: true, profileId: ctx ? ctx.profileId : null, workspace: ctx ? ctx.workspace : null };
+  });
+  /** Profil retiré dans le portail : sessions et fichiers de ce profil effacés de cet ordinateur. */
+  ipcMain.handle('browser-profile-forget', async (event, payload) => {
+    const entry = portalWindowEntry(BrowserWindow.fromWebContents(event.sender));
+    if (!entry || event.sender !== entry.win.webContents) return { ok: false, error: 'forbidden' };
+    return forgetBrowserProfile(payload || {});
+  });
+
   ipcMain.handle('browser-tab-create', (event, payload) => {
     const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
     if (!manager) return { ok: false, error: 'forbidden' };
@@ -3182,6 +3629,7 @@ function registerWindowIPC() {
   const browserTabActions = {
     'browser-tab-zoom': 'zoom',
     'browser-tab-set-muted': 'setMuted',
+    'browser-tab-set-pinned': 'setPinned',
     'browser-tab-set-safe-browsing-texts': 'setSafeBrowsingTexts',
     'browser-tab-find': 'findInPage',
     'browser-tab-stop-find': 'stopFindInPage',
@@ -3212,8 +3660,12 @@ function registerWindowIPC() {
     'browser-autofill-fill': 'autofillFill',
     // Onglet piloté par un agent en arrière-plan (docs/agent-tabs.md).
     'browser-tab-set-agent-control': 'setAgentControl',
+    // Onglet épinglé : gardé éveillé par l'économiseur de mémoire (docs/many-tabs-perf.md).
+    'browser-tab-set-pinned': 'setPinned',
     // Économiseur de mémoire (docs/tab-sleep.md) : mettre un onglet en veille tout de suite.
     'browser-tab-sleep': 'sleep',
+    // Incrustation vidéo et fenêtre d'appel (docs/picture-in-picture.md).
+    'browser-tab-picture-in-picture': 'pictureInPicture',
   };
   for (const [channel, method] of Object.entries(browserTabActions)) {
     ipcMain.handle(channel, (event, payload) => {
@@ -3225,10 +3677,43 @@ function registerWindowIPC() {
     });
   }
 
+  // Textes de la barre d'incrustation (docs/picture-in-picture.md) : fenêtre d'un onglet web et pages du
+  // portail incrustées (les mêmes pour toutes les fenêtres).
+  ipcMain.handle('browser-tab-set-pip-texts', (event, payload) => {
+    const manager = tabManagerFor(BrowserWindow.fromWebContents(event.sender));
+    if (!manager) return { ok: false, error: 'forbidden' };
+    const texts = payload && typeof payload === 'object' ? payload.texts : null;
+    if (!manager.isPrivate) portalFloatTexts = normalizePipTexts(texts);
+    for (const entry of portalWindows.values()) {
+      if (entry.floating) entry.floating.bar.update({ texts: portalFloatTexts });
+    }
+    return manager.setPictureInPictureTexts({ texts });
+  });
+
   // Économiseur de mémoire : le portail applique le même délai à ses pages (docs/tab-sleep.md).
   ipcMain.handle('browser-tab-sleep-get', (event) => {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
     return { ok: true, ...tabSleepSnapshot() };
+  });
+  ipcMain.handle('desktop-perf-snapshot', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    try {
+      return { ok: true, ...perfSnapshot() };
+    } catch (error) {
+      return { ok: false, error: 'unavailable' };
+    }
+  });
+  ipcMain.handle('settings-modal-tab-sleep-set-max-live', (event, maxLive) => {
+    if (!fromSettings(event) || !TAB_SLEEP_MAX_LIVE_CHOICES.includes(maxLive)) return false;
+    getSettingsStore().set({ tabSleepMaxLive: maxLive });
+    broadcastTabSleepSettings();
+    return true;
+  });
+  ipcMain.handle('settings-modal-tab-sleep-set-pinned', (event, value) => {
+    if (!fromSettings(event) || typeof value !== 'boolean') return false;
+    getSettingsStore().set({ tabSleepPinned: value });
+    broadcastTabSleepSettings();
+    return true;
   });
   ipcMain.handle('browser-tab-sleep-manage', (event) => {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
@@ -3300,7 +3785,10 @@ function registerWindowIPC() {
     dialog,
     shell,
     home: app.getPath('home'),
-    history: getBrowserHistoryStore(),
+    // Historique importé dans le profil de la fenêtre principale (docs/browser-profiles.md).
+    history: {
+      importEntries: (items) => getBrowserProfileRegistry().storesFor(mainWindowBrowserContext()).history.importEntries(items),
+    },
     resolveWindow: (event) => {
       const win = BrowserWindow.fromWebContents(event.sender);
       return portalWindowEntry(win) ? win : null;
@@ -3561,6 +4049,13 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     app.setName('Lasco');
+    // Sessions dont les pages sont à Lasco ; toute autre (onglets web, profils, privé) est « web ».
+    ipcGate.trustSession(session.defaultSession);
+    ipcGate.trustSession(session.fromPartition('persist:portal'));
+    // Vues locales de Lasco (réglages, popovers, cartes) : aucune autorisation de site (caméra, position…).
+    const localViewPermission = (permission) => permission === 'clipboard-sanitized-write' || permission === 'fullscreen';
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(localViewPermission(permission)));
+    session.defaultSession.setPermissionCheckHandler((_wc, permission) => localViewPermission(permission));
     nativeTheme.themeSource = getSettings().themeSource;
     // Bloqueur de pubs (docs/adblock.md) : jamais sur les pages de Lasco (portail, API, connexion).
     sharedAdblock().setProtectedUrlMatcher((url) => isPortalNavigationUrl(url) || isApiHostNavigationUrl(url));
@@ -3582,14 +4077,20 @@ if (!app.requestSingleInstanceLock()) {
       systemPreferences,
     });
     // Téléchargements : pages web des onglets et pages du portail (exports CSV, PDF…).
-    getDownloadService().attach(session.fromPartition(BROWSER_PARTITION), 'web');
+    getBrowserProfileRegistry().attachOnce(session.fromPartition(BROWSER_PARTITION), {
+      profileId: 'default',
+      partition: BROWSER_PARTITION,
+    });
     getDownloadService().attach(session.fromPartition('persist:portal'), 'portal');
     getSafeBrowsing().start();
     registerWindowIPC();
     setupAutoUpdater();
     nativeTheme.on('updated', updateAllIcons);
     const startHidden = openedAtLoginInBackground();
+    getTabModel();
     createWindow({ hidden: startHidden });
+    // Opened at login in the menu bar: detached windows come back with the main window.
+    if (!startHidden) restoreDetachedTabWindows();
     setupTray();
     // No icon after all (Linux without a system tray): a hidden window could not be reached.
     if (startHidden && !trayController) showMainWindow();
@@ -3627,6 +4128,8 @@ if (!app.requestSingleInstanceLock()) {
       codeCore.watchers.stopAll();
     }
     destroyAllBrowserViews();
+    if (tabModel) for (const entry of portalWindows.values()) saveTabWindowBounds(entry);
+    if (tabSession) tabSession.flush();
     if (downloadService) downloadService.flush();
     if (searchEngineStore) searchEngineStore.flush();
     if (updateCheckIntervalId) {

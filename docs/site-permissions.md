@@ -1,6 +1,6 @@
 # Onglets web : autorisations, sécurité, erreurs, plein écran
 
-Ce que Lasco Desktop fait comme un navigateur pour les onglets web (`persist:browser-tabs`).
+Ce que Lasco Desktop fait comme un navigateur pour les onglets web (sessions des onglets web (`persist:bp-…` par profil et workspace, `persist:browser-tabs` sans profil, docs/browser-profiles.md)).
 
 ## Autorisations des sites
 
