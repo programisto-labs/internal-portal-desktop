@@ -8,6 +8,7 @@ Objectif : pas de parc d'applications anciennes. Une version publiée est instal
 - Version téléchargée : notification « Lasco x.y.z s'installe dans une minute », puis redémarrage et installation (`src/forced-update.js`). Plus de choix « Plus tard ».
 - Jamais au milieu d'un travail : un agent qui répond, un harnais qui tourne ou une confirmation en attente (`mainWindowNeedsFullPace`) repoussent le redémarrage, au plus 2 h. Au-delà, l'installation a lieu.
 - « Installer maintenant » (Réglages) reste disponible. Les onglets sont restaurés au redémarrage.
+- **Faille critique** : version minimale `security/minimum-version.json` (workflow « Security floor ») : sous ce plancher, vérification toutes les 15 min, installation au plus 10 min après le téléchargement même pendant un travail, et fenêtre « Mettez Lasco à jour » si rien n'est installable au bout de 6 h. Détail et politique de mise à jour d'Electron : docs/security.md.
 
 ## Ordinateur Lasco (mode `--vm`)
 
@@ -19,4 +20,4 @@ Une release sans `.deb` ni `.sha256` n'est pas déployée dans les machines. Ret
 
 ## Tests
 
-`scripts/test-forced-update.js`.
+`scripts/test-forced-update.js`, `scripts/test-minimum-version.js`.

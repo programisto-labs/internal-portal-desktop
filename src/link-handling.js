@@ -3,7 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const { normalizeShortcuts } = require('./background-mode');
-const { normalizeTabSleepSettings, DEFAULT_TAB_SLEEP_MINUTES } = require('./browser-tabs/tab-sleep');
+const {
+  normalizeTabSleepSettings,
+  DEFAULT_TAB_SLEEP_MINUTES,
+  DEFAULT_TAB_SLEEP_MAX_LIVE,
+} = require('./browser-tabs/tab-sleep');
 
 const LASCO_PROTOCOL = 'lasco';
 /** `themeSource`: app appearance (Réglages > Général), applied to `nativeTheme.themeSource`. */
@@ -15,6 +19,7 @@ const THEME_SOURCES = Object.freeze(['system', 'light', 'dark']);
  * `downloadsDirectory`: folder of the downloads (null = the OS Downloads folder), `downloadsAskWhere`:
  * « Enregistrer sous » for each file. Docs: docs/downloads.md.
  * `safeBrowsingEnabled`: protection against dangerous sites (phishing, malware). Docs: docs/safe-browsing.md.
+ * `httpsFirstEnabled`: http pages of public sites are tried in https first. Docs: docs/security.md.
  */
 const DEFAULT_SETTINGS = Object.freeze({
   openLinksInApp: true,
@@ -24,18 +29,22 @@ const DEFAULT_SETTINGS = Object.freeze({
   downloadsDirectory: null,
   downloadsAskWhere: false,
   safeBrowsingEnabled: true,
+  httpsFirstEnabled: true,
   // Incrustation automatique d'un appel ou d'une vidéo quand on quitte l'onglet (docs/picture-in-picture.md).
   pictureInPictureAuto: true,
   // Économiseur de mémoire (docs/tab-sleep.md) : délai en minutes (0 = jamais), sites exclus.
   tabSleepMinutes: DEFAULT_TAB_SLEEP_MINUTES,
   tabSleepNeverSites: [],
+  // Onglets gardés actifs en arrière-plan (docs/many-tabs-perf.md) ; épinglés gardés éveillés.
+  tabSleepMaxLive: DEFAULT_TAB_SLEEP_MAX_LIVE,
+  tabSleepPinned: false,
 });
 
 /** Keep only known keys with valid types; unknown / invalid values fall back to defaults. */
 function normalizeSettings(raw) {
   const out = { ...DEFAULT_SETTINGS };
   const obj = raw && typeof raw === 'object' ? raw : {};
-  for (const key of ['openLinksInApp', 'keepInBackground', 'backgroundHintShown', 'downloadsAskWhere', 'safeBrowsingEnabled', 'pictureInPictureAuto']) {
+  for (const key of ['openLinksInApp', 'keepInBackground', 'backgroundHintShown', 'downloadsAskWhere', 'safeBrowsingEnabled', 'httpsFirstEnabled', 'pictureInPictureAuto']) {
     if (typeof obj[key] === 'boolean') out[key] = obj[key];
   }
   if (THEME_SOURCES.includes(obj.themeSource)) {
