@@ -428,6 +428,18 @@ const desktopBridge = {
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposePortalBridges && { downloads: downloadsBridge }),
   ...(exposePortalBridges && !vmMode && { browserImport: browserImportBridge }),
+  /**
+   * Profils de navigation (docs/browser-profiles.md) : `setContext({ owner, profileId, workspace })` avant les
+   * onglets web de la fenêtre ; `forget({ owner, profileId })` efface un profil retiré de cet ordinateur.
+   */
+  ...(exposePortalBridges && !vmMode && {
+    browserProfiles: {
+      version: 1,
+      setContext: (payload) => ipcRenderer.invoke('browser-profile-set-context', payload),
+      getContext: () => ipcRenderer.invoke('browser-profile-get-context'),
+      forget: (payload) => ipcRenderer.invoke('browser-profile-forget', payload),
+    },
+  }),
   /** Navigation privée (docs/private-browsing.md) : menu ☰ du navigateur du portail. */
   ...(exposePortalBridges && !vmMode && {
     privateBrowsing: { openWindow: () => ipcRenderer.invoke('private-window-open') },
