@@ -15,6 +15,7 @@
  *  - the `window.chrome` properties Chrome defines on every page.
  */
 
+const { webRequestHub } = require('./web-request-hub');
 const NOT_A_BRAND = { brand: 'Not?A_Brand', version: '24' };
 
 const PLATFORMS = {
@@ -280,10 +281,11 @@ function createClientHintPolicy({ meta = buildUserAgentMetadata(), now = () => D
 
 /** Indices du client sur les requêtes HTTPS de la session des onglets web (jamais en HTTP, comme Chrome). */
 function installClientHintHeaders(browserSession, policy = createClientHintPolicy()) {
-  browserSession.webRequest.onBeforeSendHeaders({ urls: ['https://*/*'] }, (details, callback) => {
+  const hub = webRequestHub(browserSession);
+  hub.add('onBeforeSendHeaders', (details, callback) => {
     callback({ requestHeaders: policy.requestHeaders(details.url, details.requestHeaders) });
-  });
-  browserSession.webRequest.onHeadersReceived({ urls: ['https://*/*'] }, (details, callback) => {
+  }, { urls: ['https://*/*'] });
+  hub.add('onHeadersReceived', (details, callback) => {
     const { restart } = policy.onResponse(details);
     if (!restart) {
       callback({});
@@ -297,7 +299,7 @@ function installClientHintHeaders(browserSession, policy = createClientHintPolic
     }
     responseHeaders.Location = [details.url];
     callback({ responseHeaders, statusLine: 'HTTP/1.1 307 Temporary Redirect' });
-  });
+  }, { urls: ['https://*/*'] });
   return policy;
 }
 

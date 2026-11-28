@@ -323,6 +323,32 @@ const driveSyncBridge = {
  * Téléchargements des onglets web et des pages du portail (docs/downloads.md). La page agit par
  * identifiant, jamais par chemin ; le dossier se choisit dans les Réglages de Desktop.
  */
+/**
+ * Extensions Chrome des onglets web (docs/extensions.md) : barre d'outils (puzzle, boutons
+ * épinglés, popups), page Extensions, demandes d'autorisation à l'installation.
+ */
+const browserExtensionsBridge = {
+  /** La coquille affiche les demandes d'autorisation (`texts` : textes de secours, `locales`). */
+  ready: (payload) => ipcRenderer.invoke('browser-extensions-ready', payload),
+  list: (payload) => ipcRenderer.invoke('browser-extensions-list', payload),
+  getActions: (payload) => ipcRenderer.invoke('browser-extensions-get-actions', payload),
+  activateAction: (payload) => ipcRenderer.invoke('browser-extensions-activate-action', payload),
+  install: (payload) => ipcRenderer.invoke('browser-extensions-install', payload),
+  installUnpacked: () => ipcRenderer.invoke('browser-extensions-install-unpacked'),
+  uninstall: (payload) => ipcRenderer.invoke('browser-extensions-uninstall', payload),
+  setEnabled: (payload) => ipcRenderer.invoke('browser-extensions-set-enabled', payload),
+  setPinned: (payload) => ipcRenderer.invoke('browser-extensions-set-pinned', payload),
+  setSiteAccess: (payload) => ipcRenderer.invoke('browser-extensions-set-site-access', payload),
+  setDeveloperMode: (payload) => ipcRenderer.invoke('browser-extensions-set-developer-mode', payload),
+  setPolicy: (payload) => ipcRenderer.invoke('browser-extensions-set-policy', payload),
+  acceptPermissions: (payload) => ipcRenderer.invoke('browser-extensions-accept-permissions', payload),
+  checkForUpdates: () => ipcRenderer.invoke('browser-extensions-check-updates'),
+  openOptions: (payload) => ipcRenderer.invoke('browser-extensions-open-options', payload),
+  respondInstall: (payload) => ipcRenderer.invoke('browser-extensions-respond-install', payload),
+  onChange: (callback) => subscribe('browser-extensions-changed', callback),
+  onInstallRequest: (callback) => subscribe('browser-extensions-install-request', callback),
+};
+
 const downloadsBridge = {
   list: (payload) => ipcRenderer.invoke('downloads-list', payload),
   pause: (id) => ipcRenderer.invoke('downloads-pause', { id }),
@@ -405,6 +431,7 @@ const desktopBridge = {
   ...(exposeVmShell && { vm: vmShellBridge }),
   ...(exposePortalBridges && tabWindowInfo.role === 'main' && { driveSync: driveSyncBridge }),
   ...(exposePortalBridges && { downloads: downloadsBridge }),
+  ...(exposePortalBridges && !vmMode && { browserExtensions: browserExtensionsBridge }),
   ...(exposePortalBridges && !vmMode && { browserImport: browserImportBridge }),
   /** Navigation privée (docs/private-browsing.md) : menu ☰ du navigateur du portail. */
   ...(exposePortalBridges && !vmMode && {

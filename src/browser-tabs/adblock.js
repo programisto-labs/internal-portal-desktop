@@ -16,6 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const { siteOrigin, siteHost } = require('./site-permissions');
+const { webRequestHub } = require('./web-request-hub');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Un téléchargement raté est retenté au plus tôt une heure plus tard. */
@@ -404,7 +405,8 @@ function createAdblockService({ userDataDir, electron }) {
         },
         Request: { fromRawDetails: (raw) => ghostery().Request.fromRawDetails(raw) },
       });
-      browserSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, filter);
+      // Un seul écouteur webRequest par session : passe par le répartiteur (docs/extensions.md).
+      webRequestHub(browserSession).add('onBeforeRequest', filter);
       const cosmetic = createCosmeticHandlers({
         getEngine: loader.getEngine,
         settings,
