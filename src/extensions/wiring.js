@@ -35,6 +35,7 @@ function createExtensionsWiring({ electron, userDataDir, chromeVersion, portalWi
   }
 
   function ownerOf(webContents) {
+    if (!webContents || webContents.isDestroyed()) return null;
     for (const entry of managers()) {
       const tabId = entry.tabManager.tabIdOfWebContents(webContents);
       if (tabId) return { entry, tabId };
@@ -59,7 +60,16 @@ function createExtensionsWiring({ electron, userDataDir, chromeVersion, portalWi
     return webContents ? { webContents, window: entry.win } : null;
   }
 
+  /**
+   * Onglets que Lasco ferme lui-même (croix, ⌘W, `window.close()` de la page) : la bibliothèque
+   * rappelle `removeTab` quand elle oublie l'onglet, ce n'est pas une demande de fermeture.
+   */
+  const closedByLasco = new WeakSet();
+
   function tabAction(webContents, action) {
+    // Page qui s'est fermée seule (`window.close()`) : vue déjà détruite, rien à relayer.
+    // Y toucher lèverait « Object has been destroyed » dans le processus principal.
+    if (!webContents || webContents.isDestroyed()) return;
     const owner = ownerOf(webContents);
     if (!owner) {
       // Onglet d'une fenêtre ouverte par une extension : la fenêtre se ferme avec lui.
@@ -112,7 +122,12 @@ function createExtensionsWiring({ electron, userDataDir, chromeVersion, portalWi
   const sessionHooks = {
     createTab: openTab,
     selectTab: (webContents) => tabAction(webContents, 'activate'),
-    removeTab: (webContents) => tabAction(webContents, 'close'),
+    // `chrome.tabs.remove` d'une extension. Aussi rappelé quand la bibliothèque oublie un onglet
+    // fermé par Lasco ou par la page : ignoré, sinon la coquille recevrait une fermeture en double.
+    removeTab: (webContents) => {
+      if (!webContents || closedByLasco.has(webContents)) return;
+      tabAction(webContents, 'close');
+    },
     createWindow,
     isExtensionWindow: (win) => extensionWindows.has(win),
     windowForWebContents: (webContents) => {
@@ -134,7 +149,10 @@ function createExtensionsWiring({ electron, userDataDir, chromeVersion, portalWi
         service.attachSession(browserSession, { profileId: profileIdForPartition(partition), hooks: sessionHooks }),
       onTabCreated: (webContents) => service.addTab(webContents.session, webContents, win),
       onTabSelected: (webContents) => service.selectTab(webContents.session, webContents),
-      onTabDestroyed: (webContents) => service.removeTab(webContents.session, webContents),
+      onTabDestroyed: (webContents) => {
+        closedByLasco.add(webContents);
+        service.removeTab(webContents.session, webContents);
+      },
       contextMenuItems: (webContents, params) => service.contextMenuItems(webContents.session, webContents, params),
     };
   }
