@@ -58,8 +58,13 @@ function sanitizeTabDescriptor(raw, { sanitizeBrowserUrl }) {
 }
 
 /** Window identity handed to the page through `additionalArguments` (read synchronously by the preload). */
-function encodeTabWindowArg({ role, initialTab }) {
-  const payload = { role: role === 'detached' ? 'detached' : 'main', initialTab: initialTab || null };
+function encodeTabWindowArg({ role, initialTab, windowKey = null }) {
+  const payload = {
+    role: role === 'detached' ? 'detached' : 'main',
+    initialTab: initialTab || null,
+    // Key of the window in the tab model (docs/tab-model.md).
+    ...(typeof windowKey === 'string' && windowKey ? { windowKey } : {}),
+  };
   return TAB_WINDOW_ARG_PREFIX + Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
 }
 
@@ -75,6 +80,7 @@ function decodeTabWindowArg(argv, { decodeBase64 } = {}) {
     return {
       role: parsed.role === 'detached' ? 'detached' : 'main',
       initialTab: parsed.initialTab && typeof parsed.initialTab === 'object' ? parsed.initialTab : null,
+      windowKey: typeof parsed.windowKey === 'string' && parsed.windowKey ? parsed.windowKey : null,
     };
   } catch (_) {
     return null;
