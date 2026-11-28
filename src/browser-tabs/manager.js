@@ -124,6 +124,9 @@ async function fetchSearchDescription(url) {
 }
 const AGENT_SCRIPT_TIMEOUT_MS = 10_000;
 const AGENT_SETTLE_MAX_MS = 8_000;
+/** DOM calme : aucune mutation pendant 400 ms, 3 s d'attente au plus. */
+const AGENT_QUIET_MS = 400;
+const AGENT_QUIET_MAX_MS = 3_000;
 const AGENT_MAX_WAIT_MS = 10_000;
 
 const NAMED_KEYS = {
@@ -2577,9 +2580,23 @@ function createBrowserTabManager({
     }
   }
 
-  async function settleAndSnapshot(wc) {
-    await delay(350);
+  /**
+   * Après une action : chargement fini, puis DOM calme (400 ms sans mutation, 3 s au plus), au lieu d'un délai fixe.
+   * Chaque onglet piloté attend pour lui-même : plusieurs onglets d'agents avancent en parallèle (docs/agent-tabs.md).
+   */
+  async function waitForStablePage(wc) {
+    await delay(120);
     await waitForLoadStop(wc, AGENT_SETTLE_MAX_MS);
+    try {
+      await runPageScript(wc, { op: 'settle', quietMs: AGENT_QUIET_MS, maxMs: AGENT_QUIET_MAX_MS });
+    } catch (_) {
+      // Navigation pendant l'attente : le document change, la fin du chargement suffit.
+      await waitForLoadStop(wc, AGENT_SETTLE_MAX_MS);
+    }
+  }
+
+  async function settleAndSnapshot(wc) {
+    await waitForStablePage(wc);
     try {
       return await runPageScript(wc, { op: 'snapshot', maxElements: 120, maxText: 3000 });
     } catch (_) {
@@ -2650,7 +2667,7 @@ function createBrowserTabManager({
     try {
       switch (action) {
         case 'snapshot': {
-          await waitForLoadStop(wc, AGENT_SETTLE_MAX_MS);
+          await waitForStablePage(wc);
           const page = await runPageScript(wc, {
             op: 'snapshot',
             maxElements: payload.maxElements,
