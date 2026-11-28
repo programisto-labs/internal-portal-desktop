@@ -36,6 +36,7 @@ const {
   safeBrowsingPageFromUrl,
 } = require('./page-errors');
 const { buildPageAgentScript } = require('./agent-dom');
+const { createAgentCdp, AgentActionError, ERROR_HINTS: AGENT_ERROR_HINTS, MAX_UPLOAD_BYTES: AGENT_MAX_UPLOAD_BYTES } = require('./agent-cdp');
 const {
   PIP_WORLD_ID,
   PAGE_MEDIA_PROBE_SCRIPT,
@@ -84,6 +85,7 @@ const {
   discoverSiteSearchEngine,
 } = require('./search-engines');
 const path = require('path');
+const fs = require('fs');
 const { randomUUID } = require('crypto');
 const {
   assertInMemoryPartition,
@@ -3220,7 +3222,131 @@ function createBrowserTabManager({
     return { ok: true, tabId, active: agentControlled.has(tabId) };
   }
 
+  /** Moteur CDP de l'onglet (docs/agent-actuation.md), recréé quand la vue change. */
+  function agentCdpOf(entry) {
+    const wc = entry.view.webContents;
+    if (!entry.agentCdp || entry.agentCdpWc !== wc) {
+      entry.agentCdp = createAgentCdp(wc);
+      entry.agentCdpWc = wc;
+    }
+    return entry.agentCdp;
+  }
+
+  /** Fichier Lasco à déposer : téléchargé (http(s), 25 Mo au plus) dans un dossier temporaire, effacé après 10 min. */
+  async function downloadAgentUpload(url, fileName) {
+    let parsed;
+    try {
+      parsed = new URL(String(url || ''));
+    } catch (_) {
+      throw new AgentActionError('upload-failed');
+    }
+    const local = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+    if (parsed.protocol !== 'https:' && !(local && parsed.protocol === 'http:')) throw new AgentActionError('upload-failed');
+    const response = await net.fetch(parsed.href, { redirect: 'follow' });
+    if (!response.ok) throw new AgentActionError('upload-failed');
+    const declared = Number(response.headers.get('content-length') || 0);
+    if (declared > AGENT_MAX_UPLOAD_BYTES) throw new AgentActionError('file-too-large');
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > AGENT_MAX_UPLOAD_BYTES) throw new AgentActionError('file-too-large');
+    const safeName = String(fileName || 'fichier').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 120) || 'fichier';
+    const dir = fs.mkdtempSync(path.join(app.getPath('temp'), 'lasco-agent-upload-'));
+    const file = path.join(dir, safeName);
+    fs.writeFileSync(file, buffer, { mode: 0o600 });
+    setTimeout(() => fs.rm(dir, { recursive: true, force: true }, () => {}), 10 * 60_000).unref?.();
+    return file;
+  }
+
+  function agentFailure(error) {
+    if (error instanceof AgentActionError) {
+      const hint = AGENT_ERROR_HINTS[error.code];
+      return { ok: false, error: error.code, ...(hint ? { message: hint } : {}), ...error.details };
+    }
+    return null;
+  }
+
+  /**
+   * AI agent browser automation on one tab (docs/agent-actuation.md). CDP engine: accessibility tree with
+   * stable refs, real input events, wait for stability, guard on writes and sensitive fields. Returns the
+   * new page state after every action. The legacy DOM engine (agent-dom.js) stays as a fallback.
+   */
   async function agentAction(payload) {
+    const { tabId, action } = payload || {};
+    const entry = liveOrWokenEntry(tabId);
+    if (!entry) return { ok: false, error: 'unknown-tab' };
+    const wc = entry.view.webContents;
+    const guard = payload && payload.guard && typeof payload.guard === 'object' ? payload.guard : null;
+    if (payload && payload.engine === 'dom') return legacyAgentAction(payload);
+    const cdp = agentCdpOf(entry);
+    try {
+      switch (action) {
+        case 'snapshot': {
+          await waitForLoadStop(wc, AGENT_SETTLE_MAX_MS);
+          const page = await cdp.snapshot({
+            maxElements: payload.maxElements,
+            maxText: payload.maxText,
+            includeText: payload.includeText !== false,
+          });
+          return { ok: true, page };
+        }
+        case 'screenshot':
+        case 'wait':
+          return action === 'wait' ? await cdp.wait(payload.ms) : legacyAgentAction(payload);
+        case 'click': {
+          if (typeof payload.ref === 'string' && payload.ref) {
+            return await withPageFocus(wc, () => cdp.click(payload.ref, { doubleClick: Boolean(payload.doubleClick), guard }), tabId);
+          }
+          const point = await resolvePoint(entry, payload);
+          if (!point.ok) return point;
+          const zoomFactor = wc.getZoomFactor() || 1;
+          // DIP de la vue → CSS px de la page.
+          return await withPageFocus(wc, () => cdp.clickPoint({ x: point.x / zoomFactor, y: point.y / zoomFactor }, { guard }), tabId);
+        }
+        case 'hover':
+          return await cdp.hover(payload.ref);
+        case 'type':
+          return await withPageFocus(
+            wc,
+            () => cdp.type(payload.ref, typeof payload.text === 'string' ? payload.text : '', {
+              clear: payload.ref ? payload.clear !== false : Boolean(payload.clear),
+              submit: Boolean(payload.submit),
+              guard,
+            }),
+            tabId,
+          );
+        case 'press':
+          return await withPageFocus(wc, () => cdp.press(payload.key, { ref: payload.ref, guard }), tabId);
+        case 'scroll':
+          return await cdp.scroll({ ref: payload.ref, direction: payload.direction, amount: payload.amount });
+        case 'select_option':
+          return await cdp.select(payload.ref, payload.value);
+        case 'upload': {
+          // Garde d'abord (sans télécharger le fichier pour rien), puis dépôt.
+          if (guard && guard.writeGate && guard.approved !== true) {
+            return await cdp.upload(payload.ref, '', { guard });
+          }
+          const file = await downloadAgentUpload(payload.url, payload.fileName);
+          return await cdp.upload(payload.ref, file, { guard });
+        }
+        case 'dialog':
+          return cdp.planDialog({ accept: payload.accept === true, text: payload.text, message: payload.message, guard });
+        default:
+          return { ok: false, error: 'unknown-action' };
+      }
+    } catch (error) {
+      const failure = agentFailure(error);
+      if (failure) return failure;
+      // CDP indisponible (débogueur pris par un autre outil, ancien Chromium) : moteur DOM.
+      if (['snapshot', 'click', 'type', 'press', 'scroll', 'select_option'].includes(action) && !wc.isDestroyed()) {
+        if (guard && guard.writeGate && guard.approved !== true && (action === 'click' || action === 'press' || (action === 'type' && payload.submit))) {
+          return { ok: false, error: 'engine-unavailable', message: "Moteur de pilotage indisponible sur cette page : l'action d'écriture n'est pas faite. Réessaie dans un instant." };
+        }
+        return legacyAgentAction(payload);
+      }
+      return { ok: false, error: error instanceof Error ? error.message : 'agent-action-failed' };
+    }
+  }
+
+  async function legacyAgentAction(payload) {
     const { tabId, action } = payload || {};
     const entry = liveOrWokenEntry(tabId);
     if (!entry) return { ok: false, error: 'unknown-tab' };

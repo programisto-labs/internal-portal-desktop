@@ -184,6 +184,11 @@ function pageAgentRuntime(command) {
   const focusRef = (ref, clear) => {
     const el = resolveRef(ref);
     if (!el) return { ok: false, error: 'stale-ref' };
+    // Mot de passe, carte, code : jamais rempli par un agent (browser_login passe par le Coffre).
+    const autocomplete = String(el.getAttribute('autocomplete') || '').toLowerCase();
+    if (el.type === 'password' || /(^|\s)(current-password|new-password|one-time-code|cc-[a-z-]+)(\s|$)/.test(autocomplete)) {
+      return { ok: false, error: 'sensitive-field' };
+    }
     el.focus();
     if (clear) {
       el.removeAttribute('data-lasco-autofill');

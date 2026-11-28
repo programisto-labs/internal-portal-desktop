@@ -1,5 +1,7 @@
 # Onglets pilotés par des agents, en arrière-plan
 
+Lecture et actions dans la page (arbre d’accessibilité, entrées CDP, garde des écritures) : `docs/agent-actuation.md`.
+
 Comme Claude dans Chrome : un agent travaille dans SES onglets sans les passer au premier plan, et la personne continue dans les siens. **Plusieurs onglets à la fois** : un tour d'agent et ses sous-agents (`delegate_tasks`) pilotent chacun leurs onglets, en parallèle. Le portail marque chaque onglet (pastille et liseré à la couleur de l'agent, bannière « {agent} travaille dans cet onglet » avec « Reprendre la main », par onglet). Voir `lib/portal-tabs/agent-tab-control.ts` du portail et `docs/specs/agent/EPIC-agent-multi-tab.md`.
 
 ## Pont
