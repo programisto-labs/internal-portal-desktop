@@ -14,8 +14,8 @@ const path = require('path');
 const LEGACY_BROWSER_PARTITION = 'persist:browser-tabs';
 const DEFAULT_PROFILE_ID = 'default';
 const PROFILE_ID_PATTERN = /^(default|bp_[0-9a-f]{16})$/;
-/** Empreinte du compte (sujet du JWT haché par le portail) : hexadécimal, 12 caractères gardés. */
-const OWNER_PATTERN = /^[0-9a-f]{12,128}$/;
+/** Empreinte du compte (sujet du JWT haché par le portail, base 36) : 12 caractères gardés. */
+const OWNER_PATTERN = /^[0-9a-z]{6,64}$/;
 const WORKSPACE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 function normalizeOwner(value) {
