@@ -11,7 +11,7 @@ Lasco Desktop enregistre lui-même les fichiers téléchargés depuis les onglet
 
 ## Fichiers créés par Lasco
 
-Une capture d'écran (docs/page-capture.md) passe par `saveFile` du service : même dossier, même nommage sans écraser, ajoutée à la liste comme un téléchargement terminé.
+Une capture d'écran (docs/page-capture.md) et « Enregistrer en PDF » d'un onglet web (docs/zoom-and-pdf.md) passent par `saveFile` du service : même dossier, même nommage sans écraser, ajoutée à la liste comme un téléchargement terminé.
 
 ## Onglet ouvert seulement pour un fichier
 
