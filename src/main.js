@@ -17,7 +17,13 @@ const { pdfFilename } = require('./browser-tabs/page-pdf');
 const { PERMISSION_NAMES, siteOrigin } = require('./browser-tabs/site-permissions');
 const { sanitizeBrowserUrl } = require('./browser-tabs/url');
 const { createSettingsStore, extractPortalTarget, buildBrowserOpenRequest, THEME_SOURCES } = require('./link-handling');
-const { TAB_SLEEP_DELAY_CHOICES, normalizeSiteHost, resolveTabSleepDelayMs } = require('./browser-tabs/tab-sleep');
+const {
+  TAB_SLEEP_DELAY_CHOICES,
+  TAB_SLEEP_MAX_LIVE_CHOICES,
+  normalizeSiteHost,
+  resolveTabSleepDelayMs,
+} = require('./browser-tabs/tab-sleep');
+const { summarizeAppMetrics } = require('./perf-metrics');
 const {
   classifyIncomingUrl,
   defaultBrowserSnapshot,
@@ -1278,7 +1284,26 @@ const TAB_SLEEP_CHANNEL = 'browser-tab-sleep-changed';
 function tabSleepSnapshot() {
   const settings = getSettings();
   const delayMs = VM_MODE ? 0 : resolveTabSleepDelayMs(settings);
-  return { delayMs, minutes: settings.tabSleepMinutes, neverSites: settings.tabSleepNeverSites || [] };
+  return {
+    delayMs,
+    minutes: settings.tabSleepMinutes,
+    neverSites: settings.tabSleepNeverSites || [],
+    // Onglets gardés actifs en arrière-plan (0 = sans limite), épinglés mis en veille ou non (docs/many-tabs-perf.md).
+    maxLive: VM_MODE ? 0 : settings.tabSleepMaxLive,
+    sleepPinned: settings.tabSleepPinned === true,
+  };
+}
+
+/** Relevé agrégé de la mémoire et du CPU (docs/many-tabs-perf.md) : totaux seulement, aucune adresse. */
+function perfSnapshot() {
+  let webLive = 0;
+  let webSleeping = 0;
+  for (const entry of portalWindows.values()) {
+    if (!entry.tabManager) continue;
+    webLive += entry.tabManager.tabIds().length;
+    webSleeping += entry.tabManager.sleepingTabIds().length;
+  }
+  return summarizeAppMetrics(app.getAppMetrics(), { webLive, webSleeping });
 }
 
 function broadcastTabSleepSettings() {
@@ -2947,6 +2972,9 @@ function registerWindowIPC() {
         minutes: settings.tabSleepMinutes,
         choices: TAB_SLEEP_DELAY_CHOICES,
         neverSites: settings.tabSleepNeverSites || [],
+        maxLive: settings.tabSleepMaxLive,
+        maxLiveChoices: TAB_SLEEP_MAX_LIVE_CHOICES,
+        sleepPinned: settings.tabSleepPinned === true,
         // LASCO_TAB_SLEEP_MS (développement) remplace le délai choisi.
         overrideMs: Number(process.env.LASCO_TAB_SLEEP_MS) > 0 ? resolveTabSleepDelayMs(settings) : null,
       },
@@ -3410,6 +3438,8 @@ function registerWindowIPC() {
     'browser-autofill-fill': 'autofillFill',
     // Onglet piloté par un agent en arrière-plan (docs/agent-tabs.md).
     'browser-tab-set-agent-control': 'setAgentControl',
+    // Onglet épinglé : gardé éveillé par l'économiseur de mémoire (docs/many-tabs-perf.md).
+    'browser-tab-set-pinned': 'setPinned',
     // Économiseur de mémoire (docs/tab-sleep.md) : mettre un onglet en veille tout de suite.
     'browser-tab-sleep': 'sleep',
   };
@@ -3427,6 +3457,26 @@ function registerWindowIPC() {
   ipcMain.handle('browser-tab-sleep-get', (event) => {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
     return { ok: true, ...tabSleepSnapshot() };
+  });
+  ipcMain.handle('desktop-perf-snapshot', (event) => {
+    if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
+    try {
+      return { ok: true, ...perfSnapshot() };
+    } catch (error) {
+      return { ok: false, error: 'unavailable' };
+    }
+  });
+  ipcMain.handle('settings-modal-tab-sleep-set-max-live', (event, maxLive) => {
+    if (!fromSettings(event) || !TAB_SLEEP_MAX_LIVE_CHOICES.includes(maxLive)) return false;
+    getSettingsStore().set({ tabSleepMaxLive: maxLive });
+    broadcastTabSleepSettings();
+    return true;
+  });
+  ipcMain.handle('settings-modal-tab-sleep-set-pinned', (event, value) => {
+    if (!fromSettings(event) || typeof value !== 'boolean') return false;
+    getSettingsStore().set({ tabSleepPinned: value });
+    broadcastTabSleepSettings();
+    return true;
   });
   ipcMain.handle('browser-tab-sleep-manage', (event) => {
     if (!portalWindowEntry(BrowserWindow.fromWebContents(event.sender))) return { ok: false, error: 'forbidden' };
